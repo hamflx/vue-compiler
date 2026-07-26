@@ -1126,10 +1126,24 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vec::new();
     }
-    files
-        .into_iter()
-        .filter(|file| vue3_tsconfig_glob_matches(&glob.pattern, &normalize_path_string(file)))
-        .collect()
+    let matcher = Vue3CompiledTsconfigGlob::new(&glob.pattern);
+    let mut budget = type_resolver
+        .external_type_session
+        .tsconfig_glob_match_budget();
+    let mut matched = Vec::new();
+    for file in files {
+        let path = normalize_path_string(&file);
+        match matcher.matches(&path, &mut || budget.claim_step()) {
+            Some(true) => matched.push(file),
+            Some(false) => {}
+            None => break,
+        }
+    }
+    if !budget.finish() || type_resolver.external_type_session.metadata_is_blocked() {
+        Vec::new()
+    } else {
+        matched
+    }
 }
 
 pub(crate) fn vue3_tsconfig_include_can_match_global_type_files(target: &str) -> bool {
@@ -1314,57 +1328,213 @@ fn vue3_collect_global_type_files_from_dir_inner(
     }
 }
 
+struct Vue3CompiledTsconfigGlob<'a> {
+    parts: Vec<&'a str>,
+}
+
+impl<'a> Vue3CompiledTsconfigGlob<'a> {
+    fn new(pattern: &'a str) -> Self {
+        Self::from_parts(pattern.split('/'))
+    }
+
+    fn from_parts(parts: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut compiled = Vec::new();
+        for part in parts {
+            if part == "**" && compiled.last().copied() == Some("**") {
+                continue;
+            }
+            compiled.push(part);
+        }
+        Self { parts: compiled }
+    }
+
+    fn matches(
+        &self,
+        path: &str,
+        claim_step: &mut impl FnMut() -> bool,
+    ) -> Option<bool> {
+        let path_parts = path.split('/').collect::<Vec<_>>();
+        self.matches_parts(&path_parts, claim_step)
+    }
+
+    fn matches_parts(
+        &self,
+        path: &[&str],
+        claim_step: &mut impl FnMut() -> bool,
+    ) -> Option<bool> {
+        if !claim_step() {
+            return None;
+        }
+        let mut pattern_index = 0;
+        let mut path_index = 0;
+        let mut double_star_pattern_index = None;
+        let mut double_star_path_index = 0;
+        while path_index < path.len() {
+            if !claim_step() {
+                return None;
+            }
+            if self.parts.get(pattern_index).copied() == Some("**") {
+                double_star_pattern_index = Some(pattern_index);
+                double_star_path_index = path_index;
+                pattern_index += 1;
+                continue;
+            }
+            let segment_matches = match self.parts.get(pattern_index) {
+                Some(pattern) => vue3_tsconfig_glob_segment_match_bounded(
+                    pattern,
+                    path[path_index],
+                    claim_step,
+                )?,
+                None => false,
+            };
+            if segment_matches {
+                pattern_index += 1;
+                path_index += 1;
+                continue;
+            }
+            let Some(double_star_index) = double_star_pattern_index else {
+                return Some(false);
+            };
+            if !claim_step() {
+                return None;
+            }
+            double_star_path_index += 1;
+            path_index = double_star_path_index;
+            pattern_index = double_star_index + 1;
+        }
+        while self.parts.get(pattern_index).copied() == Some("**") {
+            if !claim_step() {
+                return None;
+            }
+            pattern_index += 1;
+        }
+        Some(pattern_index == self.parts.len())
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern: std::borrow::Cow<'_, str> = if pattern.contains('\\') {
+        std::borrow::Cow::Owned(pattern.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(pattern)
+    };
+    let path: std::borrow::Cow<'_, str> = if path.contains('\\') {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    };
+    Vue3CompiledTsconfigGlob::new(&pattern)
+        .matches(&path, &mut || true)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(crate) fn vue3_tsconfig_glob_matches_with_session(
+    pattern: &str,
+    path: &str,
+    session: &Vue3ExternalTypeLoadSession,
+) -> Option<bool> {
     let pattern = pattern.replace('\\', "/");
     let path = path.replace('\\', "/");
-    let pattern_parts = pattern.split('/').collect::<Vec<_>>();
-    let path_parts = path.split('/').collect::<Vec<_>>();
-    vue3_tsconfig_glob_parts_match(&pattern_parts, &path_parts)
+    let matcher = Vue3CompiledTsconfigGlob::new(&pattern);
+    let mut budget = session.tsconfig_glob_match_budget();
+    let result = matcher.matches(&path, &mut || budget.claim_step());
+    if budget.finish() {
+        result
+    } else {
+        None
+    }
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_glob_parts_match(pattern: &[&str], path: &[&str]) -> bool {
-    let mut previous = vec![false; path.len() + 1];
-    let mut current = vec![false; path.len() + 1];
-    previous[0] = true;
-    for pattern_part in pattern {
-        current.fill(false);
-        if *pattern_part == "**" {
-            current[0] = previous[0];
-            for path_index in 1..=path.len() {
-                current[path_index] = previous[path_index] || current[path_index - 1];
-            }
-        } else {
-            for path_index in 1..=path.len() {
-                current[path_index] = previous[path_index - 1]
-                    && vue3_tsconfig_glob_segment_match(pattern_part, path[path_index - 1]);
-            }
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[path.len()]
+    Vue3CompiledTsconfigGlob::from_parts(pattern.iter().copied())
+        .matches_parts(path, &mut || true)
+        .unwrap_or(false)
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_glob_segment_match(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.chars().collect::<Vec<_>>();
-    let text = text.chars().collect::<Vec<_>>();
-    let mut previous = vec![false; text.len() + 1];
-    previous[0] = true;
-    for pattern_ch in pattern {
-        let mut current = vec![false; text.len() + 1];
-        if pattern_ch == '*' {
-            current[0] = previous[0];
-            for index in 1..=text.len() {
-                current[index] = previous[index] || current[index - 1];
+    vue3_tsconfig_glob_segment_match_bounded(pattern, text, &mut || true).unwrap_or(false)
+}
+
+fn vue3_tsconfig_glob_segment_match_bounded(
+    pattern: &str,
+    text: &str,
+    claim_step: &mut impl FnMut() -> bool,
+) -> Option<bool> {
+    if !claim_step() {
+        return None;
+    }
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_pattern_index = None;
+    let mut star_text_index = 0;
+    while text_index < text.len() {
+        if !claim_step() {
+            return None;
+        }
+        let pattern_char = vue3_tsconfig_glob_next_char(pattern, pattern_index);
+        let (text_char, next_text_index) =
+            vue3_tsconfig_glob_next_char(text, text_index).expect("valid glob text index");
+        match pattern_char {
+            Some(('*', mut next_pattern_index)) => {
+                while let Some(('*', next_index)) =
+                    vue3_tsconfig_glob_next_char(pattern, next_pattern_index)
+                {
+                    if !claim_step() {
+                        return None;
+                    }
+                    next_pattern_index = next_index;
+                }
+                star_pattern_index = Some(next_pattern_index);
+                star_text_index = text_index;
+                pattern_index = next_pattern_index;
+                if pattern_index == pattern.len() {
+                    return Some(true);
+                }
             }
-        } else {
-            for index in 1..=text.len() {
-                current[index] =
-                    previous[index - 1] && (pattern_ch == '?' || pattern_ch == text[index - 1]);
+            Some(('?', next_pattern_index)) => {
+                pattern_index = next_pattern_index;
+                text_index = next_text_index;
+            }
+            Some((pattern_char, next_pattern_index)) if pattern_char == text_char => {
+                pattern_index = next_pattern_index;
+                text_index = next_text_index;
+            }
+            _ => {
+                let Some(retry_pattern_index) = star_pattern_index else {
+                    return Some(false);
+                };
+                if !claim_step() {
+                    return None;
+                }
+                let Some((_, next_star_text_index)) =
+                    vue3_tsconfig_glob_next_char(text, star_text_index)
+                else {
+                    return Some(false);
+                };
+                star_text_index = next_star_text_index;
+                text_index = next_star_text_index;
+                pattern_index = retry_pattern_index;
             }
         }
-        previous = current;
     }
-    previous[text.len()]
+    while let Some(('*', next_pattern_index)) =
+        vue3_tsconfig_glob_next_char(pattern, pattern_index)
+    {
+        if !claim_step() {
+            return None;
+        }
+        pattern_index = next_pattern_index;
+    }
+    Some(pattern_index == pattern.len())
+}
+
+fn vue3_tsconfig_glob_next_char(source: &str, index: usize) -> Option<(char, usize)> {
+    let ch = source.get(index..)?.chars().next()?;
+    Some((ch, index + ch.len_utf8()))
 }
 
 #[cfg(test)]

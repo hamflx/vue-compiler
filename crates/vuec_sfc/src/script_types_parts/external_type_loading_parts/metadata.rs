@@ -66,7 +66,57 @@ impl Drop for Vue3PackageResolutionGuard<'_> {
     }
 }
 
+struct Vue3TsconfigGlobMatchBudget<'a> {
+    session: &'a Vue3ExternalTypeLoadSession,
+    state: Option<std::sync::MutexGuard<'a, Vue3ExternalTypeLoadState>>,
+    exhausted: bool,
+}
+
+impl<'a> Vue3TsconfigGlobMatchBudget<'a> {
+    fn new(session: &'a Vue3ExternalTypeLoadSession) -> Self {
+        let state = session.lock();
+        let exhausted = state.metadata_blocked;
+        Self {
+            session,
+            state: Some(state),
+            exhausted,
+        }
+    }
+
+    fn claim_step(&mut self) -> bool {
+        let state = self.state.as_mut().expect("glob budget state");
+        if state.metadata_blocked
+            || state.stats.tsconfig_glob_match_steps
+                >= state.limits.max_tsconfig_glob_match_steps
+        {
+            self.exhausted = true;
+            return false;
+        }
+        state.stats.tsconfig_glob_match_steps += 1;
+        true
+    }
+
+    fn finish(self) -> bool {
+        let state = self.state.as_ref().expect("glob budget state");
+        !self.exhausted && !state.metadata_blocked
+    }
+}
+
+impl Drop for Vue3TsconfigGlobMatchBudget<'_> {
+    fn drop(&mut self) {
+        let exhausted = self.exhausted;
+        drop(self.state.take());
+        if exhausted {
+            self.session.block_metadata();
+        }
+    }
+}
+
 impl Vue3ExternalTypeLoadSession {
+    fn tsconfig_glob_match_budget(&self) -> Vue3TsconfigGlobMatchBudget<'_> {
+        Vue3TsconfigGlobMatchBudget::new(self)
+    }
+
     #[cfg(test)]
     fn metadata_source_from_path(&self, path: &Path) -> Option<std::sync::Arc<String>> {
         let cache_key = self.metadata_cache_key(path)?;

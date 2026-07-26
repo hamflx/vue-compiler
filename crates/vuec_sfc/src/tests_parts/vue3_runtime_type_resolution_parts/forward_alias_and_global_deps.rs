@@ -530,6 +530,141 @@ defineProps<
         );
     }
 
+    fn vue3_test_glob_segment_dp(pattern: &str, text: &str) -> bool {
+        let pattern = pattern.chars().collect::<Vec<_>>();
+        let text = text.chars().collect::<Vec<_>>();
+        let mut previous = vec![false; text.len() + 1];
+        previous[0] = true;
+        for pattern_ch in pattern {
+            let mut current = vec![false; text.len() + 1];
+            if pattern_ch == '*' {
+                current[0] = previous[0];
+                for index in 1..=text.len() {
+                    current[index] = previous[index] || current[index - 1];
+                }
+            } else {
+                for index in 1..=text.len() {
+                    current[index] = previous[index - 1]
+                        && (pattern_ch == '?' || pattern_ch == text[index - 1]);
+                }
+            }
+            previous = current;
+        }
+        previous[text.len()]
+    }
+
+    fn vue3_test_glob_parts_dp(pattern: &[&str], path: &[&str]) -> bool {
+        let mut previous = vec![false; path.len() + 1];
+        let mut current = vec![false; path.len() + 1];
+        previous[0] = true;
+        for pattern_part in pattern {
+            current.fill(false);
+            if *pattern_part == "**" {
+                current[0] = previous[0];
+                for path_index in 1..=path.len() {
+                    current[path_index] = previous[path_index] || current[path_index - 1];
+                }
+            } else {
+                for path_index in 1..=path.len() {
+                    current[path_index] = previous[path_index - 1]
+                        && vue3_test_glob_segment_dp(pattern_part, path[path_index - 1]);
+                }
+            }
+            std::mem::swap(&mut previous, &mut current);
+        }
+        previous[path.len()]
+    }
+
+    fn vue3_test_glob_strings(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut values = vec![String::new()];
+        let mut exact = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in &exact {
+                for ch in alphabet {
+                    let mut value = prefix.clone();
+                    value.push(*ch);
+                    next.push(value);
+                }
+            }
+            values.extend(next.iter().cloned());
+            exact = next;
+        }
+        values
+    }
+
+    fn vue3_test_glob_sequences<'a>(choices: &[&'a str], max_len: usize) -> Vec<Vec<&'a str>> {
+        let mut values = vec![Vec::new()];
+        let mut exact = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in &exact {
+                for choice in choices {
+                    let mut value = prefix.clone();
+                    value.push(*choice);
+                    next.push(value);
+                }
+            }
+            values.extend(next.iter().cloned());
+            exact = next;
+        }
+        values
+    }
+
+    #[test]
+    fn vue3_tsconfig_glob_matching_matches_dp_semantics() {
+        let patterns = vue3_test_glob_strings(&['a', 'b', '*', '?'], 4);
+        let texts = vue3_test_glob_strings(&['a', 'b', '\u{00e9}'], 3);
+        for pattern in &patterns {
+            for text in &texts {
+                assert_eq!(
+                    vue3_tsconfig_glob_segment_match(pattern, text),
+                    vue3_test_glob_segment_dp(pattern, text),
+                    "segment pattern={pattern:?}, text={text:?}"
+                );
+            }
+        }
+
+        let patterns =
+            vue3_test_glob_sequences(&["", "a", "b", "*", "?", "**", "a*", "*b"], 2);
+        let paths = vue3_test_glob_sequences(&["", "a", "b", "ab", "\u{00e9}"], 2);
+        for pattern in &patterns {
+            for path in &paths {
+                assert_eq!(
+                    vue3_tsconfig_glob_parts_match(pattern, path),
+                    vue3_test_glob_parts_dp(pattern, path),
+                    "path pattern={pattern:?}, path={path:?}"
+                );
+            }
+        }
+
+        let paths = vue3_test_glob_sequences(&["a", "b", "x"], 4);
+        for pattern in [
+            &["**", "a", "**", "b"][..],
+            &["a", "**", "b", "**"],
+            &["**", "a", "**", "a"],
+            &["**", "**", "a"],
+            &["a", "**", "**", "b"],
+        ] {
+            for path in &paths {
+                assert_eq!(
+                    vue3_tsconfig_glob_parts_match(pattern, path),
+                    vue3_test_glob_parts_dp(pattern, path),
+                    "multi-globstar pattern={pattern:?}, path={path:?}"
+                );
+            }
+        }
+
+        assert!(vue3_tsconfig_glob_matches(
+            r"src\**\global-?.d.ts",
+            "src/nested/global-\u{00e9}.d.ts"
+        ));
+        assert!(!vue3_tsconfig_glob_matches(
+            "src/*/global-?.d.ts",
+            "src/nested/deep/global-a.d.ts"
+        ));
+    }
+
     #[test]
     fn vue3_tsconfig_glob_matching_handles_deep_double_star_patterns_iteratively() {
         assert!(vue3_tsconfig_glob_parts_match(

@@ -117,6 +117,119 @@ fn vue3_include_glob_root_honors_exact_generated_path_limit() {
 }
 
 #[test]
+fn vue3_include_glob_match_work_is_shared_and_fail_closed() {
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_GLOB_MATCH_STEPS,
+        16 * 1024 * 1024
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types");
+    std::fs::create_dir_all(&types).expect("create include directory");
+    let first = types.join("first.d.ts");
+    let second = types.join("second.d.ts");
+    std::fs::write(&first, "declare interface FirstGlobal {}").expect("write first global");
+    std::fs::write(&second, "declare interface SecondGlobal {}").expect("write second global");
+    let target = format!("{}/**/*.d.ts", normalize_path_string(&types));
+
+    let measuring = Vue3TypeResolverContext::default();
+    let measured = vue3_tsconfig_include_global_type_files(
+        dir.path(),
+        dir.path(),
+        &target,
+        &measuring,
+    );
+    assert_eq!(
+        measured.into_iter().collect::<BTreeSet<_>>(),
+        [first.clone(), second.clone()].into_iter().collect()
+    );
+    let required = measuring
+        .external_type_session
+        .stats()
+        .tsconfig_glob_match_steps;
+    assert!(required > 1);
+
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_glob_match_steps: required,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_include_global_type_files(dir.path(), dir.path(), &target, &exact)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        [first, second].into_iter().collect()
+    );
+    assert_eq!(
+        exact
+            .external_type_session
+            .stats()
+            .tsconfig_glob_match_steps,
+        required
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_glob_match_steps: required - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_include_global_type_files(dir.path(), dir.path(), &target, &short)
+        .is_empty());
+    assert_eq!(
+        short
+            .external_type_session
+            .stats()
+            .tsconfig_glob_match_steps,
+        required - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_adversarial_include_globs_stop_at_the_work_limit() {
+    let max_path_bytes = VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES;
+    let pattern = format!("*{}b", "a".repeat(max_path_bytes - 2));
+    let path = "a".repeat(max_path_bytes - 1);
+    assert_eq!(pattern.len(), max_path_bytes);
+    assert_eq!(path.len(), max_path_bytes - 1);
+
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_glob_match_steps: 1_000,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_glob_matches_with_session(
+            &pattern,
+            &path,
+            &resolver.external_type_session,
+        ),
+        None
+    );
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .tsconfig_glob_match_steps,
+        1_000
+    );
+    assert!(resolver.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_glob_match_steps: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_glob_matches_with_session("*", "value", &zero.external_type_session),
+        None
+    );
+    assert_eq!(
+        zero.external_type_session
+            .stats()
+            .tsconfig_glob_match_steps,
+        0
+    );
+    assert!(zero.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
     let template_config_dir = Path::new("expanded-config-directory");
     let resolver = Vue3TypeResolverContext::default();

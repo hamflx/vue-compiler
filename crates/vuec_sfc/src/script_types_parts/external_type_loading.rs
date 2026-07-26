@@ -37,6 +37,7 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH: usize = 64;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_DEPTH: usize = 64;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES: usize = 65_536;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES: usize = 16_384;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_GLOB_MATCH_STEPS: usize = 16 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH: usize = 64;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_DEPTH: usize = 128;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_ENTRIES: usize = 65_536;
@@ -70,6 +71,7 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_tsconfig_discovery_depth: usize,
     pub(crate) max_tsconfig_discovery_entries: usize,
     pub(crate) max_tsconfig_discovery_files: usize,
+    pub(crate) max_tsconfig_glob_match_steps: usize,
     pub(crate) max_package_resolution_depth: usize,
     pub(crate) max_ancestor_search_depth: usize,
     pub(crate) max_ancestor_search_entries: usize,
@@ -107,6 +109,7 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_tsconfig_discovery_depth: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_DEPTH,
             max_tsconfig_discovery_entries: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES,
             max_tsconfig_discovery_files: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES,
+            max_tsconfig_glob_match_steps: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_GLOB_MATCH_STEPS,
             max_package_resolution_depth: VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH,
             max_ancestor_search_depth: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_DEPTH,
             max_ancestor_search_entries: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_ENTRIES,
@@ -140,6 +143,7 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) tsconfig_nodes: usize,
     pub(crate) tsconfig_discovery_entries: usize,
     pub(crate) tsconfig_discovery_files: usize,
+    pub(crate) tsconfig_glob_match_steps: usize,
     pub(crate) ancestor_search_entries: usize,
     pub(crate) ancestor_search_weight: usize,
 }
