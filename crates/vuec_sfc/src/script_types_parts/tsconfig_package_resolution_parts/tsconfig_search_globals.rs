@@ -456,7 +456,7 @@ fn resolve_vue3_type_reference_directive_with_mode(
             Vue3TypeResolutionKind::ReferenceTypes(resolution_mode),
             project_filename,
             &cache_source,
-            &type_resolver.typescript_version,
+            type_resolver,
             false,
         ) {
         Vue3TypeImportResolutionLoad::Ready(resolution) => resolution,
@@ -882,6 +882,125 @@ fn vue3_tsconfig_module_resolution_from_config(
     .unwrap_or_default();
     traversal.active_identities.remove(&identity);
     settings
+}
+
+pub(crate) fn vue3_tsconfig_module_suffixes(
+    filename: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<[String]>> {
+    if type_resolver.typescript_version < (4, 7, 0).into() {
+        return Some(vue3_default_module_suffixes());
+    }
+    let config_path = vue3_tsconfig_search_paths(filename, type_resolver).next();
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    let Some(config_path) = config_path else {
+        return Some(vue3_default_module_suffixes());
+    };
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut traversal = Vue3TsconfigGraphTraversal::default();
+    let configured = vue3_tsconfig_module_suffixes_from_config(
+        &config_path,
+        config_dir,
+        &mut traversal,
+        0,
+        type_resolver,
+    )?;
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    Some(match configured {
+        Some(suffixes) if !suffixes.is_empty() => suffixes,
+        Some(_) | None => vue3_default_module_suffixes(),
+    })
+}
+
+fn vue3_tsconfig_module_suffixes_from_config(
+    config_path: &Path,
+    template_config_dir: &Path,
+    traversal: &mut Vue3TsconfigGraphTraversal,
+    depth: usize,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Option<std::sync::Arc<[String]>>> {
+    let Some(identity) = vue3_tsconfig_graph_enter(
+        config_path,
+        template_config_dir,
+        depth,
+        traversal,
+        type_resolver,
+    ) else {
+        return (!type_resolver.external_type_session.metadata_is_blocked()).then_some(None);
+    };
+    let configured = (|| {
+        let Some(value) = type_resolver
+            .external_type_session
+            .tsconfig_from_path(config_path)
+        else {
+            return (!type_resolver.external_type_session.metadata_is_blocked()).then_some(None);
+        };
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        let mut configured = None;
+        for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
+            let inherited = vue3_tsconfig_module_suffixes_from_config(
+                &extended,
+                template_config_dir,
+                traversal,
+                depth + 1,
+                type_resolver,
+            )?;
+            if inherited.is_some() {
+                configured = inherited;
+            }
+        }
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if vue3_tsconfig_declares_compiler_option(&value, "moduleSuffixes") {
+            configured = Some(vue3_tsconfig_direct_module_suffixes(
+                &value,
+                type_resolver,
+            )?);
+        }
+        Some(configured)
+    })();
+    traversal.active_identities.remove(&identity);
+    configured
+}
+
+fn vue3_tsconfig_direct_module_suffixes(
+    value: &serde_json::Value,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<[String]>> {
+    let values = value
+        .get("compilerOptions")
+        .and_then(|options| options.get("moduleSuffixes"))
+        .and_then(serde_json::Value::as_array);
+    let Some(values) = values else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let mut suffixes = Vec::new();
+    for value in values {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        let Some(suffix) = value.as_str() else {
+            type_resolver.external_type_session.block_metadata();
+            return None;
+        };
+        if !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(suffix)
+        {
+            return None;
+        }
+        suffixes.push(suffix.to_string());
+    }
+    Some(std::sync::Arc::from(suffixes))
 }
 
 pub(crate) fn vue3_tsconfig_global_type_files(
@@ -3252,6 +3371,140 @@ mod vue3_type_reference_directive_tests {
                 .stats()
                 .metadata_fanout_entries,
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod vue3_module_suffix_config_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn write_config(root: &Path, source: &str) -> String {
+        std::fs::write(root.join("tsconfig.json"), source).expect("write suffix config");
+        root.join("Comp.vue").to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn module_suffix_config_fanout_is_exact_and_fail_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = write_config(
+            dir.path(),
+            r#"{"compilerOptions":{"moduleSuffixes":[".native",""]}}"#,
+        );
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_module_suffixes(&filename, &exact).as_deref(),
+            Some([".native".to_string(), String::new()].as_slice())
+        );
+        assert_eq!(
+            exact
+                .external_type_session
+                .stats()
+                .metadata_fanout_entries,
+            2
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_module_suffixes(&filename, &short).is_none());
+        assert_eq!(
+            short
+                .external_type_session
+                .stats()
+                .metadata_fanout_entries,
+            1
+        );
+        assert!(short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn module_suffix_config_empty_lists_clear_inheritance() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("base.json"),
+            r#"{"compilerOptions":{"moduleSuffixes":[".base",""]}}"#,
+        )
+        .expect("write inherited suffix config");
+        let filename = write_config(
+            dir.path(),
+            r#"{
+                "extends":"./base.json",
+                "compilerOptions":{"moduleSuffixes":[]}
+            }"#,
+        );
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            vue3_tsconfig_module_suffixes(&filename, &resolver).as_deref(),
+            Some([String::new()].as_slice())
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn invalid_module_suffix_configs_do_not_keep_partial_values() {
+        for source in [
+            r#"{"compilerOptions":{"moduleSuffixes":".native"}}"#,
+            r#"{"compilerOptions":{"moduleSuffixes":[".native",1]}}"#,
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext::default();
+
+            assert!(vue3_tsconfig_module_suffixes(&filename, &resolver).is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn module_suffix_config_and_generated_paths_are_bounded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = write_config(
+            dir.path(),
+            r#"{"compilerOptions":{"moduleSuffixes":[".native"]}}"#,
+        );
+        let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: ".native".len() - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(vue3_tsconfig_module_suffixes(&filename, &resolver).is_none());
+        assert!(resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn reference_paths_ignore_module_suffixes_but_declaration_probes_use_them() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plain = dir.path().join("referenced.d.ts");
+        let suffixed = dir.path().join("referenced.native.d.ts");
+        std::fs::write(&plain, "interface PlainReference {}").expect("write plain reference");
+        std::fs::write(&suffixed, "interface NativeReference {}").expect("write native reference");
+        let filename = dir.path().join("root.d.ts").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".native".to_string()]),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced.d.ts", &resolver),
+            Some(plain.clone())
+        );
+        assert_eq!(
+            resolve_vue3_metadata_type_reference_declaration_file(&plain, &resolver),
+            Some(suffixed)
         );
     }
 }

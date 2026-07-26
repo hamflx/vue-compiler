@@ -18,7 +18,7 @@ struct Vue3TypeImportResolutionCacheKey {
     importer: PathBuf,
     relative_current_dir: Option<PathBuf>,
     source: String,
-    typescript_version: String,
+    resolver: Vue3TypeResolverCacheIdentity,
 }
 
 impl Vue3TypeImportResolutionCacheKey {
@@ -31,7 +31,7 @@ impl Vue3TypeImportResolutionCacheKey {
                     .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
             )
             .saturating_add(self.source.len())
-            .saturating_add(self.typescript_version.len())
+            .saturating_add(self.resolver.payload_weight())
             .saturating_add(std::mem::size_of::<Vue3TypeImportResolutionCacheEntry>())
             .saturating_add(entry.path_weight())
     }
@@ -81,7 +81,7 @@ impl Vue3ExternalTypeLoadSession {
         kind: Vue3TypeResolutionKind,
         filename: &str,
         source: &str,
-        typescript_version: &nodejs_semver::Version,
+        type_resolver: &Vue3TypeResolverContext,
         is_relative: bool,
     ) -> Vue3TypeImportResolutionLoad {
         let max_cache_entry_weight = {
@@ -104,7 +104,7 @@ impl Vue3ExternalTypeLoadSession {
         } else {
             None
         };
-        let typescript_version = typescript_version.to_string();
+        let resolver = Vue3TypeResolverCacheIdentity::from_resolver(type_resolver);
         let minimum_weight = std::mem::size_of::<Vue3TypeImportResolutionCacheKey>()
             .saturating_add(filename.len())
             .saturating_add(
@@ -113,7 +113,7 @@ impl Vue3ExternalTypeLoadSession {
                     .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
             )
             .saturating_add(source.len())
-            .saturating_add(typescript_version.len())
+            .saturating_add(resolver.payload_weight())
             .saturating_add(std::mem::size_of::<Vue3TypeImportResolutionCacheEntry>());
         let cache_key = (minimum_weight <= max_cache_entry_weight).then(|| {
             Vue3TypeImportResolutionCacheKey {
@@ -121,7 +121,7 @@ impl Vue3ExternalTypeLoadSession {
                 importer: PathBuf::from(filename),
                 relative_current_dir,
                 source: source.to_string(),
-                typescript_version,
+                resolver,
             }
         });
         let mut state = self.lock();

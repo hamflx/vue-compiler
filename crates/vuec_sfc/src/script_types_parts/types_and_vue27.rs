@@ -275,22 +275,29 @@ pub(crate) struct Vue27TypeContext {
 #[derive(Clone, Debug)]
 pub(crate) struct Vue3TypeResolverContext {
     pub(crate) typescript_version: nodejs_semver::Version,
+    pub(crate) module_suffixes: std::sync::Arc<[String]>,
     pub(crate) external_type_session: Vue3ExternalTypeLoadSession,
 }
 
 impl PartialEq for Vue3TypeResolverContext {
     fn eq(&self, other: &Self) -> bool {
         self.typescript_version == other.typescript_version
+            && self.module_suffixes == other.module_suffixes
             && self.external_type_session.limits() == other.external_type_session.limits()
     }
 }
 
 impl Eq for Vue3TypeResolverContext {}
 
+pub(crate) fn vue3_default_module_suffixes() -> std::sync::Arc<[String]> {
+    std::sync::Arc::from([String::new()])
+}
+
 impl Default for Vue3TypeResolverContext {
     fn default() -> Self {
         Self {
             typescript_version: vue3_package_typescript_baseline_version(),
+            module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::default(),
         }
     }

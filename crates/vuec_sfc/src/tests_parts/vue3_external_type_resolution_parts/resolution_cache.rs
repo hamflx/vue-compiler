@@ -366,6 +366,75 @@
     }
 
     #[test]
+    fn vue3_resolution_and_context_caches_key_module_suffixes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first = dir.path().join("types.first.ts");
+        let second = dir.path().join("types.second.ts");
+        std::fs::write(&first, "export interface Props { first: string }")
+            .expect("write first suffix target");
+        std::fs::write(&second, "export interface Props { second: number }")
+            .expect("write second suffix target");
+        let root = dir.path().join("root.ts");
+        std::fs::write(&root, "export { Props } from './types'")
+            .expect("write suffix-sensitive root");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let first_resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".first".to_string()]),
+            ..Vue3TypeResolverContext::default()
+        };
+        let second_resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".second".to_string()]),
+            ..first_resolver.clone()
+        };
+
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./types", &first_resolver),
+            Some(first.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./types", &second_resolver),
+            Some(second.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./types", &first_resolver),
+            Some(first.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./types", &second_resolver),
+            Some(second.clone())
+        );
+        assert_eq!(
+            first_resolver
+                .external_type_session
+                .stats()
+                .resolution_cache_hits,
+            2
+        );
+
+        let first_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &first_resolver,
+        )
+        .expect("load first suffix context");
+        let second_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &second_resolver,
+        )
+        .expect("load second suffix context");
+        assert_eq!(
+            first_context.type_sources.get("Props"),
+            Some(&normalize_path_string(&first))
+        );
+        assert_eq!(
+            second_context.type_sources.get("Props"),
+            Some(&normalize_path_string(&second))
+        );
+        assert!(!std::sync::Arc::ptr_eq(&first_context, &second_context));
+    }
+
+    #[test]
     fn vue3_external_type_context_cache_charges_key_payload() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_path = dir.path().join("empty.ts");
@@ -378,7 +447,12 @@
         )
         .is_some());
         let expected_key_weight = source_path.as_os_str().as_encoded_bytes().len()
-            + measuring.typescript_version.to_string().len();
+            + measuring.typescript_version.to_string().len()
+            + measuring
+                .module_suffixes
+                .iter()
+                .map(|suffix| std::mem::size_of::<String>() + suffix.len())
+                .sum::<usize>();
         assert_eq!(
             measuring
                 .external_type_session
@@ -440,6 +514,7 @@
         let version_limited = Vue3TypeResolverContext {
             typescript_version: nodejs_semver::Version::parse(&version_text)
                 .expect("parse long TypeScript version"),
+            module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(
                 Vue3ExternalTypeLoadLimits {
                     max_context_build_weight: version_budget,

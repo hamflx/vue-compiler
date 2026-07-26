@@ -25,7 +25,7 @@ pub(crate) fn resolve_vue3_type_import_with_mode(
             Vue3TypeResolutionKind::Module(resolution_mode),
             filename,
             source,
-            &type_resolver.typescript_version,
+            type_resolver,
             is_relative,
         )
     {
@@ -163,7 +163,7 @@ fn resolve_vue3_package_imports_with_mode(
             &package_dir,
             source,
             resolution_mode,
-            &type_resolver.typescript_version,
+            type_resolver,
         )
     {
         Vue3PackageImportResolutionLoad::Ready(guard) => guard,

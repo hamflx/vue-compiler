@@ -536,6 +536,8 @@ pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3Typ
     if let Some(version) = vue3_typescript_version_for_filename(filename, &type_resolver) {
         type_resolver.typescript_version = version;
     }
+    type_resolver.module_suffixes = vue3_tsconfig_module_suffixes(filename, &type_resolver)
+        .unwrap_or_else(|| std::sync::Arc::from(Vec::<String>::new()));
     type_resolver
 }
 

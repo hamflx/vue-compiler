@@ -2118,7 +2118,7 @@ fn vue3_base_url_resolution_probes_are_exact_and_cached() {
         .expect("write baseUrl target");
 
     let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
-        max_metadata_resolution_path_probes: 2,
+        max_metadata_resolution_path_probes: 1,
         ..Vue3ExternalTypeLoadLimits::default()
     });
     assert_eq!(
@@ -2135,7 +2135,7 @@ fn vue3_base_url_resolution_probes_are_exact_and_cached() {
             .external_type_session
             .stats()
             .metadata_resolution_path_probes,
-        2
+        1
     );
     assert!(!accepted.external_type_session.metadata_is_blocked());
     assert!(resolve_vue3_tsconfig_base_url_with_mode(
@@ -2146,27 +2146,25 @@ fn vue3_base_url_resolution_probes_are_exact_and_cached() {
     )
     .is_none());
 
-    for limit in [0, 1] {
-        let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
-            max_metadata_resolution_path_probes: limit,
-            ..Vue3ExternalTypeLoadLimits::default()
-        });
-        assert!(resolve_vue3_tsconfig_base_url_with_mode(
-            &base_url,
-            "choice",
-            Vue3TypeResolutionMode::Import,
-            &rejected,
-        )
-        .is_none());
-        assert_eq!(
-            rejected
-                .external_type_session
-                .stats()
-                .metadata_resolution_path_probes,
-            limit
-        );
-        assert!(rejected.external_type_session.metadata_is_blocked());
-    }
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_tsconfig_base_url_with_mode(
+        &base_url,
+        "choice",
+        Vue3TypeResolutionMode::Import,
+        &rejected,
+    )
+    .is_none());
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        0
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
 
     std::fs::write(
         dir.path().join("tsconfig.json"),

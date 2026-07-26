@@ -159,9 +159,35 @@ enum Vue3ExternalTypeContextCacheEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TypeResolverCacheIdentity {
+    typescript_version: String,
+    module_suffixes: std::sync::Arc<[String]>,
+}
+
+impl Vue3TypeResolverCacheIdentity {
+    fn from_resolver(type_resolver: &Vue3TypeResolverContext) -> Self {
+        Self {
+            typescript_version: type_resolver.typescript_version.to_string(),
+            module_suffixes: type_resolver.module_suffixes.clone(),
+        }
+    }
+
+    fn payload_weight(&self) -> usize {
+        self.module_suffixes.iter().fold(
+            self.typescript_version.len(),
+            |weight, suffix| {
+                weight
+                    .saturating_add(std::mem::size_of::<String>())
+                    .saturating_add(suffix.len())
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Vue3ExternalTypeContextCacheKey {
     path: PathBuf,
-    typescript_version: String,
+    resolver: Vue3TypeResolverCacheIdentity,
 }
 
 impl Vue3ExternalTypeContextCacheKey {
@@ -170,7 +196,7 @@ impl Vue3ExternalTypeContextCacheKey {
             .as_os_str()
             .as_encoded_bytes()
             .len()
-            .saturating_add(self.typescript_version.len())
+            .saturating_add(self.resolver.payload_weight())
     }
 }
 
@@ -420,11 +446,11 @@ fn vue3_external_type_path_key(path: PathBuf) -> PathBuf {
 
 fn vue3_external_type_context_cache_key(
     path: &Path,
-    typescript_version: &nodejs_semver::Version,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3ExternalTypeContextCacheKey {
     Vue3ExternalTypeContextCacheKey {
         path: vue3_external_type_lexical_path(path),
-        typescript_version: typescript_version.to_string(),
+        resolver: Vue3TypeResolverCacheIdentity::from_resolver(type_resolver),
     }
 }
 

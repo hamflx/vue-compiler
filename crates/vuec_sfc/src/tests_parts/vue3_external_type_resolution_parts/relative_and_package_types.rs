@@ -74,6 +74,530 @@ const model = defineModel<ModelValue>()
     }
 
     #[test]
+    fn vue3_module_suffixes_respect_configured_order_for_relative_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "moduleSuffixes": [".native", ".web", ""]
+                }
+            }"#,
+        )
+        .expect("write project config");
+        let native = dir.path().join("ordered.native.ts");
+        std::fs::write(
+            &native,
+            "export interface OrderedProps { nativeValue: string }",
+        )
+        .expect("write first configured suffix target");
+        std::fs::write(
+            dir.path().join("ordered.web.ts"),
+            "export interface OrderedProps { wrongWebOrder: never }",
+        )
+        .expect("write later configured suffix target");
+        std::fs::write(
+            dir.path().join("ordered.ts"),
+            "export interface OrderedProps { wrongOrderFallback: never }",
+        )
+        .expect("write unsuffixed order decoy");
+        let directory_decoy = dir.path().join("ordered");
+        std::fs::create_dir_all(&directory_decoy).expect("create same-name directory decoy");
+        std::fs::write(
+            directory_decoy.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write same-name directory manifest");
+        std::fs::write(
+            directory_decoy.join("index.d.ts"),
+            "export interface OrderedProps { wrongDirectoryOrder: never }",
+        )
+        .expect("write same-name directory type decoy");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { OrderedProps } from './ordered'
+defineProps<OrderedProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("nativeValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongWebOrder"), "{}", script.content);
+        assert!(
+            !script.content.contains("wrongOrderFallback"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongDirectoryOrder"));
+        assert_eq!(script.deps, vec![normalize_path_string(&native)]);
+    }
+
+    #[test]
+    fn vue3_module_suffixes_do_not_add_an_implicit_empty_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "moduleSuffixes": [".native"]
+                }
+            }"#,
+        )
+        .expect("write project config");
+        std::fs::write(
+            dir.path().join("fallback.ts"),
+            "export interface FallbackProps { implicitFallback: string }",
+        )
+        .expect("write forbidden unsuffixed fallback");
+        let fallback_filename = dir.path().join("Fallback.vue");
+        let fallback_source = r#"<script setup lang="ts">
+import type { FallbackProps } from './fallback'
+defineProps<FallbackProps>()
+</script>"#;
+        let mut fallback_compiler = SfcCompiler::new();
+        let fallback_descriptor =
+            fallback_compiler.parse(fallback_filename.to_string_lossy(), fallback_source);
+        let fallback_script = fallback_compiler.compile_script(
+            &fallback_descriptor,
+            SfcScriptCompileOptions::default(),
+        );
+
+        assert!(
+            fallback_script
+                .errors
+                .iter()
+                .any(|error| error.contains("./fallback")),
+            "{:?}",
+            fallback_script.errors
+        );
+        assert!(
+            !fallback_script.content.contains("implicitFallback"),
+            "{}",
+            fallback_script.content
+        );
+        assert!(fallback_script.deps.is_empty(), "{:?}", fallback_script.deps);
+    }
+
+    #[test]
+    fn vue3_module_suffixes_are_inherited_and_overridden_as_a_list() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("configs");
+        let inherited_dir = dir.path().join("inherited");
+        let overridden_dir = dir.path().join("overridden");
+        for directory in [&config_dir, &inherited_dir, &overridden_dir] {
+            std::fs::create_dir_all(directory).expect("create module suffixes directory");
+        }
+        std::fs::write(
+            config_dir.join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "moduleSuffixes": [".base", ""]
+                }
+            }"#,
+        )
+        .expect("write base config");
+        std::fs::write(
+            inherited_dir.join("tsconfig.json"),
+            r#"{"extends":"../configs/base.json"}"#,
+        )
+        .expect("write inherited config");
+        std::fs::write(
+            overridden_dir.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/base.json",
+                "compilerOptions": {
+                    "moduleSuffixes": [".project", ""]
+                }
+            }"#,
+        )
+        .expect("write overriding config");
+
+        let inherited_target = inherited_dir.join("entry.base.ts");
+        std::fs::write(
+            &inherited_target,
+            "export interface InheritedProps { inheritedValue: string }",
+        )
+        .expect("write inherited suffix target");
+        std::fs::write(
+            inherited_dir.join("entry.ts"),
+            "export interface InheritedProps { wrongInheritedFallback: never }",
+        )
+        .expect("write inherited suffix decoy");
+        let inherited_filename = inherited_dir.join("Comp.vue");
+        let inherited_source = r#"<script setup lang="ts">
+import type { InheritedProps } from './entry'
+defineProps<InheritedProps>()
+</script>"#;
+        let mut inherited_compiler = SfcCompiler::new();
+        let inherited_descriptor = inherited_compiler.parse(
+            inherited_filename.to_string_lossy(),
+            inherited_source,
+        );
+        let inherited_script = inherited_compiler.compile_script(
+            &inherited_descriptor,
+            SfcScriptCompileOptions::default(),
+        );
+
+        assert!(
+            inherited_script.errors.is_empty(),
+            "{:?}",
+            inherited_script.errors
+        );
+        assert!(
+            inherited_script
+                .content
+                .contains("inheritedValue: { type: String, required: true }"),
+            "{}",
+            inherited_script.content
+        );
+        assert!(
+            !inherited_script.content.contains("wrongInheritedFallback"),
+            "{}",
+            inherited_script.content
+        );
+        assert_eq!(
+            inherited_script.deps,
+            vec![normalize_path_string(&inherited_target)]
+        );
+
+        let overridden_target = overridden_dir.join("entry.project.ts");
+        std::fs::write(
+            &overridden_target,
+            "export interface OverriddenProps { overriddenValue: number }",
+        )
+        .expect("write overriding suffix target");
+        std::fs::write(
+            overridden_dir.join("entry.base.ts"),
+            "export interface OverriddenProps { wrongBaseSuffix: never }",
+        )
+        .expect("write overridden base suffix decoy");
+        std::fs::write(
+            overridden_dir.join("entry.ts"),
+            "export interface OverriddenProps { wrongOverrideFallback: never }",
+        )
+        .expect("write overridden fallback decoy");
+        let overridden_filename = overridden_dir.join("Comp.vue");
+        let overridden_source = r#"<script setup lang="ts">
+import type { OverriddenProps } from './entry'
+defineProps<OverriddenProps>()
+</script>"#;
+        let mut overridden_compiler = SfcCompiler::new();
+        let overridden_descriptor = overridden_compiler.parse(
+            overridden_filename.to_string_lossy(),
+            overridden_source,
+        );
+        let overridden_script = overridden_compiler.compile_script(
+            &overridden_descriptor,
+            SfcScriptCompileOptions::default(),
+        );
+
+        assert!(
+            overridden_script.errors.is_empty(),
+            "{:?}",
+            overridden_script.errors
+        );
+        assert!(
+            overridden_script
+                .content
+                .contains("overriddenValue: { type: Number, required: true }"),
+            "{}",
+            overridden_script.content
+        );
+        assert!(!overridden_script.content.contains("wrongBaseSuffix"));
+        assert!(!overridden_script.content.contains("wrongOverrideFallback"));
+        assert_eq!(
+            overridden_script.deps,
+            vec![normalize_path_string(&overridden_target)]
+        );
+    }
+
+    #[test]
+    fn vue3_module_suffixes_apply_to_tsconfig_paths_targets_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "moduleSuffixes": [".platform", ""],
+                    "paths": {
+                        "@vuec/*": ["./src/*"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write paths config");
+        let platform_target = source_dir.join("aliased.platform.ts");
+        std::fs::write(
+            &platform_target,
+            "export interface AliasedProps { platformValue: boolean }",
+        )
+        .expect("write suffixed paths target");
+        std::fs::write(
+            source_dir.join("aliased.ts"),
+            "export interface AliasedProps { wrongPathsFallback: never }",
+        )
+        .expect("write unsuffixed paths decoy");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { AliasedProps } from '@vuec/aliased'
+defineProps<AliasedProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("platformValue: { type: Boolean, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongPathsFallback"));
+        assert_eq!(
+            script.deps,
+            vec![normalize_path_string(&platform_target)]
+        );
+    }
+
+    #[test]
+    fn vue3_module_suffixes_preserve_extension_order_and_arbitrary_extensions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"moduleSuffixes":[".native",""]}}"#,
+        )
+        .expect("write module suffix config");
+        let tsx = dir.path().join("ordered.tsx");
+        let arbitrary = dir.path().join("theme.d.css.native.ts");
+        let esm = dir.path().join("module.native.mts");
+        let cjs = dir.path().join("legacy.native.cts");
+        std::fs::write(
+            &tsx,
+            "export interface TsxProps { extensionOrder: string }",
+        )
+        .expect("write earlier plain extension target");
+        std::fs::write(
+            dir.path().join("ordered.native.d.ts"),
+            "export interface TsxProps { wrongSuffixMajorOrder: never }",
+        )
+        .expect("write later suffixed extension decoy");
+        std::fs::write(
+            &arbitrary,
+            "export interface CssProps { arbitraryExtension: boolean }",
+        )
+        .expect("write arbitrary extension declaration");
+        std::fs::write(
+            &esm,
+            "export interface EsmProps { esmExtension: number }",
+        )
+        .expect("write mjs overlay source");
+        std::fs::write(
+            &cjs,
+            "export interface CjsProps { cjsExtension?: string }",
+        )
+        .expect("write cjs overlay source");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { TsxProps } from './ordered'
+import type { CssProps } from './theme.css'
+import type { EsmProps } from './module.mjs'
+import type { CjsProps } from './legacy.cjs'
+defineProps<TsxProps & CssProps & EsmProps & CjsProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("extensionOrder: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("arbitraryExtension: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("esmExtension: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("cjsExtension: { type: String, required: false }"));
+        assert!(!script.content.contains("wrongSuffixMajorOrder"));
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [tsx, arbitrary, esm, cjs]
+            .iter()
+            .map(|path| normalize_path_string(path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+    }
+
+    #[test]
+    fn vue3_module_suffixes_apply_before_compound_package_type_extensions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-module-suffix-types");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"moduleSuffixes":[".native",""]}}"#,
+        )
+        .expect("write project config");
+        std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write package manifest");
+        let preferred = package.join("index.native.d.ts");
+        std::fs::write(
+            &preferred,
+            "export interface PackageProps { compoundSuffix: string }",
+        )
+        .expect("write correctly suffixed package type");
+        std::fs::write(
+            package.join("index.d.native.ts"),
+            "export interface PackageProps { wrongCompoundPlacement: never }",
+        )
+        .expect("write incorrectly suffixed package decoy");
+        std::fs::write(
+            package.join("index.d.ts"),
+            "export interface PackageProps { wrongPackageFallback: never }",
+        )
+        .expect("write unsuffixed package decoy");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { PackageProps } from 'vuec-module-suffix-types'
+defineProps<PackageProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("compoundSuffix: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongCompoundPlacement"));
+        assert!(!script.content.contains("wrongPackageFallback"));
+        assert_eq!(script.deps, vec![normalize_path_string(&preferred)]);
+    }
+
+    #[test]
+    fn vue3_module_suffixes_empty_and_pre_4_7_configs_use_normal_resolution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let empty_project = dir.path().join("empty");
+        let legacy_project = dir.path().join("legacy");
+        std::fs::create_dir_all(&empty_project).expect("create empty suffix project");
+        std::fs::create_dir_all(legacy_project.join("node_modules").join("typescript"))
+            .expect("create legacy TypeScript package");
+
+        std::fs::write(
+            empty_project.join("tsconfig.json"),
+            r#"{"compilerOptions":{"moduleSuffixes":[]}}"#,
+        )
+        .expect("write empty suffix config");
+        let empty_target = empty_project.join("plain.ts");
+        std::fs::write(
+            &empty_target,
+            "export interface EmptyProps { emptyListValue: string }",
+        )
+        .expect("write empty suffix target");
+        let empty_filename = empty_project.join("Comp.vue");
+        let empty_source = r#"<script setup lang="ts">
+import type { EmptyProps } from './plain'
+defineProps<EmptyProps>()
+</script>"#;
+        let mut empty_compiler = SfcCompiler::new();
+        let empty_descriptor =
+            empty_compiler.parse(empty_filename.to_string_lossy(), empty_source);
+        let empty_script = empty_compiler
+            .compile_script(&empty_descriptor, SfcScriptCompileOptions::default());
+
+        assert!(empty_script.errors.is_empty(), "{:?}", empty_script.errors);
+        assert!(
+            empty_script
+                .content
+                .contains("emptyListValue: { type: String, required: true }"),
+            "{}",
+            empty_script.content
+        );
+        assert_eq!(
+            empty_script.deps,
+            vec![normalize_path_string(&empty_target)]
+        );
+
+        std::fs::write(
+            legacy_project.join("tsconfig.json"),
+            r#"{"compilerOptions":{"moduleSuffixes":[".native"]}}"#,
+        )
+        .expect("write legacy suffix config");
+        std::fs::write(
+            legacy_project
+                .join("node_modules")
+                .join("typescript")
+                .join("package.json"),
+            r#"{"version":"4.6.4"}"#,
+        )
+        .expect("write legacy TypeScript manifest");
+        let legacy_target = legacy_project.join("plain.ts");
+        std::fs::write(
+            &legacy_target,
+            "export interface LegacyProps { legacyValue: number }",
+        )
+        .expect("write legacy unsuffixed target");
+        std::fs::write(
+            legacy_project.join("plain.native.ts"),
+            "export interface LegacyProps { wrongLegacySuffix: never }",
+        )
+        .expect("write ignored legacy suffix decoy");
+        let legacy_filename = legacy_project.join("Comp.vue");
+        let legacy_source = r#"<script setup lang="ts">
+import type { LegacyProps } from './plain'
+defineProps<LegacyProps>()
+</script>"#;
+        let mut legacy_compiler = SfcCompiler::new();
+        let legacy_descriptor =
+            legacy_compiler.parse(legacy_filename.to_string_lossy(), legacy_source);
+        let legacy_script = legacy_compiler
+            .compile_script(&legacy_descriptor, SfcScriptCompileOptions::default());
+
+        assert!(
+            legacy_script.errors.is_empty(),
+            "{:?}",
+            legacy_script.errors
+        );
+        assert!(
+            legacy_script
+                .content
+                .contains("legacyValue: { type: Number, required: true }"),
+            "{}",
+            legacy_script.content
+        );
+        assert!(!legacy_script.content.contains("wrongLegacySuffix"));
+        assert_eq!(
+            legacy_script.deps,
+            vec![normalize_path_string(&legacy_target)]
+        );
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_bare_package_macro_types_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let node_modules = dir.path().join("node_modules");

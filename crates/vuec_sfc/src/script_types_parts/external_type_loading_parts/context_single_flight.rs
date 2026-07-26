@@ -340,7 +340,10 @@ mod context_single_flight_tests {
     fn key(value: &str) -> Vue3ExternalTypeContextCacheKey {
         Vue3ExternalTypeContextCacheKey {
             path: PathBuf::from(value),
-            typescript_version: "5.0.0".into(),
+            resolver: Vue3TypeResolverCacheIdentity {
+                typescript_version: "5.0.0".into(),
+                module_suffixes: vue3_default_module_suffixes(),
+            },
         }
     }
 

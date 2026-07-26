@@ -22,7 +22,7 @@ pub(crate) fn resolve_vue3_type_reference_path(
             Vue3TypeResolutionKind::ReferencePath,
             filename,
             reference,
-            &type_resolver.typescript_version,
+            type_resolver,
             true,
         )
     {
@@ -112,15 +112,11 @@ fn resolve_vue3_type_reference_declaration_file_with_probe_mode(
     if !probe_mode.path_is_within_limit(candidate, type_resolver) {
         return None;
     }
-    for candidate in vue3_type_reference_declaration_candidates(candidate) {
-        if !probe_mode.path_is_within_limit(&candidate, type_resolver) {
-            return None;
-        }
-        if probe_mode.exists(&candidate, type_resolver)? {
-            return Some(candidate);
-        }
-    }
-    None
+    resolve_vue3_module_suffixed_file(
+        vue3_type_reference_declaration_candidates(candidate),
+        type_resolver,
+        probe_mode,
+    )
 }
 
 fn vue3_type_reference_declaration_candidates(candidate: &Path) -> Vec<PathBuf> {
@@ -187,12 +183,40 @@ impl Vue3TypeImportPathProbeMode {
         path: &Path,
         type_resolver: &Vue3TypeResolverContext,
     ) -> bool {
+        self.path_bytes_are_within_limit(
+            path.as_os_str().as_encoded_bytes().len(),
+            type_resolver,
+        )
+    }
+
+    fn suffixed_path_is_within_limit(
+        self,
+        path: &Path,
+        suffix: &str,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
+        let Some(path_bytes) = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .checked_add(suffix.len())
+        else {
+            return self.path_bytes_are_within_limit(usize::MAX, type_resolver);
+        };
+        self.path_bytes_are_within_limit(path_bytes, type_resolver)
+    }
+
+    fn path_bytes_are_within_limit(
+        self,
+        path_bytes: usize,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         let max_path_bytes = type_resolver
             .external_type_session
             .limits()
             .max_generated_path_bytes
             .min(VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES);
-        if path.as_os_str().as_encoded_bytes().len() <= max_path_bytes {
+        if path_bytes <= max_path_bytes {
             return true;
         }
         match self {
@@ -245,37 +269,96 @@ fn resolve_vue3_type_import_path_with_probe_mode(
             candidates.extend(vue3_ts_resolution_candidates(candidate, Some(extension)));
         }
         candidates.push(candidate.to_path_buf());
-    } else {
-        if probe_mode.is_dir(candidate, type_resolver)? {
-            match resolve_vue3_package_json_type_entry_with_mode(
-                candidate,
-                None,
-                resolution_mode,
-                type_resolver,
-            ) {
-                Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-                Vue3PackageJsonTypeResolution::Blocked => return None,
-                Vue3PackageJsonTypeResolution::NoPackageJson
-                | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
-            }
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return None;
-            }
-        }
-        candidates.extend(vue3_ts_resolution_candidates(candidate, None));
-        candidates.push(candidate.join("index.ts"));
-        candidates.push(candidate.join("index.tsx"));
-        candidates.push(candidate.join("index.d.ts"));
+        return resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
     }
+    let failure_epoch = type_resolver.external_type_session.failure_epoch();
+    let resolved = resolve_vue3_module_suffixed_file(
+        vue3_ts_resolution_candidates(candidate, None),
+        type_resolver,
+        probe_mode,
+    );
+    if resolved.is_some()
+        || type_resolver.external_type_session.failure_epoch() != failure_epoch
+    {
+        return resolved;
+    }
+    if probe_mode.is_dir(candidate, type_resolver)? {
+        match resolve_vue3_package_json_type_entry_with_mode(
+            candidate,
+            None,
+            resolution_mode,
+            type_resolver,
+        ) {
+            Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
+            Vue3PackageJsonTypeResolution::Blocked => return None,
+            Vue3PackageJsonTypeResolution::NoPackageJson
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
+        }
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+    }
+    resolve_vue3_module_suffixed_file(
+        [
+            candidate.join("index.ts"),
+            candidate.join("index.tsx"),
+            candidate.join("index.d.ts"),
+        ],
+        type_resolver,
+        probe_mode,
+    )
+}
+
+fn resolve_vue3_module_suffixed_file(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    type_resolver: &Vue3TypeResolverContext,
+    probe_mode: Vue3TypeImportPathProbeMode,
+) -> Option<PathBuf> {
     for candidate in candidates {
         if !probe_mode.path_is_within_limit(&candidate, type_resolver) {
             return None;
         }
-        if probe_mode.exists(&candidate, type_resolver)? {
-            return Some(candidate);
+        for suffix in type_resolver.module_suffixes.iter() {
+            if !probe_mode.suffixed_path_is_within_limit(&candidate, suffix, type_resolver) {
+                return None;
+            }
+            let candidate = vue3_path_with_module_suffix(&candidate, suffix);
+            if probe_mode.exists(&candidate, type_resolver)? {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+fn vue3_path_with_module_suffix(path: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return path.to_path_buf();
+    }
+    let Some(file_name) = path.file_name() else {
+        let mut suffixed = path.as_os_str().to_os_string();
+        suffixed.push(suffix);
+        return PathBuf::from(suffixed);
+    };
+    let Some(file_name_text) = file_name.to_str() else {
+        let mut file_name = file_name.to_os_string();
+        file_name.push(suffix);
+        let mut suffixed = path.to_path_buf();
+        suffixed.set_file_name(file_name);
+        return suffixed;
+    };
+    const EXTENSIONS: [&str; 12] = [
+        ".d.ts", ".d.mts", ".d.cts", ".mjs", ".mts", ".cjs", ".cts", ".ts", ".js",
+        ".tsx", ".jsx", ".json",
+    ];
+    let extension = EXTENSIONS
+        .into_iter()
+        .find(|extension| file_name_text.ends_with(extension))
+        .unwrap_or_default();
+    let stem = &file_name_text[..file_name_text.len() - extension.len()];
+    let mut suffixed = path.to_path_buf();
+    suffixed.set_file_name(format!("{stem}{suffix}{extension}"));
+    suffixed
 }
 
 pub(crate) fn arbitrary_extension_type_candidate(candidate: &Path, extension: &str) -> PathBuf {

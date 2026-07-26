@@ -6,7 +6,7 @@ struct Vue3PackageImportResolutionIdentity {
     package_dir: PathBuf,
     source: String,
     resolution_mode: Vue3TypeResolutionMode,
-    typescript_version: String,
+    resolver: Vue3TypeResolverCacheIdentity,
 }
 
 struct Vue3PackageImportResolutionGuard<'a> {
@@ -459,7 +459,7 @@ impl Vue3ExternalTypeLoadSession {
         package_dir: &Path,
         source: &str,
         resolution_mode: Vue3TypeResolutionMode,
-        typescript_version: &nodejs_semver::Version,
+        type_resolver: &Vue3TypeResolverContext,
     ) -> Vue3PackageImportResolutionLoad<'_> {
         if self.metadata_is_blocked() {
             return Vue3PackageImportResolutionLoad::Blocked;
@@ -468,7 +468,7 @@ impl Vue3ExternalTypeLoadSession {
             package_dir: vue3_external_type_path_identity(package_dir),
             source: source.to_string(),
             resolution_mode,
-            typescript_version: typescript_version.to_string(),
+            resolver: Vue3TypeResolverCacheIdentity::from_resolver(type_resolver),
         };
         let owner = std::thread::current().id();
         let mut state = self.lock();

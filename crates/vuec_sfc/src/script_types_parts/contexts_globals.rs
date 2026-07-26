@@ -955,7 +955,7 @@ fn vue3_global_type_context_with_module_sources(
     for path in explicit_paths.chain(vue3_tsconfig_global_type_files(filename, type_resolver)) {
         if !seen.insert(vue3_external_type_context_cache_key(
             &path,
-            &type_resolver.typescript_version,
+            type_resolver,
         )) {
             continue;
         }
@@ -979,7 +979,7 @@ fn vue3_global_type_context_with_module_sources(
     for path in additional_global_paths {
         if seen.insert(vue3_external_type_context_cache_key(
             &path,
-            &type_resolver.typescript_version,
+            type_resolver,
         )) {
             let Some(source) = vue3_external_global_type_source_from_path(&path, type_resolver)
             else {
