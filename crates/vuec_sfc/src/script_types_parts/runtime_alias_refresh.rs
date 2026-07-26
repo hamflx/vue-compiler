@@ -348,6 +348,7 @@ impl Vue3GenericTypeEnvironment {
     pub(crate) fn from_analysis(analysis: &Vue3ScriptSetupAnalysis) -> Self {
         Self {
             definition_filename: analysis.type_filename.clone(),
+            definition_resolution_mode: analysis.type_resolution_mode,
             generic_type_aliases: analysis.generic_type_aliases.clone(),
             declared_types: analysis.declared_types.clone(),
             define_model_declared_types: analysis.define_model_declared_types.clone(),
@@ -476,6 +477,7 @@ impl Vue3GenericTypeEnvironment {
             .silent_unresolved_type_names
             .extend(self.silent_unresolved_type_names.iter().cloned());
         analysis.type_filename = self.definition_filename.clone();
+        analysis.type_resolution_mode = self.definition_resolution_mode;
     }
 }
 

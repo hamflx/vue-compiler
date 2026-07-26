@@ -105,6 +105,7 @@ pub(crate) struct Vue3ScriptSetupAnalysis {
     pub(crate) unresolved_import_sources: BTreeMap<String, String>,
     pub(crate) silent_unresolved_type_names: BTreeSet<String>,
     pub(crate) type_filename: Option<String>,
+    pub(crate) type_resolution_mode: Vue3TypeResolutionMode,
     pub(crate) type_seen: BTreeSet<PathBuf>,
     pub(crate) type_resolver: Vue3TypeResolverContext,
 }

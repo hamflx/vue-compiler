@@ -8,10 +8,27 @@ enum Vue3ExternalTypeSourceKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Vue3ExternalTypeSourceCacheKey {
+struct Vue3ExternalTypeSemanticIdentity {
     path: PathBuf,
-    kind: Vue3ExternalTypeSourceKind,
     mode: String,
+}
+
+impl Vue3ExternalTypeSemanticIdentity {
+    fn work(&self) -> usize {
+        self.path
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .saturating_add(self.mode.len())
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(1)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3ExternalTypeSourceCacheKey {
+    semantic: Vue3ExternalTypeSemanticIdentity,
+    kind: Vue3ExternalTypeSourceKind,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +311,7 @@ mod source_single_flight_tests {
         Vue3ExternalTypeSource {
             source: value.into(),
             source_type: oxc_span::SourceType::ts(),
+            resolution_mode: Vue3TypeResolutionMode::Import,
         }
     }
 
@@ -302,9 +320,11 @@ mod source_single_flight_tests {
         kind: Vue3ExternalTypeSourceKind,
     ) -> Vue3ExternalTypeSourceCacheKey {
         Vue3ExternalTypeSourceCacheKey {
-            path: PathBuf::from(value),
+            semantic: Vue3ExternalTypeSemanticIdentity {
+                path: PathBuf::from(value),
+                mode: "test".into(),
+            },
             kind,
-            mode: "test".into(),
         }
     }
 
@@ -337,10 +357,18 @@ mod source_single_flight_tests {
             vue3_external_type_source_cache_key(
                 &first,
                 Vue3ExternalTypeSourceKind::Import,
+                Vue3ExternalTypeFormat {
+                    source_type: oxc_span::SourceType::ts(),
+                    resolution_mode: Vue3TypeResolutionMode::Import,
+                },
             ),
             vue3_external_type_source_cache_key(
                 &second,
                 Vue3ExternalTypeSourceKind::Import,
+                Vue3ExternalTypeFormat {
+                    source_type: oxc_span::SourceType::ts(),
+                    resolution_mode: Vue3TypeResolutionMode::Import,
+                },
             )
         );
         assert_eq!(
@@ -351,11 +379,324 @@ mod source_single_flight_tests {
             vue3_external_type_source_cache_key(
                 &first,
                 Vue3ExternalTypeSourceKind::Import,
+                Vue3ExternalTypeFormat {
+                    source_type: oxc_span::SourceType::ts(),
+                    resolution_mode: Vue3TypeResolutionMode::Import,
+                },
             ),
             vue3_external_type_source_cache_key(
                 &uppercase,
                 Vue3ExternalTypeSourceKind::Import,
+                Vue3ExternalTypeFormat {
+                    source_type: oxc_span::SourceType::ts(),
+                    resolution_mode: Vue3TypeResolutionMode::Import,
+                },
             )
+        );
+    }
+
+    #[test]
+    fn package_scopes_separate_resolution_mode_from_declaration_scope() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let module_package = node_modules.join("module-package");
+        let commonjs_package = node_modules.join("commonjs-package");
+        let outer_package = node_modules.join("outer-package");
+        let nested_package = outer_package.join("nested");
+        let manifestless_package = node_modules.join("manifestless-package");
+        std::fs::create_dir_all(&module_package).expect("create module package");
+        std::fs::create_dir_all(&commonjs_package).expect("create CommonJS package");
+        std::fs::create_dir_all(&nested_package).expect("create nested package");
+        std::fs::create_dir_all(&manifestless_package).expect("create manifestless package");
+        std::fs::write(dir.path().join("package.json"), r#"{"type":"module"}"#)
+            .expect("write application manifest");
+        std::fs::write(
+            module_package.join("package.json"),
+            r#"{"type":"module"}"#,
+        )
+        .expect("write module package manifest");
+        std::fs::write(
+            commonjs_package.join("package.json"),
+            r#"{"type":"commonjs"}"#,
+        )
+        .expect("write CommonJS package manifest");
+        std::fs::write(
+            outer_package.join("package.json"),
+            r#"{"type":"module"}"#,
+        )
+        .expect("write outer package manifest");
+        std::fs::write(nested_package.join("package.json"), "{}")
+            .expect("write nested package boundary");
+        let session = Vue3ExternalTypeLoadSession::default();
+
+        let module_ts = vue3_external_type_format(&module_package.join("index.ts"), &session)
+            .expect("module TypeScript format");
+        assert!(module_ts.source_type.is_module());
+        assert_eq!(module_ts.resolution_mode, Vue3TypeResolutionMode::Import);
+
+        let module_dts =
+            vue3_external_type_format(&module_package.join("index.d.ts"), &session)
+                .expect("module declaration format");
+        assert!(module_dts.source_type.is_typescript_definition());
+        assert!(module_dts.source_type.is_unambiguous());
+        assert_eq!(module_dts.resolution_mode, Vue3TypeResolutionMode::Import);
+
+        let commonjs_ts =
+            vue3_external_type_format(&commonjs_package.join("index.ts"), &session)
+                .expect("CommonJS TypeScript format");
+        assert!(commonjs_ts.source_type.is_unambiguous());
+        assert_eq!(
+            commonjs_ts.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+
+        let nested_ts = vue3_external_type_format(&nested_package.join("index.ts"), &session)
+            .expect("nested default CommonJS format");
+        assert!(nested_ts.source_type.is_unambiguous());
+        assert_eq!(nested_ts.resolution_mode, Vue3TypeResolutionMode::Require);
+
+        let explicit_commonjs =
+            vue3_external_type_format(&module_package.join("index.d.cts"), &session)
+                .expect("explicit CommonJS format");
+        assert!(explicit_commonjs.source_type.is_typescript_definition());
+        assert!(explicit_commonjs.source_type.is_commonjs());
+        assert_eq!(
+            explicit_commonjs.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+
+        let local_package = dir.path().join("local-package");
+        std::fs::create_dir_all(&local_package).expect("create local package");
+        std::fs::write(
+            local_package.join("package.json"),
+            r#"{"type":"commonjs"}"#,
+        )
+        .expect("write local package manifest");
+        let local_ts = vue3_external_type_format(&local_package.join("index.ts"), &session)
+            .expect("local TypeScript format");
+        assert!(local_ts.source_type.is_unambiguous());
+        assert_eq!(local_ts.resolution_mode, Vue3TypeResolutionMode::Import);
+
+        let manifestless_ts =
+            vue3_external_type_format(&manifestless_package.join("index.ts"), &session)
+                .expect("manifestless dependency format");
+        assert!(manifestless_ts.source_type.is_unambiguous());
+        assert_eq!(
+            manifestless_ts.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+    }
+
+    #[test]
+    fn package_scope_metadata_precedes_source_budget_and_is_cached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("package");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(package.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package manifest");
+        std::fs::write(package.join("first.ts"), "export interface First {}")
+            .expect("write first source");
+        std::fs::write(package.join("second.ts"), "export interface Second {}")
+            .expect("write second source");
+        let session = Vue3ExternalTypeLoadSession::default();
+
+        assert!(session
+            .source_from_path(&package.join("first.ts"), Vue3ExternalTypeSourceKind::Import)
+            .is_some());
+        assert!(session
+            .source_from_path(&package.join("second.ts"), Vue3ExternalTypeSourceKind::Import)
+            .is_some());
+        let stats = session.stats();
+        assert_eq!(stats.metadata_files_read, 1);
+        assert_eq!(stats.metadata_parse_cache_hits, 1);
+        assert_eq!(stats.ancestor_search_entries, 1);
+        assert_eq!(stats.import_files_read, 2);
+
+        let blocked = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_files: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(blocked
+            .source_from_path(&package.join("first.ts"), Vue3ExternalTypeSourceKind::Import)
+            .is_none());
+        assert_eq!(blocked.stats().import_files_read, 0);
+        assert!(blocked.metadata_is_blocked());
+
+        let explicit = package.join("explicit.mts");
+        std::fs::write(&explicit, "export interface Explicit {}")
+            .expect("write explicit source");
+        let source = blocked
+            .source_from_path(&explicit, Vue3ExternalTypeSourceKind::Import)
+            .expect("explicit source bypasses package metadata");
+        assert!(source.source_type.is_module());
+        assert_eq!(source.resolution_mode, Vue3TypeResolutionMode::Import);
+        assert_eq!(blocked.stats().import_files_read, 1);
+    }
+
+    #[test]
+    fn package_scope_search_honors_exact_depth_and_malformed_boundaries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("package");
+        let deep = package.join("deep");
+        std::fs::create_dir_all(&deep).expect("create deep package directory");
+        std::fs::write(package.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write package manifest");
+        let source_path = deep.join("index.ts");
+        std::fs::write(&source_path, "export interface Props {}")
+            .expect("write package source");
+
+        let exact = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_ancestor_search_depth: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let source = exact
+            .source_from_path(&source_path, Vue3ExternalTypeSourceKind::Import)
+            .expect("find manifest at exact depth");
+        assert_eq!(source.resolution_mode, Vue3TypeResolutionMode::Require);
+        assert_eq!(exact.stats().ancestor_search_entries, 2);
+        assert!(!exact.metadata_is_blocked());
+
+        let short = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_ancestor_search_depth: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(short
+            .source_from_path(&source_path, Vue3ExternalTypeSourceKind::Import)
+            .is_none());
+        assert_eq!(short.stats().ancestor_search_entries, 1);
+        assert_eq!(short.stats().import_files_read, 0);
+        assert!(short.metadata_is_blocked());
+
+        let malformed = package.join("malformed");
+        std::fs::create_dir_all(&malformed).expect("create malformed package boundary");
+        std::fs::write(malformed.join("package.json"), "{")
+            .expect("write malformed package manifest");
+        let malformed_source = malformed.join("index.ts");
+        std::fs::write(&malformed_source, "export interface Malformed {}")
+            .expect("write malformed package source");
+        let malformed_session = Vue3ExternalTypeLoadSession::default();
+        assert!(malformed_session
+            .source_from_path(&malformed_source, Vue3ExternalTypeSourceKind::Import)
+            .is_none());
+        assert_eq!(malformed_session.stats().ancestor_search_entries, 1);
+        assert_eq!(malformed_session.stats().import_files_read, 0);
+        assert!(malformed_session.metadata_is_blocked());
+
+        let application = dir.path().join("application");
+        let manifestless = application.join("node_modules").join("manifestless");
+        std::fs::create_dir_all(&manifestless).expect("create manifestless dependency");
+        std::fs::write(application.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write outer application manifest");
+        let manifestless_source = manifestless.join("index.ts");
+        std::fs::write(&manifestless_source, "interface ManifestlessGlobal {}")
+            .expect("write manifestless source");
+        let boundary = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_ancestor_search_depth: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let source = boundary
+            .source_from_path(
+                &manifestless_source,
+                Vue3ExternalTypeSourceKind::Import,
+            )
+            .expect("stop before node_modules boundary");
+        assert!(source.source_type.is_unambiguous());
+        assert_eq!(source.resolution_mode, Vue3TypeResolutionMode::Require);
+        assert_eq!(boundary.stats().ancestor_search_entries, 1);
+        assert_eq!(boundary.stats().import_files_read, 1);
+        assert!(!boundary.metadata_is_blocked());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_cache_separates_symlinked_package_scope_modes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let shared = dir.path().join("shared.ts");
+        std::fs::write(
+            &shared,
+            "import 'scope-conditional'; export interface Shared {}",
+        )
+        .expect("write shared source");
+        let module_package = dir.path().join("node_modules").join("module-package");
+        let commonjs_package = dir.path().join("node_modules").join("commonjs-package");
+        std::fs::create_dir_all(&module_package).expect("create module package");
+        std::fs::create_dir_all(&commonjs_package).expect("create CommonJS package");
+        std::fs::write(
+            module_package.join("package.json"),
+            r#"{"type":"module"}"#,
+        )
+        .expect("write module package manifest");
+        std::fs::write(
+            commonjs_package.join("package.json"),
+            r#"{"type":"commonjs"}"#,
+        )
+        .expect("write CommonJS package manifest");
+        std::os::unix::fs::symlink(&shared, module_package.join("index.ts"))
+            .expect("link module source");
+        std::os::unix::fs::symlink(&shared, commonjs_package.join("index.ts"))
+            .expect("link CommonJS source");
+        let session = Vue3ExternalTypeLoadSession::default();
+
+        let module_source = session
+            .source_from_path(
+                &module_package.join("index.ts"),
+                Vue3ExternalTypeSourceKind::Import,
+            )
+            .expect("load module source");
+        let commonjs_source = session
+            .source_from_path(
+                &commonjs_package.join("index.ts"),
+                Vue3ExternalTypeSourceKind::Import,
+            )
+            .expect("load CommonJS source");
+
+        assert!(module_source.source_type.is_module());
+        assert_eq!(module_source.resolution_mode, Vue3TypeResolutionMode::Import);
+        assert!(commonjs_source.source_type.is_unambiguous());
+        assert_eq!(
+            commonjs_source.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+        assert!(!std::sync::Arc::ptr_eq(&module_source, &commonjs_source));
+        assert_eq!(session.stats().import_files_read, 2);
+
+        let conditional = dir.path().join("node_modules").join("scope-conditional");
+        std::fs::create_dir_all(&conditional).expect("create conditional package");
+        std::fs::write(
+            conditional.join("package.json"),
+            r#"{"exports":{".":{"types":{"import":"./import.d.mts","require":"./require.d.cts"}}}}"#,
+        )
+        .expect("write conditional package manifest");
+        let import_entry = conditional.join("import.d.mts");
+        let require_entry = conditional.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            "declare global { interface ImportScopeGlobal {} } export {}",
+        )
+        .expect("write import augmentation");
+        std::fs::write(
+            &require_entry,
+            "declare global { interface RequireScopeGlobal {} } export {}",
+        )
+        .expect("write require augmentation");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import './node_modules/module-package/index'; import './node_modules/commonjs-package/index'",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+        let augmentations = vue3_reachable_global_augmentation_files(
+            &filename,
+            &[],
+            &roots,
+            &Vue3TypeResolverContext::default(),
+        )
+        .expect("scan both package scope modes")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            augmentations,
+            BTreeSet::from([import_entry, require_entry])
         );
     }
 

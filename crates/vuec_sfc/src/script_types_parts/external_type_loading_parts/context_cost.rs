@@ -417,6 +417,7 @@ pub(crate) fn vue3_external_generic_environment_cache_cost(
 ) -> usize {
     [
         environment.definition_filename.as_ref().map_or(0, String::len),
+        std::mem::size_of::<Vue3TypeResolutionMode>(),
         vue3_external_string_map_cost(
             &environment.generic_type_aliases,
             vue3_external_generic_alias_payload_cost,

@@ -227,6 +227,7 @@ fn vue3_resolve_generic_interface_fragments(
     let mut scoped_analysis = Vue3ScriptSetupAnalysis {
         generic_type_aliases: bound_analysis.generic_type_aliases.clone(),
         type_filename: bound_analysis.type_filename.clone(),
+        type_resolution_mode: bound_analysis.type_resolution_mode,
         type_seen: bound_analysis.type_seen.clone(),
         type_resolver: bound_analysis.type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
@@ -317,6 +318,7 @@ fn prepare_vue3_scoped_analysis_for_generic_interface_fragment(
     *scoped_analysis = Vue3ScriptSetupAnalysis {
         generic_type_aliases,
         type_filename: bound_analysis.type_filename.clone(),
+        type_resolution_mode: bound_analysis.type_resolution_mode,
         type_seen: bound_analysis.type_seen.clone(),
         type_resolver: bound_analysis.type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()

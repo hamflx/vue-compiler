@@ -288,6 +288,7 @@ struct Vue3AncestorSearchPaths<'a> {
     current: Option<&'a Path>,
     suffix: &'static str,
     remaining_depth: usize,
+    stop_before_node_modules: bool,
     session: &'a Vue3ExternalTypeLoadSession,
 }
 
@@ -301,8 +302,14 @@ impl<'a> Vue3AncestorSearchPaths<'a> {
             current,
             suffix,
             remaining_depth: session.max_ancestor_search_depth(),
+            stop_before_node_modules: false,
             session,
         }
+    }
+
+    fn package_scope(mut self) -> Self {
+        self.stop_before_node_modules = true;
+        self
     }
 }
 
@@ -311,6 +318,13 @@ impl Iterator for Vue3AncestorSearchPaths<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let dir = self.current.take()?;
+        if self.stop_before_node_modules
+            && dir
+                .file_name()
+                .is_some_and(vue3_path_component_is_node_modules)
+        {
+            return None;
+        }
         self.current = dir.parent();
         if self.remaining_depth == 0 {
             self.current = None;
@@ -324,6 +338,22 @@ impl Iterator for Vue3AncestorSearchPaths<'_> {
         }
         Some(normalize_path_components(dir.join(self.suffix)))
     }
+}
+
+fn vue3_package_module_type_for_path(
+    path: &Path,
+    session: &Vue3ExternalTypeLoadSession,
+) -> Option<Vue3PackageModuleType> {
+    for package_json in
+        Vue3AncestorSearchPaths::new(path.parent(), "package.json", session).package_scope()
+    {
+        match session.package_json_from_path(&package_json) {
+            Some(package) => return Some(package.module_type),
+            None if session.metadata_is_blocked() => return None,
+            None => {}
+        }
+    }
+    (!session.metadata_is_blocked()).then_some(Vue3PackageModuleType::CommonJs)
 }
 
 pub(crate) fn vue3_node_modules_search_paths<'a>(

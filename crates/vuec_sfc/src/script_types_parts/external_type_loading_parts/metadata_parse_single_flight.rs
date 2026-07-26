@@ -725,4 +725,27 @@ mod metadata_parse_single_flight_tests {
         assert_eq!(stats.metadata_parse_cache_hits, 7);
         assert!(!session.metadata_is_blocked());
     }
+
+    #[test]
+    fn package_module_type_values_are_strict_and_non_fatal() {
+        for (value, expected) in [
+            (r#""module""#, Vue3PackageModuleType::Module),
+            (r#""commonjs""#, Vue3PackageModuleType::CommonJs),
+            (r#""MODULE""#, Vue3PackageModuleType::CommonJs),
+            (r#""invalid""#, Vue3PackageModuleType::CommonJs),
+            ("true", Vue3PackageModuleType::CommonJs),
+            ("null", Vue3PackageModuleType::CommonJs),
+            (r#"{"nested":true}"#, Vue3PackageModuleType::CommonJs),
+        ] {
+            let source = format!(r#"{{"type":{value},"types":"index.d.ts"}}"#);
+            let manifest = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source)
+                .expect("parse package manifest");
+            assert_eq!(manifest.module_type, expected, "{value}");
+            assert_eq!(
+                manifest.types.as_ref().and_then(serde_json::Value::as_str),
+                Some("index.d.ts"),
+                "{value}"
+            );
+        }
+    }
 }

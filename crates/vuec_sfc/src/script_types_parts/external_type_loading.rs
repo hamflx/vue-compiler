@@ -2,6 +2,13 @@
 pub(crate) struct Vue3ExternalTypeSource {
     pub(crate) source: String,
     pub(crate) source_type: oxc_span::SourceType,
+    pub(crate) resolution_mode: Vue3TypeResolutionMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Vue3ExternalTypeFormat {
+    source_type: oxc_span::SourceType,
+    resolution_mode: Vue3TypeResolutionMode,
 }
 
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES: usize = 64;
@@ -283,12 +290,13 @@ impl Vue3ExternalTypeLoadSession {
         path: &Path,
         kind: Vue3ExternalTypeSourceKind,
     ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
-        let cache_key = vue3_external_type_source_cache_key(path, kind);
+        let format = vue3_external_type_format(path, self)?;
+        let cache_key = vue3_external_type_source_cache_key(path, kind, format);
         match self.begin_source_load(cache_key) {
             Vue3ExternalTypeSourceLoad::Ready(source) => Some(source),
             Vue3ExternalTypeSourceLoad::Wait(waiter) => waiter.wait(),
             Vue3ExternalTypeSourceLoad::Start(mut owner) => {
-                let source = read_vue3_external_type_source(path, &mut owner);
+                let source = read_vue3_external_type_source(path, format, &mut owner);
                 owner.complete(source)
             }
             Vue3ExternalTypeSourceLoad::Failed => None,
@@ -414,15 +422,38 @@ fn vue3_external_type_context_cache_key(
 fn vue3_external_type_source_cache_key(
     path: &Path,
     kind: Vue3ExternalTypeSourceKind,
+    format: Vue3ExternalTypeFormat,
 ) -> Vue3ExternalTypeSourceCacheKey {
     Vue3ExternalTypeSourceCacheKey {
-        path: vue3_external_type_path_identity(path),
+        semantic: vue3_external_type_semantic_identity(path, format),
         kind,
-        mode: vue3_external_type_source_mode(path),
     }
 }
 
-fn vue3_external_type_source_mode(path: &Path) -> String {
+fn vue3_external_type_semantic_identity(
+    path: &Path,
+    format: Vue3ExternalTypeFormat,
+) -> Vue3ExternalTypeSemanticIdentity {
+    Vue3ExternalTypeSemanticIdentity {
+        path: vue3_external_type_path_identity(path),
+        mode: vue3_external_type_source_mode(path, format),
+    }
+}
+
+fn vue3_external_type_source_semantic_identity(
+    path: &Path,
+    source: &Vue3ExternalTypeSource,
+) -> Vue3ExternalTypeSemanticIdentity {
+    vue3_external_type_semantic_identity(
+        path,
+        Vue3ExternalTypeFormat {
+            source_type: source.source_type,
+            resolution_mode: source.resolution_mode,
+        },
+    )
+}
+
+fn vue3_external_type_source_mode(path: &Path, format: Vue3ExternalTypeFormat) -> String {
     if path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -430,7 +461,7 @@ fn vue3_external_type_source_mode(path: &Path) -> String {
     {
         return "vue".to_string();
     }
-    let source_type = vue3_type_source_type(&normalize_path_string(path));
+    let source_type = format.source_type;
     let language = if source_type.is_typescript_definition() {
         "dts"
     } else if source_type.is_typescript() {
@@ -445,7 +476,11 @@ fn vue3_external_type_source_mode(path: &Path) -> String {
         oxc_span::ModuleKind::CommonJS => "commonjs",
     };
     let variant = if source_type.is_jsx() { "jsx" } else { "plain" };
-    format!("{language}:{module}:{variant}")
+    let resolution = match format.resolution_mode {
+        Vue3TypeResolutionMode::Import => "import",
+        Vue3TypeResolutionMode::Require => "require",
+    };
+    format!("{language}:{module}:{variant}:{resolution}")
 }
 
 pub(crate) fn vue3_external_type_source_from_path(
@@ -468,6 +503,7 @@ pub(crate) fn vue3_external_global_type_source_from_path(
 
 fn read_vue3_external_type_source(
     path: &Path,
+    format: Vue3ExternalTypeFormat,
     owner: &mut Vue3ExternalTypeSourceOwner,
 ) -> Option<Vue3ExternalTypeSource> {
     let mut file = std::fs::File::open(path).ok()?;
@@ -507,7 +543,8 @@ fn read_vue3_external_type_source(
     }
     Some(Vue3ExternalTypeSource {
         source,
-        source_type: vue3_type_source_type(&normalize_path_string(path)),
+        source_type: format.source_type,
+        resolution_mode: format.resolution_mode,
     })
 }
 
@@ -542,6 +579,65 @@ pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3Ex
     Vue3ExternalTypeSource {
         source: blocks.join("\n"),
         source_type,
+        resolution_mode: Vue3TypeResolutionMode::Import,
+    }
+}
+
+fn vue3_external_type_format(
+    path: &Path,
+    session: &Vue3ExternalTypeLoadSession,
+) -> Option<Vue3ExternalTypeFormat> {
+    let lexical_path = normalize_path_components(path.to_path_buf());
+    let mut source_type = vue3_type_source_type(&normalize_path_string(&lexical_path));
+    let mut resolution_mode = vue3_static_resolution_mode(source_type);
+    if !vue3_path_has_ambiguous_module_extension(&lexical_path)
+        || !vue3_path_contains_node_modules(&lexical_path)
+    {
+        return Some(Vue3ExternalTypeFormat {
+            source_type,
+            resolution_mode,
+        });
+    }
+
+    match vue3_package_module_type_for_path(&lexical_path, session)? {
+        Vue3PackageModuleType::Module => {
+            resolution_mode = Vue3TypeResolutionMode::Import;
+            if !source_type.is_typescript_definition() {
+                source_type = source_type.with_module(true);
+            }
+        }
+        Vue3PackageModuleType::CommonJs => {
+            resolution_mode = Vue3TypeResolutionMode::Require;
+        }
+    }
+    Some(Vue3ExternalTypeFormat {
+        source_type,
+        resolution_mode,
+    })
+}
+
+fn vue3_path_has_ambiguous_module_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["ts", "tsx", "js", "jsx"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn vue3_path_contains_node_modules(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if vue3_path_component_is_node_modules(name))
+    })
+}
+
+fn vue3_path_component_is_node_modules(name: &std::ffi::OsStr) -> bool {
+    if cfg!(windows) {
+        name.to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("node_modules"))
+    } else {
+        name == std::ffi::OsStr::new("node_modules")
     }
 }
 

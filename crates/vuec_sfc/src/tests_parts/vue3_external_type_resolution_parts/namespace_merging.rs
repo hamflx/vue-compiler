@@ -537,6 +537,78 @@ fn vue3_declaration_file_formats_do_not_force_module_scope() {
 }
 
 #[test]
+fn vue3_package_type_module_forces_only_non_declaration_module_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let node_modules = dir.path().join("node_modules");
+    let module_package = node_modules.join("module-scope");
+    let commonjs_package = node_modules.join("commonjs-scope");
+    std::fs::create_dir_all(&module_package).expect("create module package");
+    std::fs::create_dir_all(&commonjs_package).expect("create CommonJS package");
+    std::fs::write(
+        module_package.join("package.json"),
+        r#"{"type":"module"}"#,
+    )
+    .expect("write module package manifest");
+    std::fs::write(
+        commonjs_package.join("package.json"),
+        r#"{"type":"commonjs"}"#,
+    )
+    .expect("write CommonJS package manifest");
+    let module_typescript = module_package.join("module.ts");
+    let module_javascript = module_package.join("module.js");
+    let module_declaration = module_package.join("globals.d.ts");
+    let commonjs_typescript = commonjs_package.join("script.ts");
+    std::fs::write(
+        &module_typescript,
+        "interface PackageModuleTypePrivate { hidden: string }",
+    )
+    .expect("write module TypeScript source");
+    std::fs::write(
+        &module_javascript,
+        "class PackageModuleValuePrivate {}",
+    )
+    .expect("write module JavaScript source");
+    std::fs::write(
+        &module_declaration,
+        "interface PackageModuleDeclarationGlobal { visible: number }",
+    )
+    .expect("write module declaration source");
+    std::fs::write(
+        &commonjs_typescript,
+        "interface PackageCommonJsScriptGlobal { visible: boolean }",
+    )
+    .expect("write CommonJS TypeScript source");
+
+    let context = vue3_global_type_context(
+        &dir.path().join("Comp.vue").to_string_lossy(),
+        &[
+            module_typescript.to_string_lossy().to_string(),
+            module_javascript.to_string_lossy().to_string(),
+            module_declaration.to_string_lossy().to_string(),
+            commonjs_typescript.to_string_lossy().to_string(),
+        ],
+        &Vue3TypeResolverContext::default(),
+    );
+
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "PackageModuleTypePrivate"
+    ));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "PackageModuleValuePrivate"
+    ));
+    assert!(vue3_type_context_has_name(
+        &context,
+        "PackageModuleDeclarationGlobal"
+    ));
+    assert!(vue3_type_context_has_name(
+        &context,
+        "PackageCommonJsScriptGlobal"
+    ));
+}
+
+#[test]
 fn vue3_split_namespaces_merge_interface_declarations() {
     let dir = tempfile::tempdir().expect("temp dir");
     let types = dir.path().join("types.ts");

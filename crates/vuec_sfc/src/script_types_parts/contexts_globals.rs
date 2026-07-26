@@ -799,6 +799,7 @@ fn vue3_global_generic_environment_stability_eq(
     right: &Vue3GenericTypeEnvironment,
 ) -> bool {
     left.definition_filename == right.definition_filename
+        && left.definition_resolution_mode == right.definition_resolution_mode
         && vue3_global_generic_alias_payloads_eq(
             &left.generic_type_aliases,
             &right.generic_type_aliases,
@@ -1343,6 +1344,7 @@ fn vue3_global_type_projection_from_file(
         &file.source.source,
         &normalized,
         file.source.source_type,
+        file.source.resolution_mode,
         base_context,
         base_kinds,
         type_resolver,
@@ -1364,6 +1366,7 @@ fn vue3_global_type_projection_from_source(
     source: &str,
     filename: &str,
     source_type: oxc_span::SourceType,
+    static_resolution_mode: Vue3TypeResolutionMode,
     base_context: &Vue27TypeContext,
     base_kinds: &Vue3GlobalDeclarationKinds,
     type_resolver: &Vue3TypeResolverContext,
@@ -1396,10 +1399,11 @@ fn vue3_global_type_projection_from_source(
     }
     let mut seed_context = base_context.clone();
     let mut seen = BTreeSet::new();
-    if !extend_vue3_type_context_from_external_imports_with_seen(
+    if !extend_vue3_type_context_from_external_imports_with_seen_and_mode(
         filename,
         source,
         source_type,
+        static_resolution_mode,
         &mut seed_context,
         &mut seen,
         type_resolver,
@@ -1413,6 +1417,7 @@ fn vue3_global_type_projection_from_source(
         &parsed.program.body,
         source_type.is_typescript_definition(),
         program_is_global_script,
+        static_resolution_mode,
         type_resolver,
         base_kinds,
         namespace_budget,
@@ -1493,6 +1498,7 @@ fn vue3_global_type_projection_from_source(
         unresolved_import_sources: seed_context.unresolved_import_sources,
         silent_unresolved_type_names: seed_context.silent_unresolved_type_names,
         type_filename: Some(filename.to_string()),
+        type_resolution_mode: static_resolution_mode,
         type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
@@ -1518,7 +1524,7 @@ fn vue3_global_type_projection_from_source(
     let re_exported = project_vue3_global_type_re_exports(
         filename,
         &parsed.program.body,
-        source_type,
+        static_resolution_mode,
         &mut analysis,
         type_resolver,
         namespace_budget,
@@ -1637,6 +1643,7 @@ fn vue3_global_declaration_kinds(
     statements: &[Statement<'_>],
     is_typescript_definition: bool,
     program_is_global_script: bool,
+    static_resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
     base_kinds: &Vue3GlobalDeclarationKinds,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
@@ -1659,6 +1666,7 @@ fn vue3_global_declaration_kinds(
         identities: vue3_global_type_file_import_scope_identities_with_budget(
             statements,
             definition_key,
+            static_resolution_mode,
             type_resolver,
             namespace_budget,
         )?,
@@ -6643,6 +6651,24 @@ mod vue3_global_merge_budget_tests {
             .insert("Leaf".to_string(), vec!["Number".to_string()]);
         assert!(!vue3_global_type_context_stability_eq(&left, &right));
 
+        {
+            let Vue3GenericTypeScope::Captured(environment) = &mut right
+                .generic_type_aliases
+                .get_mut("Box")
+                .expect("right alias")
+                .scope
+            else {
+                panic!("captured right alias");
+            };
+            let environment = std::sync::Arc::make_mut(environment);
+            environment.declared_types = BTreeMap::from([(
+                "Leaf".to_string(),
+                vec!["String".to_string()],
+            )]);
+            environment.definition_filename = Some("other.d.ts".to_string());
+        }
+        assert!(!vue3_global_type_context_stability_eq(&left, &right));
+
         let Vue3GenericTypeScope::Captured(environment) = &mut right
             .generic_type_aliases
             .get_mut("Box")
@@ -6652,11 +6678,8 @@ mod vue3_global_merge_budget_tests {
             panic!("captured right alias");
         };
         let environment = std::sync::Arc::make_mut(environment);
-        environment.declared_types = BTreeMap::from([(
-            "Leaf".to_string(),
-            vec!["String".to_string()],
-        )]);
-        environment.definition_filename = Some("other.d.ts".to_string());
+        environment.definition_filename = Some("global.d.ts".to_string());
+        environment.definition_resolution_mode = Vue3TypeResolutionMode::Require;
         assert!(!vue3_global_type_context_stability_eq(&left, &right));
     }
 
@@ -7614,7 +7637,7 @@ fn collect_vue3_ambient_global_type_from_statement(
 pub(crate) fn project_vue3_global_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
-    source_type: oxc_span::SourceType,
+    static_resolution_mode: Vue3TypeResolutionMode,
     analysis: &mut Vue3ScriptSetupAnalysis,
     type_resolver: &Vue3TypeResolverContext,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
@@ -7628,7 +7651,7 @@ pub(crate) fn project_vue3_global_type_re_exports(
         names.extend(project_vue3_type_re_exports(
             filename,
             &global.body.body,
-            vue3_static_resolution_mode(source_type),
+            static_resolution_mode,
             analysis,
             &mut seen,
             type_resolver,
@@ -7697,12 +7720,12 @@ fn vue3_global_type_file_import_names_with_budget(
 fn vue3_global_type_file_import_scope_identities_with_budget(
     statements: &[Statement<'_>],
     definition_key: &str,
+    static_resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<BTreeMap<String, String>> {
     let importer = Path::new(definition_key);
     let importer_directory = importer.parent().unwrap_or_else(|| Path::new(""));
-    let static_resolution_mode = vue3_static_resolution_mode(vue3_type_source_type(definition_key));
     let mut identities = BTreeMap::new();
     for statement in statements {
         let Statement::ImportDeclaration(import) = statement else {

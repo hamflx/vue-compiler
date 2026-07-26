@@ -454,6 +454,194 @@ defineProps<DirectRequired & NamedRequired & AllRequired & CommonJsImported & Co
     }
 
     #[test]
+    fn vue3_package_type_drives_transitive_resolution_modes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let conditional = node_modules.join("vuec-package-type-conditional");
+        std::fs::create_dir_all(&conditional).expect("create conditional package");
+        std::fs::write(
+            conditional.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional package manifest");
+        let import_entry = conditional.join("import.d.mts");
+        let require_entry = conditional.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            r#"
+export interface ImportDirect { importDirect: string }
+export interface ImportType { importType: number }
+export interface ImportNamed { importNamed: boolean }
+export interface ImportAll { importAll: bigint }
+export interface ImportExplicit { importExplicit: symbol }
+export interface ImportBoundary { importBoundary: object }
+export interface ImportGeneric { importGeneric: string }
+export interface WrongRequireDirect { wrongRequireDirect: string }
+"#,
+        )
+        .expect("write import condition types");
+        std::fs::write(
+            &require_entry,
+            r#"
+export interface RequireDirect { requireDirect: string }
+export interface RequireType { requireType: number }
+export interface RequireNamed { requireNamed: boolean }
+export interface RequireAll { requireAll: bigint }
+export interface RequireExplicit { requireExplicit: symbol }
+export interface RequireBoundary { requireBoundary: object }
+export interface RequireGeneric { requireGeneric: string }
+export interface WrongImportDirect { wrongImportDirect: string }
+"#,
+        )
+        .expect("write require condition types");
+
+        let commonjs_bridge = node_modules.join("vuec-commonjs-type-bridge");
+        std::fs::create_dir_all(&commonjs_bridge).expect("create CommonJS bridge");
+        std::fs::write(
+            commonjs_bridge.join("package.json"),
+            r#"{"type":"commonjs","types":"index.d.ts"}"#,
+        )
+        .expect("write CommonJS bridge manifest");
+        std::fs::write(
+            commonjs_bridge.join("index.d.ts"),
+            r#"
+import type { RequireDirect } from 'vuec-package-type-conditional'
+export interface CommonJsDirect extends RequireDirect {}
+export type CommonJsImportType = import('vuec-package-type-conditional').RequireType
+export type CommonJsGeneric<T> = T & import('vuec-package-type-conditional').RequireGeneric
+export type { RequireNamed as CommonJsNamed } from 'vuec-package-type-conditional'
+export * from 'vuec-package-type-conditional'
+"#,
+        )
+        .expect("write CommonJS bridge types");
+
+        let module_bridge = node_modules.join("vuec-module-type-bridge");
+        std::fs::create_dir_all(&module_bridge).expect("create module bridge");
+        std::fs::write(
+            module_bridge.join("package.json"),
+            r#"{"type":"module","types":"index.d.ts"}"#,
+        )
+        .expect("write module bridge manifest");
+        std::fs::write(
+            module_bridge.join("index.d.ts"),
+            r#"
+import type { ImportDirect } from 'vuec-package-type-conditional'
+export interface ModuleDirect extends ImportDirect {}
+export type ModuleImportType = import('vuec-package-type-conditional').ImportType
+export type { ImportNamed as ModuleNamed } from 'vuec-package-type-conditional'
+export * from 'vuec-package-type-conditional'
+"#,
+        )
+        .expect("write module bridge types");
+
+        let explicit_commonjs = node_modules.join("vuec-explicit-commonjs-bridge");
+        std::fs::create_dir_all(&explicit_commonjs).expect("create explicit CommonJS bridge");
+        std::fs::write(
+            explicit_commonjs.join("package.json"),
+            r#"{"type":"module","types":"index.d.cts"}"#,
+        )
+        .expect("write explicit CommonJS bridge manifest");
+        std::fs::write(
+            explicit_commonjs.join("index.d.cts"),
+            "export type ExplicitCommonJs = import('vuec-package-type-conditional').RequireExplicit",
+        )
+        .expect("write explicit CommonJS bridge types");
+
+        let explicit_module = node_modules.join("vuec-explicit-module-bridge");
+        std::fs::create_dir_all(&explicit_module).expect("create explicit module bridge");
+        std::fs::write(
+            explicit_module.join("package.json"),
+            r#"{"type":"commonjs","types":"index.d.mts"}"#,
+        )
+        .expect("write explicit module bridge manifest");
+        std::fs::write(
+            explicit_module.join("index.d.mts"),
+            "export type ExplicitModule = import('vuec-package-type-conditional').ImportExplicit",
+        )
+        .expect("write explicit module bridge types");
+
+        let nested_boundary = node_modules.join("vuec-nested-package-boundary");
+        let nested = nested_boundary.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested package boundary");
+        std::fs::write(
+            nested_boundary.join("package.json"),
+            r#"{"type":"module","types":"nested/index.d.ts"}"#,
+        )
+        .expect("write outer module package manifest");
+        std::fs::write(nested.join("package.json"), "{}")
+            .expect("write empty nested package manifest");
+        std::fs::write(
+            nested.join("index.d.ts"),
+            "export type BoundaryType = import('vuec-package-type-conditional').RequireBoundary",
+        )
+        .expect("write nested boundary types");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { CommonJsDirect, CommonJsGeneric, CommonJsImportType, CommonJsNamed, RequireAll } from 'vuec-commonjs-type-bridge'
+import type { ModuleDirect, ModuleImportType, ModuleNamed, ImportAll } from 'vuec-module-type-bridge'
+import type { ExplicitCommonJs } from 'vuec-explicit-commonjs-bridge'
+import type { ExplicitModule } from 'vuec-explicit-module-bridge'
+import type { BoundaryType } from 'vuec-nested-package-boundary'
+defineProps<CommonJsDirect & CommonJsGeneric<{ genericLocal: number }> & CommonJsImportType & CommonJsNamed & RequireAll & ModuleDirect & ModuleImportType & ModuleNamed & ImportAll & ExplicitCommonJs & ExplicitModule & BoundaryType>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for property in [
+            "requireDirect",
+            "requireType",
+            "requireNamed",
+            "requireAll",
+            "importDirect",
+            "importType",
+            "importNamed",
+            "importAll",
+            "requireExplicit",
+            "requireGeneric",
+            "genericLocal",
+            "importExplicit",
+            "requireBoundary",
+        ] {
+            assert!(
+                script.content.contains(&format!("{property}: {{ type:")),
+                "missing {property}: {}",
+                script.content
+            );
+        }
+        assert!(!script.content.contains("wrongRequireDirect:"));
+        assert!(!script.content.contains("wrongImportDirect:"));
+        assert!(!script.content.contains("importGeneric:"));
+        assert!(!script.content.contains("importBoundary:"));
+        for dependency in [
+            import_entry,
+            require_entry,
+            commonjs_bridge.join("index.d.ts"),
+            module_bridge.join("index.d.ts"),
+            explicit_commonjs.join("index.d.cts"),
+            explicit_module.join("index.d.mts"),
+            nested.join("index.d.ts"),
+        ] {
+            assert!(
+                script.deps.contains(&normalize_path_string(&dependency)),
+                "missing dependency {}",
+                dependency.display()
+            );
+        }
+    }
+
+    #[test]
     fn vue3_package_types_version_selector_supports_node_semver_ranges() {
         for selector in [
             "*",

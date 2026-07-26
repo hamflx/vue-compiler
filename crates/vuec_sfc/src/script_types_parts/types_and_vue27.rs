@@ -187,6 +187,7 @@ impl Eq for Vue3GenericTypeScope {}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Vue3GenericTypeEnvironment {
     pub(crate) definition_filename: Option<String>,
+    pub(crate) definition_resolution_mode: Vue3TypeResolutionMode,
     pub(crate) generic_type_aliases: BTreeMap<String, Vue3GenericTypeAlias>,
     pub(crate) declared_types: BTreeMap<String, Vec<String>>,
     pub(crate) define_model_declared_types: BTreeMap<String, Vec<String>>,

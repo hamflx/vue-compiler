@@ -151,7 +151,8 @@ struct Vue3TsconfigTypeRootsTraversal {
     cached_overrides: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigTypeRootsOverride>,
 }
 
-pub(crate) fn resolve_vue3_type_reference_directive(
+#[cfg(test)]
+fn resolve_vue3_type_reference_directive(
     project_filename: &str,
     containing_filename: &str,
     type_name: &str,

@@ -14,7 +14,15 @@ pub(crate) struct Vue3PackageJsonTypeManifest {
     pub(crate) types: Option<serde_json::Value>,
     pub(crate) typings: Option<serde_json::Value>,
     pub(crate) main: Option<serde_json::Value>,
+    pub(crate) module_type: Vue3PackageModuleType,
     pub(crate) types_versions: Vue3PackageTypesVersions,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Vue3PackageModuleType {
+    #[default]
+    CommonJs,
+    Module,
 }
 
 impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
@@ -44,6 +52,14 @@ impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
                         "types" => manifest.types = Some(map.next_value()?),
                         "typings" => manifest.typings = Some(map.next_value()?),
                         "main" => manifest.main = Some(map.next_value()?),
+                        "type" => {
+                            let value = map.next_value::<serde_json::Value>()?;
+                            manifest.module_type = match value.as_str() {
+                                Some("module") => Vue3PackageModuleType::Module,
+                                Some("commonjs") => Vue3PackageModuleType::CommonJs,
+                                _ => Vue3PackageModuleType::CommonJs,
+                            };
+                        }
                         "typesVersions" => manifest.types_versions = map.next_value()?,
                         _ => {
                             map.next_value::<IgnoredAny>()?;
