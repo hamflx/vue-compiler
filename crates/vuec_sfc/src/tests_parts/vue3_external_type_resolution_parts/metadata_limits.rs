@@ -184,6 +184,73 @@ fn vue3_include_glob_match_work_is_shared_and_fail_closed() {
 }
 
 #[test]
+fn vue3_tsconfig_exclude_entries_and_matching_are_bounded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types");
+    std::fs::create_dir_all(&types).expect("create exclude budget fixture");
+    let kept = types.join("kept.d.ts");
+    let excluded = types.join("excluded.d.ts");
+    std::fs::write(&kept, "declare interface Kept {}").expect("write kept declaration");
+    std::fs::write(&excluded, "declare interface Excluded {}")
+        .expect("write excluded declaration");
+    let value = serde_json::json!({
+        "include": ["./types/**/*.d.ts"],
+        "exclude": ["./types/excluded.d.ts"],
+        "compilerOptions": { "types": [] }
+    });
+
+    let measured = Vue3TypeResolverContext::default();
+    assert_eq!(
+        vue3_tsconfig_direct_global_type_files(&value, dir.path(), dir.path(), &measured),
+        vec![kept.clone()]
+    );
+    let stats = measured.external_type_session.stats();
+    let required_entries = stats.tsconfig_discovery_entries;
+    let required_files = stats.tsconfig_discovery_files;
+    let required_steps = stats.tsconfig_glob_match_steps;
+    assert!(required_entries >= 2);
+    assert_eq!(required_files, 2);
+    assert!(required_steps > 0);
+
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: required_entries,
+        max_tsconfig_discovery_files: required_files,
+        max_tsconfig_glob_match_steps: required_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_direct_global_type_files(&value, dir.path(), dir.path(), &exact),
+        vec![kept]
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    for limits in [
+        Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_entries: required_entries - 1,
+            max_tsconfig_discovery_files: required_files,
+            max_tsconfig_glob_match_steps: required_steps,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+        Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_entries: required_entries,
+            max_tsconfig_discovery_files: required_files,
+            max_tsconfig_glob_match_steps: required_steps - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+    ] {
+        let resolver = vue3_type_resolver_with_external_limits(limits);
+        assert!(vue3_tsconfig_direct_global_type_files(
+            &value,
+            dir.path(),
+            dir.path(),
+            &resolver,
+        )
+        .is_empty());
+        assert!(resolver.external_type_session.metadata_is_blocked());
+    }
+}
+
+#[test]
 fn vue3_adversarial_include_globs_stop_at_the_work_limit() {
     let max_path_bytes = VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES;
     let pattern = format!("*{}b", "a".repeat(max_path_bytes - 2));

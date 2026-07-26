@@ -341,6 +341,97 @@ defineModel<RefGlobalModel>()
     }
 
     #[test]
+    fn vue3_tsconfig_exclude_filters_only_include_discovery() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types = dir.path().join("types");
+        for directory in [
+            types.join("nested"),
+            types.join("excluded").join("deep"),
+            types.join("template-excluded"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create excluded types fixture");
+        }
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "files": ["./types/explicit.d.ts"],
+                "include": ["./types/**/*.d.ts"],
+                "exclude": [
+                    "./types/excluded",
+                    "./types/**/*.test.d.ts",
+                    ".\\types\\exact.d.ts",
+                    "${configDir}/types/template-excluded",
+                    "./types/explicit.d.ts"
+                ],
+                "compilerOptions": { "types": [] }
+            }"#,
+        )
+        .expect("write exclude config");
+        let explicit = types.join("explicit.d.ts");
+        let kept = types.join("nested").join("kept.d.ts");
+        for (path, source) in [
+            (
+                &explicit,
+                "declare interface ExplicitProps { explicitValue: string }",
+            ),
+            (
+                &kept,
+                "declare interface KeptProps { keptValue?: number }",
+            ),
+            (
+                &types.join("excluded").join("deep").join("hidden.d.ts"),
+                "declare interface HiddenProps { hiddenValue: boolean }",
+            ),
+            (
+                &types.join("nested").join("hidden.test.d.ts"),
+                "declare interface TestProps { testValue: boolean }",
+            ),
+            (
+                &types.join("exact.d.ts"),
+                "declare interface ExactProps { exactValue: boolean }",
+            ),
+            (
+                &types.join("template-excluded").join("hidden.d.ts"),
+                "declare interface TemplateHiddenProps { templateHidden: boolean }",
+            ),
+        ] {
+            std::fs::write(path, source).expect("write exclude declaration fixture");
+        }
+
+        let filename = dir.path().join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+        let type_resolver = vue3_type_resolver_context_for_filename(&filename_text);
+        assert_eq!(
+            vue3_tsconfig_global_type_files(&filename_text, &type_resolver)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            [explicit.clone(), kept.clone()].into_iter().collect()
+        );
+
+        let source = r#"<script setup lang="ts">
+defineProps<ExplicitProps & KeptProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("explicitValue: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("keptValue: { type: Number, required: false }"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [explicit, kept]
+                .into_iter()
+                .map(|path| normalize_path_string(&path))
+                .collect()
+        );
+    }
+
+    #[test]
     fn vue3_tsconfig_filesystem_fields_accept_windows_separators_cross_platform() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src = dir.path().join("src");

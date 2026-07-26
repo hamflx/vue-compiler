@@ -96,6 +96,10 @@ impl<'a> Vue3TsconfigGlobMatchBudget<'a> {
         true
     }
 
+    fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
     fn finish(self) -> bool {
         let state = self.state.as_ref().expect("glob budget state");
         !self.exhausted && !state.metadata_blocked
