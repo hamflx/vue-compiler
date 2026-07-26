@@ -6,13 +6,6 @@ pub(crate) struct Vue3TsconfigPathMapping {
     pub(crate) template_config_dir: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Vue3TsconfigPathMatch<'a> {
-    pub(crate) mapping: &'a Vue3TsconfigPathMapping,
-    pub(crate) capture: String,
-    pub(crate) prefix_len: usize,
-}
-
 #[derive(Debug, Default)]
 struct Vue3TsconfigModuleResolutionSettings {
     path_mappings: Option<Vec<Vue3TsconfigPathMapping>>,
@@ -431,7 +424,6 @@ fn vue3_tsconfig_type_roots_override_from_config(
                     config_dir,
                     template_config_dir,
                     &target,
-                    "",
                     type_resolver,
                 )?;
                 roots.push(path);
@@ -782,7 +774,7 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
             return Vec::new();
         }
         let Some(path) =
-            vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "", type_resolver)
+            vue3_tsconfig_target_path(config_dir, template_config_dir, &target, type_resolver)
         else {
             return Vec::new();
         };
@@ -858,7 +850,7 @@ pub(crate) fn vue3_tsconfig_compiler_option_global_type_files(
             return Vec::new();
         }
         let Some(path) =
-            vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "", type_resolver)
+            vue3_tsconfig_target_path(config_dir, template_config_dir, &target, type_resolver)
         else {
             return Vec::new();
         };
@@ -1104,7 +1096,7 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
     }
     if !target.contains('*') && !target.contains('?') {
         let Some(path) =
-            vue3_tsconfig_target_path(config_dir, template_config_dir, target, "", type_resolver)
+            vue3_tsconfig_target_path(config_dir, template_config_dir, target, type_resolver)
         else {
             return Vec::new();
         };
@@ -1197,8 +1189,12 @@ pub(crate) fn vue3_tsconfig_include_root_path(
     } else {
         root.join("/")
     };
-    let path =
-        vue3_tsconfig_target_path(config_dir, template_config_dir, &root, "", type_resolver)?;
+    let path = vue3_tsconfig_target_path(
+        config_dir,
+        template_config_dir,
+        &root,
+        type_resolver,
+    )?;
     path.is_dir().then_some(path)
 }
 

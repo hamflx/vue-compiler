@@ -22,7 +22,6 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
             config_dir,
             template_config_dir,
             base_url,
-            "",
             type_resolver,
         ) else {
             return Vec::new();
@@ -39,14 +38,11 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
     };
     paths
         .iter()
-        .filter_map(|(pattern, targets)| {
-            let targets = vue3_tsconfig_path_target_values(targets);
-            (!targets.is_empty()).then(|| Vue3TsconfigPathMapping {
-                pattern: pattern.clone(),
-                targets,
-                target_base_dir: target_base_dir.clone(),
-                template_config_dir: template_config_dir.to_path_buf(),
-            })
+        .map(|(pattern, targets)| Vue3TsconfigPathMapping {
+            pattern: pattern.clone(),
+            targets: vue3_tsconfig_path_target_values(targets),
+            target_base_dir: target_base_dir.clone(),
+            template_config_dir: template_config_dir.to_path_buf(),
         })
         .collect()
 }
@@ -72,7 +68,6 @@ fn vue3_tsconfig_direct_base_url(
         config_dir,
         template_config_dir,
         base_url,
-        "",
         type_resolver,
     )
 }
@@ -109,35 +104,26 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let matched = mappings
-        .iter()
-        .filter_map(|mapping| {
-            vue3_tsconfig_path_pattern_capture(&mapping.pattern, source).map(
-                |(prefix_len, capture)| Vue3TsconfigPathMatch {
-                    mapping,
-                    capture,
-                    prefix_len,
-                },
-            )
-        })
-        .fold(None, |best: Option<Vue3TsconfigPathMatch<'_>>, candidate| {
-            match best {
-                Some(best) if best.prefix_len >= candidate.prefix_len => Some(best),
-                _ => Some(candidate),
-            }
-        })?;
-    for target in &matched.mapping.targets {
+    let (mapping_index, capture) = vue3_typescript_best_path_pattern_match(
+        mappings
+            .iter()
+            .enumerate()
+            .map(|(index, mapping)| (index, mapping.pattern.as_str())),
+        source,
+    )?;
+    let mapping = &mappings[mapping_index];
+    for target in &mapping.targets {
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
         {
             return None;
         }
-        let candidate = vue3_tsconfig_target_path(
-            &matched.mapping.target_base_dir,
-            &matched.mapping.template_config_dir,
+        let candidate = vue3_tsconfig_path_mapping_target_path(
+            &mapping.target_base_dir,
+            &mapping.template_config_dir,
             target,
-            &matched.capture,
+            &capture,
             type_resolver,
         )?;
         let resolved = resolve_vue3_metadata_type_import_path_with_mode(
@@ -208,11 +194,30 @@ pub(crate) fn vue3_tsconfig_path_pattern_capture(
     ))
 }
 
+fn vue3_typescript_best_path_pattern_match<'a>(
+    patterns: impl IntoIterator<Item = (usize, &'a str)>,
+    source: &str,
+) -> Option<(usize, String)> {
+    patterns
+        .into_iter()
+        .filter_map(|(index, pattern)| {
+            vue3_tsconfig_path_pattern_capture(pattern, source)
+                .map(|(prefix_len, capture)| (prefix_len, index, capture))
+        })
+        .fold(
+            None,
+            |best: Option<(usize, usize, String)>, candidate| match best {
+                Some(best) if best.0 >= candidate.0 => Some(best),
+                _ => Some(candidate),
+            },
+        )
+        .map(|(_, index, capture)| (index, capture))
+}
+
 pub(crate) fn vue3_tsconfig_target_path(
     target_base_dir: &Path,
     template_config_dir: &Path,
     target: &str,
-    capture: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let target = vue3_tsconfig_expand_config_dir_template(
@@ -220,16 +225,51 @@ pub(crate) fn vue3_tsconfig_target_path(
         template_config_dir,
         type_resolver,
     )?;
-    let target = type_resolver.external_type_session.replace_metadata_path_pattern(
+    Some(vue3_tsconfig_path_from_expanded_target(
+        target_base_dir,
         &target,
-        "*",
-        capture,
-    )?;
-    let path = Path::new(&target);
-    if path.is_absolute() {
-        Some(normalize_path_components(PathBuf::from(target)))
+    ))
+}
+
+pub(crate) fn vue3_tsconfig_path_mapping_target_path(
+    target_base_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    capture: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let target =
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
+    let target =
+        vue3_typescript_path_target_substitution(&target, capture, type_resolver)?;
+    Some(vue3_tsconfig_path_from_expanded_target(
+        target_base_dir,
+        &target,
+    ))
+}
+
+fn vue3_typescript_path_target_substitution(
+    target: &str,
+    capture: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    if capture.is_empty() {
+        type_resolver
+            .external_type_session
+            .concat_metadata_path("", target)
     } else {
-        Some(normalize_path_components(target_base_dir.join(target)))
+        type_resolver
+            .external_type_session
+            .replace_first_metadata_path_pattern(target, "*", capture)
+    }
+}
+
+fn vue3_tsconfig_path_from_expanded_target(target_base_dir: &Path, target: &str) -> PathBuf {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        normalize_path_components(PathBuf::from(target))
+    } else {
+        normalize_path_components(target_base_dir.join(target))
     }
 }
 

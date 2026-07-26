@@ -25,6 +25,11 @@ fn vue3_generated_metadata_paths_are_bounded_before_expansion() {
         Some("123456789/123456789")
     );
     assert!(vue3_bounded_replace("*/*", "*", "123456789", 18).is_none());
+    assert_eq!(
+        vue3_bounded_replace_first("*/*", "*", "123456789", 11).as_deref(),
+        Some("123456789/*")
+    );
+    assert!(vue3_bounded_replace_first("*/*", "*", "123456789", 10).is_none());
 
     let paths_resolver = vue3_type_resolver_with_external_limits(
         Vue3ExternalTypeLoadLimits {
@@ -90,7 +95,7 @@ fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
         Some(expanded)
     );
     assert_eq!(
-        vue3_tsconfig_target_path(
+        vue3_tsconfig_path_mapping_target_path(
             Path::new("mapping-base"),
             template_config_dir,
             "*",
@@ -129,6 +134,130 @@ fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
         &rejected,
     )
     .is_none());
+}
+
+#[test]
+fn vue3_tsconfig_plain_paths_preserve_stars_and_mappings_replace_only_the_first() {
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        vue3_tsconfig_target_path(
+            Path::new("config"),
+            Path::new("config"),
+            "literal*/types",
+            &resolver,
+        ),
+        Some(PathBuf::from("config/literal*/types"))
+    );
+    assert_eq!(
+        vue3_tsconfig_path_mapping_target_path(
+            Path::new("config"),
+            Path::new("config"),
+            "first*second*third",
+            "capture",
+            &resolver,
+        ),
+        Some(PathBuf::from("config/firstcapturesecond*third"))
+    );
+    assert_eq!(
+        vue3_tsconfig_path_mapping_target_path(
+            Path::new("config"),
+            Path::new("config"),
+            "empty*capture",
+            "",
+            &resolver,
+        ),
+        Some(PathBuf::from("config/empty*capture"))
+    );
+}
+
+#[test]
+fn vue3_types_versions_select_only_the_longest_prefix_pattern() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let priority_package = dir.path().join("priority-package");
+    write_vue3_test_type_package(
+        &priority_package,
+        r#"{
+            "typesVersions": {
+                "*": {
+                    "a*bcd": ["wrong.d.ts"],
+                    "ab*": ["right.d.ts"]
+                }
+            }
+        }"#,
+    );
+    std::fs::write(
+        priority_package.join("wrong.d.ts"),
+        "export interface Wrong {}",
+    )
+    .expect("write total-length decoy");
+    let right = priority_package.join("right.d.ts");
+    std::fs::write(&right, "export interface Right {}")
+        .expect("write longest-prefix target");
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &priority_package,
+            Some("ab-value-bcd"),
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::Resolved(right)
+    );
+
+    let fallback_package = dir.path().join("fallback-package");
+    write_vue3_test_type_package(
+        &fallback_package,
+        r#"{
+            "typesVersions": {
+                "*": {
+                    "*": ["weak.d.ts"],
+                    "feature-*": ["missing.d.ts"]
+                }
+            }
+        }"#,
+    );
+    std::fs::write(
+        fallback_package.join("weak.d.ts"),
+        "export interface Weak {}",
+    )
+    .expect("write weaker pattern decoy");
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &fallback_package,
+            Some("feature-value"),
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+    );
+
+    let exact_package = dir.path().join("exact-package");
+    write_vue3_test_type_package(
+        &exact_package,
+        r#"{
+            "typesVersions": {
+                "*": {
+                    "feature": ["literal*.d.ts"],
+                    "*": ["weak.d.ts"]
+                }
+            }
+        }"#,
+    );
+    std::fs::write(
+        exact_package.join("literal.d.ts"),
+        "export interface RemovedStarDecoy {}",
+    )
+    .expect("write removed-star decoy");
+    std::fs::write(
+        exact_package.join("weak.d.ts"),
+        "export interface WeakExactFallback {}",
+    )
+    .expect("write exact fallback decoy");
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &exact_package,
+            Some("feature"),
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+    );
 }
 
 #[test]
@@ -777,7 +906,6 @@ fn vue3_path_normalization_preserves_unresolved_parent_components() {
             Path::new("config"),
             Path::new("config"),
             "../../shared/x",
-            "",
             &resolver,
         ),
         Some(PathBuf::from("../shared/x"))

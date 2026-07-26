@@ -297,6 +297,29 @@ impl Vue3ExternalTypeLoadSession {
         }
     }
 
+    fn replace_first_metadata_path_pattern(
+        &self,
+        source: &str,
+        pattern: &str,
+        replacement: &str,
+    ) -> Option<String> {
+        let max_bytes = {
+            let mut state = self.lock();
+            if state.metadata_blocked {
+                state.failure_epoch += 1;
+                return None;
+            }
+            state.limits.max_generated_path_bytes
+        };
+        match vue3_bounded_replace_first(source, pattern, replacement, max_bytes) {
+            Some(value) => Some(value),
+            None => {
+                self.block_metadata();
+                None
+            }
+        }
+    }
+
     fn concat_metadata_path(&self, prefix: &str, suffix: &str) -> Option<String> {
         let max_bytes = {
             let mut state = self.lock();

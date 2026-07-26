@@ -358,6 +358,34 @@ pub(crate) fn vue3_bounded_replace(
     Some(output)
 }
 
+pub(crate) fn vue3_bounded_replace_first(
+    source: &str,
+    pattern: &str,
+    replacement: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let Some(index) = source.find(pattern) else {
+        return (source.len() <= max_bytes).then(|| source.to_string());
+    };
+    let suffix_index = index.checked_add(pattern.len())?;
+    let output_len = source
+        .len()
+        .checked_sub(pattern.len())?
+        .checked_add(replacement.len())?;
+    if output_len > max_bytes {
+        return None;
+    }
+    let mut output = String::with_capacity(output_len);
+    output.push_str(&source[..index]);
+    output.push_str(replacement);
+    output.push_str(&source[suffix_index..]);
+    debug_assert_eq!(output.len(), output_len);
+    Some(output)
+}
+
 pub(crate) fn normalize_path_components(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

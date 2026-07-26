@@ -1007,47 +1007,39 @@ pub(crate) fn vue3_package_types_versions_type_path(
         .map(|subpath| subpath.trim_start_matches("./").to_string())
         .or_else(|| root_type_target.map(|target| target.trim_start_matches("./").to_string()))
         .unwrap_or_else(|| "index.d.ts".to_string());
-    let mut matches = mappings
-        .0
-        .iter()
-        .enumerate()
-        .filter_map(|(order, (pattern, targets))| {
-            let targets = vue3_tsconfig_path_target_values(targets);
-            if targets.is_empty() {
-                return None;
-            }
-            vue3_tsconfig_path_pattern_capture(pattern, &source)
-                .map(|(score, capture)| (score, order, capture, targets))
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    for (_, _, capture, targets) in matches {
-        for target in targets {
-            if !type_resolver
-                .external_type_session
-                .claim_metadata_fanout_entry()
-            {
-                return None;
-            }
-            let target = type_resolver
-                .external_type_session
-                .replace_metadata_path_pattern(&target, "*", &capture)?;
-            if !vue3_package_type_target_is_safe(&target) {
-                type_resolver.external_type_session.block_metadata();
-                return None;
-            }
-            let resolved = vue3_package_type_field_path_with_mode(
-                package_dir,
-                &target,
-                resolution_mode,
-                type_resolver,
-            );
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return None;
-            }
-            if let Some(resolved) = resolved {
-                return Some(resolved);
-            }
+    let (mapping_index, capture) = vue3_typescript_best_path_pattern_match(
+        mappings
+            .0
+            .iter()
+            .enumerate()
+            .map(|(index, (pattern, _))| (index, pattern.as_str())),
+        &source,
+    )?;
+    let targets = &mappings.0[mapping_index].1;
+    for target in vue3_tsconfig_path_target_values(targets) {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        let target =
+            vue3_typescript_path_target_substitution(&target, &capture, type_resolver)?;
+        if !vue3_package_type_target_is_safe(&target) {
+            type_resolver.external_type_session.block_metadata();
+            return None;
+        }
+        let resolved = vue3_package_type_field_path_with_mode(
+            package_dir,
+            &target,
+            resolution_mode,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
+            return Some(resolved);
         }
     }
     None
