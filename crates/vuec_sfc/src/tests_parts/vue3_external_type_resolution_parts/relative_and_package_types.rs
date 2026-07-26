@@ -1384,6 +1384,85 @@ defineProps<OutputProps & DeclarationProps>()
     }
 
     #[test]
+    fn vue3_package_relative_targets_normalize_windows_separators() {
+        let resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &serde_json::json!({ "types": "./types\\index.d.ts" }),
+                None,
+                &resolver,
+            )
+            .as_deref(),
+            Some("./types/index.d.ts")
+        );
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &serde_json::json!({
+                    "./feature/*": { "types": "./types\\*.d.ts" }
+                }),
+                Some("feature/item"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./types/item.d.ts")
+        );
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &serde_json::json!({ "./legacy/": { "types": "./types\\" } }),
+                Some("legacy/item.d.ts"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./types/item.d.ts")
+        );
+        assert!(vue3_package_exports_type_target(
+            &serde_json::json!({ "types": ".\\types\\index.d.ts" }),
+            None,
+            &resolver,
+        )
+        .is_none());
+        assert!(!vue3_package_import_external_target_is_safe(
+            "vuec-external\\feature"
+        ));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("vuec-backslash-targets");
+        let types = package.join("types");
+        std::fs::create_dir_all(&types).expect("create package types directory");
+        std::fs::write(
+            package.join("package.json"),
+            r##"{
+                "name":"vuec-backslash-targets",
+                "exports":{
+                    ".":{"types":"./types\\index.d.ts"},
+                    "./feature/*":{"types":"./types\\*.d.ts"}
+                },
+                "imports":{"#local":{"types":"./types\\index.d.ts"}}
+            }"##,
+        )
+        .expect("write backslash target manifest");
+        let index = types.join("index.d.ts");
+        let item = types.join("item.d.ts");
+        let importer = package.join("source.d.mts");
+        std::fs::write(&index, "export interface Index {}").expect("write root type target");
+        std::fs::write(&item, "export interface Item {}").expect("write pattern type target");
+        std::fs::write(&importer, "export {};").expect("write package importer");
+
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(&package, None, &resolver),
+            Vue3PackageJsonTypeResolution::Resolved(index.clone())
+        );
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(&package, Some("feature/item"), &resolver),
+            Vue3PackageJsonTypeResolution::Resolved(item)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&importer.to_string_lossy(), "#local", &resolver),
+            Some(index)
+        );
+    }
+
+    #[test]
     fn vue3_package_exports_selects_the_most_specific_pattern() {
         let resolver = Vue3TypeResolverContext::default();
         let invalid_array_fallback = serde_json::json!([

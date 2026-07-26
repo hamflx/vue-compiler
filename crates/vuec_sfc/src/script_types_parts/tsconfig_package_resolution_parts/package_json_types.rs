@@ -664,6 +664,17 @@ fn visit_vue3_package_target(
     visitor: &mut impl FnMut(&str) -> Vue3PackageTargetVisit,
 ) -> Vue3PackageTargetVisit {
     if let Some(target) = target.as_str() {
+        let target = if target.starts_with("./") && target.contains('\\') {
+            let Some(target) =
+                vue3_normalize_typescript_path_separators(target, type_resolver)
+            else {
+                return Vue3PackageTargetVisit::Blocked;
+            };
+            std::borrow::Cow::Owned(target)
+        } else {
+            std::borrow::Cow::Borrowed(target)
+        };
+        let target = target.as_ref();
         let prefix_expansion = matches!(expansion, Vue3PackageTargetExpansion::Prefix(_));
         if !vue3_package_target_is_safe(target, target_kind, prefix_expansion) {
             return Vue3PackageTargetVisit::Invalid;
