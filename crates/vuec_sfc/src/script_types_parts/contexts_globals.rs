@@ -191,6 +191,19 @@ struct Vue3GlobalInterfacePropertySignature {
     scope_key: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3GlobalClassMemberKind {
+    Property,
+    Method,
+    Getter,
+    Setter,
+}
+
+struct Vue3GlobalClassMemberSignature {
+    kind: Vue3GlobalClassMemberKind,
+    signature: Vue3GlobalInterfacePropertySignature,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3GlobalInterfaceMemberKey {
     Named(String),
@@ -3599,8 +3612,12 @@ fn insert_vue3_global_class_member_signatures(
         .remove(&name)
         .unwrap_or_default();
     let mut conflicting = kinds.conflicting_type_names.contains(&name);
+    let mut class_members = BTreeMap::<
+        Vue3GlobalInterfaceMemberKey,
+        Vue3GlobalClassMemberSignature,
+    >::new();
     for member in &declaration.body.body {
-        let (key, computed, optional, readonly, method, ty) = match member {
+        let (key, computed, optional, readonly, member_kind, ty) = match member {
             ClassElement::PropertyDefinition(property)
                 if !property.r#static
                     && !matches!(
@@ -3616,7 +3633,29 @@ fn insert_vue3_global_class_member_signatures(
                     property.computed,
                     property.optional,
                     property.readonly,
+                    Vue3GlobalClassMemberKind::Property,
+                    property
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| &annotation.type_annotation),
+                )
+            }
+            ClassElement::AccessorProperty(property)
+                if !property.r#static
+                    && !matches!(
+                        property.accessibility,
+                        Some(
+                            oxc_ast::ast::TSAccessibility::Private
+                                | oxc_ast::ast::TSAccessibility::Protected
+                        )
+                    ) =>
+            {
+                (
+                    &property.key,
+                    property.computed,
                     false,
+                    false,
+                    Vue3GlobalClassMemberKind::Property,
                     property
                         .type_annotation
                         .as_ref()
@@ -3632,17 +3671,43 @@ fn insert_vue3_global_class_member_signatures(
                             oxc_ast::ast::TSAccessibility::Private
                                 | oxc_ast::ast::TSAccessibility::Protected
                         )
-                    ) =>
-            {
-                (
+                    ) => match method.kind {
+                oxc_ast::ast::MethodDefinitionKind::Method => (
                     &method.key,
                     method.computed,
                     method.optional,
                     false,
-                    true,
+                    Vue3GlobalClassMemberKind::Method,
                     None,
-                )
-            }
+                ),
+                oxc_ast::ast::MethodDefinitionKind::Get => (
+                    &method.key,
+                    method.computed,
+                    false,
+                    false,
+                    Vue3GlobalClassMemberKind::Getter,
+                    method
+                        .value
+                        .return_type
+                        .as_ref()
+                        .map(|annotation| &annotation.type_annotation),
+                ),
+                oxc_ast::ast::MethodDefinitionKind::Set => (
+                    &method.key,
+                    method.computed,
+                    false,
+                    false,
+                    Vue3GlobalClassMemberKind::Setter,
+                    method
+                        .value
+                        .params
+                        .items
+                        .first()
+                        .and_then(|parameter| parameter.type_annotation.as_ref())
+                        .map(|annotation| &annotation.type_annotation),
+                ),
+                oxc_ast::ast::MethodDefinitionKind::Constructor => unreachable!(),
+            },
             _ => continue,
         };
         let Some(property_name) = vue3_global_interface_member_key(
@@ -3691,12 +3756,41 @@ fn insert_vue3_global_class_member_signatures(
             source: type_source.map(str::to_string),
             optional,
             readonly,
-            method,
+            method: member_kind == Vue3GlobalClassMemberKind::Method,
             scope_key,
         };
+        let member = Vue3GlobalClassMemberSignature {
+            kind: member_kind,
+            signature,
+        };
+        match class_members.entry(property_name) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(member);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                match (entry.get().kind, member_kind) {
+                    (Vue3GlobalClassMemberKind::Method, Vue3GlobalClassMemberKind::Method)
+                    | (Vue3GlobalClassMemberKind::Getter, Vue3GlobalClassMemberKind::Setter) => {}
+                    (Vue3GlobalClassMemberKind::Setter, Vue3GlobalClassMemberKind::Getter) => {
+                        entry.insert(member);
+                    }
+                    _ => conflicting = true,
+                }
+            }
+        }
+    }
+    for (property_name, member) in class_members {
+        if !namespace_budget.reserve(
+            property_name
+                .work()
+                .saturating_add(member.signature.work())
+                .saturating_add(1),
+        ) {
+            return None;
+        }
         merge_vue3_global_member_signature(
             property_name,
-            signature,
+            member.signature,
             &mut properties,
             &mut conflicting,
             namespace_budget,

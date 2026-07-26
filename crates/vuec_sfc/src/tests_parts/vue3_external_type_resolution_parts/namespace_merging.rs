@@ -1984,6 +1984,126 @@ defineProps<Consumer>()
 }
 
 #[test]
+fn vue3_global_class_accessors_merge_as_properties_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let class = dir.path().join("accessor-class.d.ts");
+    let interface = dir.path().join("accessor-interface.d.ts");
+    std::fs::write(
+        &class,
+        r#"
+declare class AccessorClass {
+  get getterValue(): string
+  set setterValue(value: number)
+  get divergentValue(): boolean
+  set divergentValue(value: boolean | null)
+  set reverseValue(value: string | number)
+  get reverseValue(): string
+  accessor automaticValue: Date
+}
+interface AccessorConsumer extends AccessorClass { consumerValue: boolean }
+"#,
+    )
+    .expect("write accessor class");
+    std::fs::write(
+        &interface,
+        r#"
+interface AccessorClass {
+  getterValue: string
+  setterValue: number
+  divergentValue: boolean
+  reverseValue: string
+  automaticValue: Date
+  mergedValue: string
+}
+"#,
+    )
+    .expect("write matching accessor interface");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![class.clone(), interface.clone()],
+        vec![interface.clone(), class.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["AccessorClass", "AccessorConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_global_class_accessors_reject_incompatible_interface_members() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let class = dir.path().join("incompatible-accessor-classes.d.ts");
+    let interface = dir.path().join("incompatible-accessor-interfaces.d.ts");
+    std::fs::write(
+        &class,
+        r#"
+declare class GetterConflict { get value(): string }
+declare class SetterConflict { set value(value: string) }
+declare class AutomaticConflict { accessor value: string }
+declare class AccessorMethodConflict { get value(): string }
+declare class GetterReadonlyConflict { get value(): string }
+"#,
+    )
+    .expect("write incompatible accessor classes");
+    std::fs::write(
+        &interface,
+        r#"
+interface GetterConflict { value: number }
+interface SetterConflict { value: number }
+interface AutomaticConflict { value: number }
+interface AccessorMethodConflict { value(): string }
+interface GetterReadonlyConflict { readonly value: string }
+type GetterConflictConsumer = GetterConflict
+type SetterConflictConsumer = SetterConflict
+type AutomaticConflictConsumer = AutomaticConflict
+type AccessorMethodConflictConsumer = AccessorMethodConflict
+type GetterReadonlyConflictConsumer = GetterReadonlyConflict
+"#,
+    )
+    .expect("write incompatible accessor interfaces");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![class.clone(), interface.clone()],
+        vec![interface.clone(), class.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in [
+            "GetterConflict",
+            "SetterConflict",
+            "AutomaticConflict",
+            "AccessorMethodConflict",
+            "GetterReadonlyConflict",
+            "GetterConflictConsumer",
+            "SetterConflictConsumer",
+            "AutomaticConflictConsumer",
+            "AccessorMethodConflictConsumer",
+            "GetterReadonlyConflictConsumer",
+        ] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
 fn vue3_global_files_merge_enums_and_refresh_runtime_types_in_any_order() {
     let dir = tempfile::tempdir().expect("temp dir");
     let text = dir.path().join("text-enum-global.d.ts");
