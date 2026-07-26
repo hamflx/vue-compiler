@@ -381,7 +381,7 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
     }
 
     #[test]
-    fn vue3_dependency_self_name_export_exclusions_do_not_fall_through() {
+    fn vue3_dependency_self_name_export_condition_falls_back_within_self_package() {
         let dir = tempfile::tempdir().expect("temp dir");
         let outer_package = dir.path().join("node_modules").join("vuec-self-blocked");
         let nested_package = dir
@@ -419,7 +419,7 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             nested_package.join("leak.d.ts"),
             "export interface PrivateProps { selfLeak: string }",
         )
-        .expect("write rejected self fallback target");
+        .expect("write self fallback target");
         let outside_resolver = Vue3TypeResolverContext::default();
         assert_eq!(
             resolve_vue3_type_import(
@@ -431,19 +431,21 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
         );
         let resolver = Vue3TypeResolverContext::default();
 
-        assert!(resolve_vue3_type_import(
-            &importer.to_string_lossy(),
-            "vuec-self-blocked/private",
-            &resolver,
-        )
-        .is_none());
+        assert_eq!(
+            resolve_vue3_type_import(
+                &importer.to_string_lossy(),
+                "vuec-self-blocked/private",
+                &resolver,
+            ),
+            Some(nested_package.join("leak.d.ts"))
+        );
         let stats = resolver.external_type_session.stats();
         assert_eq!(stats.metadata_files_read, 1);
         assert!(!resolver.external_type_session.metadata_is_blocked());
     }
 
     #[test]
-    fn vue3_bare_package_active_null_export_does_not_fall_through() {
+    fn vue3_bare_package_active_null_export_uses_typescript_fallback() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir
             .path()
@@ -463,15 +465,47 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             package.join("leak.d.ts"),
             "export interface PrivateProps { leaked: string }",
         )
-        .expect("write rejected fallback target");
+        .expect("write fallback target");
         let resolver = Vue3TypeResolverContext::default();
 
-        assert!(resolve_vue3_type_import(
-            &dir.path().join("outside.ts").to_string_lossy(),
-            "vuec-null-conditional/private",
-            &resolver,
+        assert_eq!(
+            resolve_vue3_type_import(
+                &dir.path().join("outside.ts").to_string_lossy(),
+                "vuec-null-conditional/private",
+                &resolver,
+            ),
+            Some(package.join("leak.d.ts"))
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_bare_package_exact_targets_preserve_literal_stars() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-literal-star-target");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"exports":{".":{"types":"./literal*.d.ts"}}}"#,
         )
-        .is_none());
+        .expect("write package manifest");
+        let target = package.join("literal*.d.ts");
+        std::fs::write(&target, "export interface LiteralStar { value: string }")
+            .expect("write literal-star target");
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import(
+                &dir.path().join("outside.ts").to_string_lossy(),
+                "vuec-literal-star-target",
+                &resolver,
+            ),
+            Some(target)
+        );
         assert!(!resolver.external_type_session.metadata_is_blocked());
     }
 
@@ -1490,6 +1524,44 @@ defineProps<OutputProps & DeclarationProps>()
             &resolver,
         )
         .is_none());
+        for conditional_fallback in [
+            serde_json::json!({ "types": null, "default": "./valid.d.ts" }),
+            serde_json::json!({ "types": [], "default": "./valid.d.ts" }),
+            serde_json::json!({ "types": [null, []], "default": "./valid.d.ts" }),
+        ] {
+            assert_eq!(
+                vue3_package_exports_type_target(&conditional_fallback, None, &resolver)
+                    .as_deref(),
+                Some("./valid.d.ts")
+            );
+        }
+        let nested_conditional_fallback = serde_json::json!({
+            "types": { "import": null, "default": "./inner.d.ts" },
+            "default": "./outer.d.ts"
+        });
+        assert_eq!(
+            vue3_package_exports_type_target(&nested_conditional_fallback, None, &resolver)
+                .as_deref(),
+            Some("./inner.d.ts")
+        );
+        let conditional_array_fallback = serde_json::json!([
+            { "node": null, "default": "./inner.d.ts" },
+            "./outer.d.ts"
+        ]);
+        assert_eq!(
+            vue3_package_exports_type_target(&conditional_array_fallback, None, &resolver)
+                .as_deref(),
+            Some("./inner.d.ts")
+        );
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &serde_json::json!({ ".": "./literal*.d.ts" }),
+                None,
+                &resolver,
+            )
+            .as_deref(),
+            Some("./literal*.d.ts")
+        );
         let legacy_prefix = serde_json::json!({
             "./legacy/": { "types": "./types/" }
         });

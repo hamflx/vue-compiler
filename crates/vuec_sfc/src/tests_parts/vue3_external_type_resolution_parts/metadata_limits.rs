@@ -2269,7 +2269,7 @@ fn vue3_metadata_fanout_semantic_miss_does_not_block() {
 }
 
 #[test]
-fn vue3_package_condition_validation_is_fanout_bounded() {
+fn vue3_package_condition_validation_and_fallback_are_fanout_bounded() {
     let conditions = serde_json::json!({
         "unknown": "./inactive.d.ts",
         "types": "./valid.d.ts"
@@ -2279,11 +2279,23 @@ fn vue3_package_condition_validation_is_fanout_bounded() {
         "types": "./valid.d.ts",
         "0": "./invalid.d.ts"
     });
+    let rejected_then_valid = serde_json::json!({
+        "types": null,
+        "default": "./valid.d.ts"
+    });
+    let nested_rejected_then_valid = serde_json::json!({
+        "types": null,
+        "default": { "types": "./valid.d.ts" }
+    });
     for (target, limit, expected, blocked) in [
         (&conditions, 2, Some("./valid.d.ts"), false),
         (&conditions, 1, None, true),
         (&invalid, 3, None, false),
         (&invalid, 2, None, true),
+        (&rejected_then_valid, 2, Some("./valid.d.ts"), false),
+        (&rejected_then_valid, 1, None, true),
+        (&nested_rejected_then_valid, 3, Some("./valid.d.ts"), false),
+        (&nested_rejected_then_valid, 2, None, true),
     ] {
         let resolver =
             vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
@@ -2306,6 +2318,17 @@ fn vue3_package_condition_validation_is_fanout_bounded() {
             blocked
         );
     }
+
+    let blocked_then_valid = serde_json::json!({
+        "types": "./target-that-exceeds-the-limit.d.ts",
+        "default": "./ok.d.ts"
+    });
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: "./ok.d.ts".len(),
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_package_exports_type_target(&blocked_then_valid, None, &resolver).is_none());
+    assert!(resolver.external_type_session.metadata_is_blocked());
 }
 
 #[test]
@@ -2402,9 +2425,6 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         serde_json::json!({ "imports": { "#alias": [] } }),
         serde_json::json!({ "imports": { "#alias": [null] } }),
         serde_json::json!({
-            "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
-        }),
-        serde_json::json!({
             "imports": { "#alias": { "types": "./ok.d.mts", "0": "./ok.d.mts" } }
         }),
         serde_json::json!({ "imports": { "#alias": true } }),
@@ -2432,6 +2452,36 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
             !resolver.external_type_session.metadata_is_blocked(),
             "semantic rejection blocked metadata for {manifest}"
         );
+    }
+
+    for manifest in [
+        serde_json::json!({
+            "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
+        }),
+        serde_json::json!({
+            "imports": { "#alias": { "types": [], "default": "./ok.d.mts" } }
+        }),
+        serde_json::json!({
+            "imports": { "#alias": { "types": [null, []], "default": "./ok.d.mts" } }
+        }),
+        serde_json::json!({
+            "imports": {
+                "#alias": [
+                    { "node": null, "default": "./ok.d.mts" },
+                    "./missing.d.mts"
+                ]
+            }
+        }),
+    ] {
+        std::fs::write(package.join("package.json"), manifest.to_string())
+            .expect("write conditional fallback imports manifest");
+        let resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
+            Some(target.clone()),
+            "{manifest}"
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
     }
 
     std::fs::write(

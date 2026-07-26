@@ -680,12 +680,7 @@ fn visit_vue3_package_target(
             return Vue3PackageTargetVisit::Invalid;
         }
         let expanded = match expansion {
-            Vue3PackageTargetExpansion::Exact => {
-                if target.contains('*') {
-                    return Vue3PackageTargetVisit::Invalid;
-                }
-                target.to_string()
-            }
+            Vue3PackageTargetExpansion::Exact => target.to_string(),
             Vue3PackageTargetExpansion::Pattern(capture) => {
                 if target.contains('*') {
                     if !vue3_package_export_pattern_capture_is_safe(capture)
@@ -799,7 +794,9 @@ fn visit_vue3_package_target(
             type_resolver,
             visitor,
         ) {
-            Vue3PackageTargetVisit::Missing | Vue3PackageTargetVisit::Invalid => {}
+            Vue3PackageTargetVisit::Missing
+            | Vue3PackageTargetVisit::Rejected
+            | Vue3PackageTargetVisit::Invalid => {}
             result => return result,
         }
     }
