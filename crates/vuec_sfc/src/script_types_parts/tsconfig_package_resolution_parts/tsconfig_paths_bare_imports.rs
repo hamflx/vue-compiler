@@ -225,10 +225,11 @@ pub(crate) fn vue3_tsconfig_target_path(
         template_config_dir,
         type_resolver,
     )?;
-    Some(vue3_tsconfig_path_from_expanded_target(
+    vue3_tsconfig_path_from_expanded_target(
         target_base_dir,
         &target,
-    ))
+        type_resolver,
+    )
 }
 
 pub(crate) fn vue3_tsconfig_path_mapping_target_path(
@@ -242,10 +243,11 @@ pub(crate) fn vue3_tsconfig_path_mapping_target_path(
         vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
     let target =
         vue3_typescript_path_target_substitution(&target, capture, type_resolver)?;
-    Some(vue3_tsconfig_path_from_expanded_target(
+    vue3_tsconfig_path_from_expanded_target(
         target_base_dir,
         &target,
-    ))
+        type_resolver,
+    )
 }
 
 fn vue3_typescript_path_target_substitution(
@@ -264,13 +266,22 @@ fn vue3_typescript_path_target_substitution(
     }
 }
 
-fn vue3_tsconfig_path_from_expanded_target(target_base_dir: &Path, target: &str) -> PathBuf {
-    let path = Path::new(target);
-    if path.is_absolute() {
+fn vue3_tsconfig_path_from_expanded_target(
+    target_base_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    let path = Path::new(&target);
+    let path = if path.is_absolute() {
         normalize_path_components(PathBuf::from(target))
     } else {
         normalize_path_components(target_base_dir.join(target))
-    }
+    };
+    type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&path))
+        .then_some(path)
 }
 
 pub(crate) fn vue3_tsconfig_expand_config_dir_template(

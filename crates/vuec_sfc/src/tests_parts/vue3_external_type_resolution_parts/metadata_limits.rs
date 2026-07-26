@@ -137,6 +137,42 @@ fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
 }
 
 #[test]
+fn vue3_tsconfig_filesystem_paths_normalize_separators_and_bound_joined_paths() {
+    let resolver = Vue3TypeResolverContext::default();
+    assert!(vue3_tsconfig_path_is_relative(r".\config\base.json"));
+    assert!(vue3_tsconfig_path_is_relative(r"..\config\base.json"));
+    assert_eq!(
+        vue3_normalize_typescript_path_separators(r".\types\*.d.ts", &resolver).as_deref(),
+        Some("./types/*.d.ts")
+    );
+    let escaped =
+        vue3_normalize_typescript_path_separators(r"..\outside.d.ts", &resolver)
+            .expect("normalize package mapping target");
+    assert_eq!(escaped, "../outside.d.ts");
+    assert!(!vue3_package_type_target_is_safe(&escaped));
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: "base/leaf".len(),
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_target_path(Path::new("base"), Path::new("base"), "leaf", &accepted),
+        Some(PathBuf::from("base/leaf"))
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: "base/leaf".len() - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(
+        vue3_tsconfig_target_path(Path::new("base"), Path::new("base"), "leaf", &rejected)
+            .is_none()
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_tsconfig_plain_paths_preserve_stars_and_mappings_replace_only_the_first() {
     let resolver = Vue3TypeResolverContext::default();
     assert_eq!(

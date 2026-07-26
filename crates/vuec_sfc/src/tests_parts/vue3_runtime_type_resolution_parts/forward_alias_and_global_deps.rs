@@ -341,6 +341,126 @@ defineModel<RefGlobalModel>()
     }
 
     #[test]
+    fn vue3_tsconfig_filesystem_fields_accept_windows_separators_cross_platform() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src = dir.path().join("src");
+        let shared = dir.path().join("shared");
+        let globals = dir.path().join("globals");
+        let base_type_root = dir.path().join("base-typings").join("base-root");
+        let config = dir.path().join("config");
+        let referenced = dir.path().join("referenced").join("project");
+        for directory in [
+            src.join("components"),
+            shared.clone(),
+            globals.join("nested"),
+            base_type_root.clone(),
+            config.clone(),
+            referenced.join("globals"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create tsconfig path fixture");
+        }
+
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "extends": ".\\config\\base.json",
+                "files": [".\\globals\\root.d.ts"],
+                "include": [".\\globals\\nested\\**\\*.d.ts"],
+                "references": [{ "path": "referenced\\project" }],
+                "compilerOptions": {
+                    "baseUrl": ".\\src",
+                    "paths": { "mapped": ["..\\shared\\mapped.ts"] }
+                }
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            config.join("base.json"),
+            r#"{"compilerOptions":{"typeRoots":["..\\base-typings"]}}"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            referenced.join("tsconfig.json"),
+            r#"{"include":[".\\globals\\**\\*.d.ts"]}"#,
+        )
+        .expect("write referenced tsconfig");
+
+        let base_url_type = src.join("base-url.ts");
+        let mapped_type = shared.join("mapped.ts");
+        let root_global = globals.join("root.d.ts");
+        let included_global = globals.join("nested").join("included.d.ts");
+        let base_root_global = base_type_root.join("index.d.ts");
+        let referenced_global = referenced.join("globals").join("referenced.d.ts");
+        for (path, source) in [
+            (
+                &base_url_type,
+                "export interface BaseUrlProps { baseUrl: string }",
+            ),
+            (
+                &mapped_type,
+                "export interface MappedProps { mapped: number }",
+            ),
+            (
+                &root_global,
+                "declare interface RootFileProps { rootFile: boolean }",
+            ),
+            (
+                &included_global,
+                "declare interface IncludedFileProps { includedFile?: string }",
+            ),
+            (
+                &base_root_global,
+                "declare interface BaseRootProps { baseRoot: number }",
+            ),
+            (
+                &referenced_global,
+                "declare interface ReferencedProps { referenced: boolean }",
+            ),
+        ] {
+            std::fs::write(path, source).expect("write tsconfig path type fixture");
+        }
+
+        let filename = src.join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { BaseUrlProps } from 'base-url'
+import type { MappedProps } from 'mapped'
+defineProps<
+  BaseUrlProps & MappedProps & RootFileProps & IncludedFileProps & BaseRootProps & ReferencedProps
+>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "baseUrl: { type: String, required: true }",
+            "mapped: { type: Number, required: true }",
+            "rootFile: { type: Boolean, required: true }",
+            "includedFile: { type: String, required: false }",
+            "baseRoot: { type: Number, required: true }",
+            "referenced: { type: Boolean, required: true }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                base_url_type,
+                mapped_type,
+                root_global,
+                included_global,
+                base_root_global,
+                referenced_global,
+            ]
+            .iter()
+            .map(|path| normalize_path_string(path))
+            .collect::<BTreeSet<_>>()
+        );
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
     fn vue3_tsconfig_include_scan_enforces_entry_file_and_depth_budgets() {
         let dir = tempfile::tempdir().expect("temp dir");
         let types = dir.path().join("types");

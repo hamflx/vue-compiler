@@ -176,7 +176,9 @@ pub(crate) fn vue3_tsconfig_reference_paths(
         {
             return Vec::new();
         }
-        if let Some(path) = vue3_resolve_tsconfig_path(config_dir, target, type_resolver) {
+        if let Some(path) =
+            vue3_resolve_tsconfig_reference_path(config_dir, target, type_resolver)
+        {
             paths.push(path);
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -191,20 +193,27 @@ pub(crate) fn vue3_resolve_tsconfig_extends_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    if vue3_tsconfig_path_is_relative(target) || Path::new(target).is_absolute() {
-        return vue3_resolve_tsconfig_path(config_dir, target, type_resolver);
+    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    if vue3_tsconfig_path_is_relative(&target) || Path::new(&target).is_absolute() {
+        return vue3_resolve_normalized_tsconfig_path(config_dir, &target, type_resolver);
     }
-    resolve_vue3_package_tsconfig_extends(config_dir, target, type_resolver)
+    resolve_vue3_package_tsconfig_extends(config_dir, &target, type_resolver)
 }
 
-pub(crate) fn vue3_resolve_tsconfig_path(
+pub(crate) fn vue3_resolve_tsconfig_reference_path(
     config_dir: &Path,
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    if !vue3_tsconfig_path_is_relative(target) && !Path::new(target).is_absolute() {
-        return None;
-    }
+    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    vue3_resolve_normalized_tsconfig_path(config_dir, &target, type_resolver)
+}
+
+fn vue3_resolve_normalized_tsconfig_path(
+    config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let candidate = if Path::new(target).is_absolute() {
         normalize_path_components(PathBuf::from(target))
     } else {
@@ -214,7 +223,19 @@ pub(crate) fn vue3_resolve_tsconfig_path(
 }
 
 pub(crate) fn vue3_tsconfig_path_is_relative(target: &str) -> bool {
-    target.starts_with("./") || target.starts_with("../")
+    target.starts_with("./")
+        || target.starts_with("../")
+        || target.starts_with(".\\")
+        || target.starts_with("..\\")
+}
+
+pub(crate) fn vue3_normalize_typescript_path_separators(
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    type_resolver
+        .external_type_session
+        .replace_metadata_path_pattern(target, "\\", "/")
 }
 
 pub(crate) fn resolve_vue3_tsconfig_candidate_path(
@@ -222,6 +243,12 @@ pub(crate) fn resolve_vue3_tsconfig_candidate_path(
     include_index: bool,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(candidate))
+    {
+        return None;
+    }
     let mut candidates = if candidate.extension().is_some() {
         vec![candidate.to_path_buf()]
     } else {
@@ -234,6 +261,12 @@ pub(crate) fn resolve_vue3_tsconfig_candidate_path(
         candidates.push(candidate.join("index.json"));
     }
     for path in candidates {
+        if !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(&normalize_path_string(&path))
+        {
+            return None;
+        }
         if type_resolver
             .external_type_session
             .metadata_path_is_file(&path)?

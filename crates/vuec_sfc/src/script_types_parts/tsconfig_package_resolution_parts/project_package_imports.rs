@@ -169,18 +169,12 @@ fn vue3_tsconfig_compiler_option_path(
     if target.is_empty() {
         return None;
     }
-    let target =
-        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
-    let path = Path::new(&target);
-    let path = if path.is_absolute() {
-        normalize_path_components(PathBuf::from(&target))
-    } else {
-        normalize_path_components(config_dir.join(&target))
-    };
-    type_resolver
-        .external_type_session
-        .metadata_path_is_within_limit(&normalize_path_string(&path))
-        .then_some(path)
+    vue3_tsconfig_target_path(
+        config_dir,
+        template_config_dir,
+        target,
+        type_resolver,
+    )
 }
 
 fn resolve_vue3_project_package_input_target_with_mode(

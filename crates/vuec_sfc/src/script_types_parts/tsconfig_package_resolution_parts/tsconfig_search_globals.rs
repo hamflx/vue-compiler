@@ -1138,7 +1138,10 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
 }
 
 pub(crate) fn vue3_tsconfig_include_can_match_global_type_files(target: &str) -> bool {
-    let file_pattern = target.rsplit('/').next().unwrap_or(target);
+    let file_pattern = target
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(target);
     if !file_pattern.contains('.') {
         return true;
     }
@@ -1155,16 +1158,8 @@ pub(crate) fn vue3_tsconfig_include_pattern(
 ) -> Option<String> {
     let target =
         vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
-    let path = Path::new(&target);
-    if path.is_absolute() {
-        Some(normalize_path_string(&normalize_path_components(
-            PathBuf::from(target),
-        )))
-    } else {
-        Some(normalize_path_string(&normalize_path_components(
-            config_dir.join(target),
-        )))
-    }
+    let path = vue3_tsconfig_path_from_expanded_target(config_dir, &target, type_resolver)?;
+    Some(normalize_path_string(&path))
 }
 
 pub(crate) fn vue3_tsconfig_include_root_path(
@@ -1173,7 +1168,8 @@ pub(crate) fn vue3_tsconfig_include_root_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    if target.is_empty() || target.contains('\\') || target.contains(':') {
+    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    if target.is_empty() || target.contains(':') {
         return None;
     }
     let root = target

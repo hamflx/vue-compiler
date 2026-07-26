@@ -1025,6 +1025,7 @@ pub(crate) fn vue3_package_types_versions_type_path(
         }
         let target =
             vue3_typescript_path_target_substitution(&target, &capture, type_resolver)?;
+        let target = vue3_normalize_typescript_path_separators(&target, type_resolver)?;
         if !vue3_package_type_target_is_safe(&target) {
             type_resolver.external_type_session.block_metadata();
             return None;

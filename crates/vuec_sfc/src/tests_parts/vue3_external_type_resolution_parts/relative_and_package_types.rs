@@ -593,6 +593,93 @@ defineProps<ImportRootProps & ImportFeatureProps & RequireRootProps & RequireFea
     }
 
     #[test]
+    fn vue3_project_self_name_emit_paths_accept_windows_separators() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let output_dir = dir.path().join("dist");
+        let declaration_dir = dir.path().join("declarations");
+        for directory in [&source_dir, &output_dir, &declaration_dir] {
+            std::fs::create_dir_all(directory).expect("create project directory");
+        }
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name":"vuec-project-windows-paths",
+                "exports":{
+                    ".":{"types":"./dist/root.js"},
+                    "./feature":{"types":"./declarations/feature.d.ts"}
+                }
+            }"#,
+        )
+        .expect("write project self-reference manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "rootDir": ".\\src",
+                    "outDir": ".\\dist",
+                    "declarationDir": ".\\declarations"
+                }
+            }"#,
+        )
+        .expect("write project config with Windows separators");
+        let root = source_dir.join("root.ts");
+        let feature = source_dir.join("feature.ts");
+        std::fs::write(
+            &root,
+            "export interface RootProps { windowsRoot: string }",
+        )
+        .expect("write project root source");
+        std::fs::write(
+            &feature,
+            "export interface FeatureProps { windowsFeature?: number }",
+        )
+        .expect("write project feature source");
+        std::fs::write(
+            output_dir.join("root.d.ts"),
+            "export interface RootProps { wrongOutputRoot: never }",
+        )
+        .expect("write output root decoy");
+        std::fs::write(
+            declaration_dir.join("feature.d.ts"),
+            "export interface FeatureProps { wrongDeclarationFeature: never }",
+        )
+        .expect("write declaration feature decoy");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { RootProps } from 'vuec-project-windows-paths'
+import type { FeatureProps } from 'vuec-project-windows-paths/feature'
+defineProps<RootProps & FeatureProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "windowsRoot: { type: String, required: true }",
+            "windowsFeature: { type: Number, required: false }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrongOutput"), "{}", script.content);
+        assert!(
+            !script.content.contains("wrongDeclaration"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [root, feature]
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
     fn vue3_project_self_name_exports_require_typescript_4_7() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_dir = dir.path().join("src");
@@ -1798,6 +1885,60 @@ defineProps<CommonJsDirect & CommonJsGeneric<{ genericLocal: number }> & CommonJ
                 "{selector}"
             );
         }
+    }
+
+    #[test]
+    fn vue3_package_types_versions_targets_accept_windows_separators_cross_platform() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-typesversions-windows-paths");
+        let target = package.join("versioned").join("feature").join("item.d.ts");
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create versioned package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    "*": {
+                        "feature/*": ["versioned\\feature\\*.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write versioned package manifest");
+        std::fs::write(
+            package.join("index.d.ts"),
+            "export interface VersionedProps { wrongFallback: never }",
+        )
+        .expect("write versioned fallback types");
+        std::fs::write(
+            &target,
+            "export interface VersionedProps { windowsTarget: string }",
+        )
+        .expect("write versioned Windows target");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { VersionedProps } from 'vuec-typesversions-windows-paths/feature/item'
+defineProps<VersionedProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("windowsTarget: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongFallback"));
+        assert_eq!(script.deps, vec![normalize_path_string(&target)]);
     }
 
     #[test]
