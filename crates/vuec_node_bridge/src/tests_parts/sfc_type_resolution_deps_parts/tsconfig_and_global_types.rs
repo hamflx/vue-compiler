@@ -15,7 +15,8 @@
                 "references": [{ "path": "./tsconfig.app.json" }],
                 "compilerOptions": {
                     "paths": {
-                        "bar": ["./pp.ts"]
+                        "bar": ["./pp.ts"],
+                        "@/*": ["${configDir}/src/*"]
                     }
                 }
             }"#,
@@ -31,11 +32,6 @@
         std::fs::write(
             dir.join("tsconfigs").join("base.json"),
             r#"{
-                "compilerOptions": {
-                    "paths": {
-                        "@/*": ["${configDir}/src/*"]
-                    }
-                },
                 "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.vue"]
             }"#,
         )
@@ -113,6 +109,8 @@
                 "compilerOptions": {
                     "paths": {
                         "root-alias": ["./root.ts",],
+                        "app-alias": ["./app.ts",],
+                        "@base/*": ["./src/base/*",],
                     },
                 },
                 "references": [

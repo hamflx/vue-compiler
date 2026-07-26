@@ -18,7 +18,6 @@ pub(crate) struct Vue3TsconfigPathMatch<'a> {
 struct Vue3TsconfigModuleResolutionSettings {
     path_mappings: Option<Vec<Vue3TsconfigPathMapping>>,
     paths_base_dir: Option<PathBuf>,
-    referenced_path_mappings: Vec<Vue3TsconfigPathMapping>,
     base_url: Option<PathBuf>,
     base_url_is_declared: bool,
 }
@@ -29,20 +28,10 @@ impl Vue3TsconfigModuleResolutionSettings {
             self.path_mappings = inherited.path_mappings.take();
             self.paths_base_dir = inherited.paths_base_dir.take();
         }
-        self.referenced_path_mappings
-            .append(&mut inherited.referenced_path_mappings);
         if inherited.base_url_is_declared {
             self.base_url = inherited.base_url;
             self.base_url_is_declared = true;
         }
-    }
-
-    fn add_reference(&mut self, mut referenced: Self) {
-        if let Some(mut path_mappings) = referenced.path_mappings.take() {
-            self.referenced_path_mappings.append(&mut path_mappings);
-        }
-        self.referenced_path_mappings
-            .append(&mut referenced.referenced_path_mappings);
     }
 
     fn apply_effective_paths_base(&mut self, typescript_version: &nodejs_semver::Version) {
@@ -60,10 +49,8 @@ impl Vue3TsconfigModuleResolutionSettings {
         }
     }
 
-    fn into_parts(mut self) -> (Vec<Vue3TsconfigPathMapping>, Option<PathBuf>) {
-        let mut path_mappings = self.path_mappings.take().unwrap_or_default();
-        path_mappings.append(&mut self.referenced_path_mappings);
-        (path_mappings, self.base_url)
+    fn into_parts(self) -> (Vec<Vue3TsconfigPathMapping>, Option<PathBuf>) {
+        (self.path_mappings.unwrap_or_default(), self.base_url)
     }
 }
 
@@ -149,51 +136,48 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
+    let config_path = vue3_tsconfig_search_paths(filename, type_resolver).next()?;
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
     let mut traversal = Vue3TsconfigGraphTraversal::default();
-    for (config_index, config_path) in
-        vue3_tsconfig_search_paths(filename, type_resolver).enumerate()
-    {
-        let config_dir = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_path_buf();
-        let settings = vue3_tsconfig_module_resolution_from_config(
-            &config_path,
-            &config_dir,
-            &mut traversal,
-            0,
-            type_resolver,
-        );
-        if type_resolver.external_type_session.metadata_is_blocked() {
-            return None;
-        }
-        let (path_mappings, base_url) = settings.into_parts();
-        let resolved = resolve_vue3_tsconfig_path_mappings_with_mode(
-            &path_mappings,
-            source,
-            resolution_mode,
-            type_resolver,
-        );
-        if type_resolver.external_type_session.metadata_is_blocked() {
-            return None;
-        }
-        if let Some(resolved) = resolved {
-            return Some(resolved);
-        }
-        if config_index == 0 && type_resolver.typescript_version < (7, 0, 0).into() {
-            if let Some(base_url) = base_url.as_ref() {
-                let resolved = resolve_vue3_tsconfig_base_url_with_mode(
-                    base_url,
-                    source,
-                    resolution_mode,
-                    type_resolver,
-                );
-                if type_resolver.external_type_session.metadata_is_blocked() {
-                    return None;
-                }
-                if let Some(resolved) = resolved {
-                    return Some(resolved);
-                }
+    let settings = vue3_tsconfig_module_resolution_from_config(
+        &config_path,
+        &config_dir,
+        &mut traversal,
+        0,
+        type_resolver,
+    );
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    let (path_mappings, base_url) = settings.into_parts();
+    let resolved = resolve_vue3_tsconfig_path_mappings_with_mode(
+        &path_mappings,
+        source,
+        resolution_mode,
+        type_resolver,
+    );
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    if resolved.is_some() {
+        return resolved;
+    }
+    if type_resolver.typescript_version < (7, 0, 0).into() {
+        if let Some(base_url) = base_url.as_ref() {
+            let resolved = resolve_vue3_tsconfig_base_url_with_mode(
+                base_url,
+                source,
+                resolution_mode,
+                type_resolver,
+            );
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+            if resolved.is_some() {
+                return resolved;
             }
         }
     }
@@ -681,16 +665,6 @@ fn vue3_tsconfig_module_resolution_from_config(
             settings.paths_base_dir = Some(config_dir.to_path_buf());
         }
         settings.apply_effective_paths_base(&type_resolver.typescript_version);
-        for reference in vue3_tsconfig_reference_paths(&value, config_dir, type_resolver) {
-            let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
-            settings.add_reference(vue3_tsconfig_module_resolution_from_config(
-                &reference,
-                reference_dir,
-                traversal,
-                depth + 1,
-                type_resolver,
-            ));
-        }
         Some(settings)
     })()
     .unwrap_or_default();

@@ -24,7 +24,9 @@
                 "files": [],
                 "compilerOptions": {
                     "paths": {
-                        "bar": ["./pp.ts"]
+                        "bar": ["./pp.ts"],
+                        "user": ["./user.ts"],
+                        "@/*": ["${configDir}/src/*"]
                     }
                 },
                 "references": [
@@ -47,11 +49,6 @@
         std::fs::write(
             dir.path().join("tsconfigs").join("base.json"),
             r#"{
-                "compilerOptions": {
-                    "paths": {
-                        "@/*": ["${configDir}/src/*"]
-                    }
-                },
                 "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.vue"]
             }"#,
         )
@@ -61,10 +58,7 @@
             r#"{
                 "include": ["../**/*.ts", "../**/*.vue"],
                 "compilerOptions": {
-                    "composite": true,
-                    "paths": {
-                        "user": ["../user.ts"]
-                    }
+                    "composite": true
                 },
                 "references": [
                     { "path": "../tsconfig.json" }
@@ -257,9 +251,14 @@ defineProps<BaseChoiceProps & MappedChoiceProps & PackageProps>()
         .expect("write overriding project config");
         std::fs::write(
             referenced_project.join("tsconfig.json"),
-            r#"{"compilerOptions":{"baseUrl":"./types"}}"#,
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": "./types",
+                    "paths": { "choice": ["${configDir}/types/choice.ts"] }
+                }
+            }"#,
         )
-        .expect("write referenced project config");
+        .expect("write referenced project config with a colliding path mapping");
         std::fs::write(
             reference_consumer.join("tsconfig.json"),
             r#"{"references":[{"path":"../referenced-project"}]}"#,
@@ -352,7 +351,14 @@ defineProps<ChoiceProps>()
         std::fs::create_dir_all(&package).expect("create fallback package");
         std::fs::write(
             dir.path().join("tsconfig.json"),
-            r#"{"compilerOptions":{"baseUrl":"./src"}}"#,
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": "./src",
+                    "paths": {
+                        "nested-choice": ["${configDir}/ancestor-choice.ts"]
+                    }
+                }
+            }"#,
         )
         .expect("write baseUrl config");
         let base_url_target = source_dir.join("choice.ts");
@@ -380,6 +386,25 @@ defineProps<ChoiceProps>()
             "export interface ChoiceProps { packageValue: number }",
         )
         .expect("write fallback package types");
+        let nested_package = dir.path().join("node_modules").join("nested-choice");
+        std::fs::create_dir_all(&nested_package).expect("create nested fallback package");
+        std::fs::write(
+            nested_package.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write nested fallback manifest");
+        let nested_package_target = nested_package.join("index.d.ts");
+        std::fs::write(
+            &nested_package_target,
+            "export interface NestedChoiceProps { packageValue: string }",
+        )
+        .expect("write nested fallback types");
+        let ancestor_paths_target = dir.path().join("ancestor-choice.ts");
+        std::fs::write(
+            &ancestor_paths_target,
+            "export interface NestedChoiceProps { ancestorPathLeak: never }",
+        )
+        .expect("write ancestor paths decoy");
         let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
 
         for version in [(5, 9, 0), (6, 0, 0)] {
@@ -418,6 +443,14 @@ defineProps<ChoiceProps>()
         assert_eq!(
             resolve_vue3_type_import(&nested_importer, "choice", &nested_typescript_5),
             Some(package_target)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(
+                &nested_importer,
+                "nested-choice",
+                &nested_typescript_5,
+            ),
+            Some(nested_package_target)
         );
         assert!(!typescript_7.external_type_session.metadata_is_blocked());
         assert!(!nested_typescript_5
@@ -680,6 +713,8 @@ defineProps<ChoiceProps>()
                 "compilerOptions": {
                     "paths": {
                         "root-alias": ["./root.ts",],
+                        "app-alias": ["${configDir}/app.ts",],
+                        "@base/*": ["${configDir}/src/base/*",],
                     },
                 },
                 "references": [
@@ -700,13 +735,7 @@ defineProps<ChoiceProps>()
         std::fs::write(
             dir.path().join("config").join("base.json"),
             r#"{
-                /* ${configDir} should still resolve from the referencing config. */
-                "compilerOptions": {
-                    "paths": {
-                        "app-alias": ["${configDir}/app.ts",],
-                        "@base/*": ["${configDir}/src/base/*",],
-                    },
-                },
+                /* Extended JSONC configs remain part of the metadata graph. */
             }"#,
         )
         .expect("write base tsconfig");

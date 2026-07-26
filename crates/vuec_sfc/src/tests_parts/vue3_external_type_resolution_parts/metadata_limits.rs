@@ -1099,19 +1099,19 @@ fn vue3_tsconfig_graph_bounds_unique_nodes() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(
         dir.path().join("tsconfig.json"),
-        r#"{
-            "extends": "./base.json",
-            "references": [{"path":"./referenced.json"}]
-        }"#,
+        r#"{"extends":"./middle.json"}"#,
     )
     .expect("write root tsconfig");
+    std::fs::write(
+        dir.path().join("middle.json"),
+        r#"{"extends":"./base.json"}"#,
+    )
+    .expect("write middle tsconfig");
     std::fs::write(
         dir.path().join("base.json"),
         r#"{"compilerOptions":{"paths":{"bounded":["./types.ts"]}}}"#,
     )
     .expect("write base tsconfig");
-    std::fs::write(dir.path().join("referenced.json"), "{}")
-        .expect("write referenced tsconfig");
     let target = dir.path().join("types.ts");
     std::fs::write(&target, "export interface BoundedProps { value: string }")
         .expect("write bounded type");
