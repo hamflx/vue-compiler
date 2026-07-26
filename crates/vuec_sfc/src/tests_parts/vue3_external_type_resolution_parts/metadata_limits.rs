@@ -1763,7 +1763,7 @@ fn vue3_tsconfig_discovery_budget_is_shared_across_extends_and_references() {
     .expect("write root tsconfig");
     std::fs::write(
         reference_dir.join("tsconfig.json"),
-        r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+        r#"{"files":[],"compilerOptions":{"typeRoots":["./types"]}}"#,
     )
     .expect("write referenced tsconfig");
     let filename = source_dir.join("Comp.vue").to_string_lossy().to_string();
@@ -1816,7 +1816,7 @@ fn vue3_tsconfig_type_root_enumeration_is_bounded_before_sorting() {
     write_vue3_test_type_package(&zeta, r#"{"types":"index.d.ts"}"#);
     std::fs::write(
         dir.path().join("tsconfig.json"),
-        r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+        r#"{"files":[],"compilerOptions":{"typeRoots":["./types"]}}"#,
     )
     .expect("write tsconfig");
     let filename = source_dir.join("Comp.vue").to_string_lossy().to_string();
@@ -1854,7 +1854,7 @@ fn vue3_tsconfig_empty_types_skips_type_root_discovery() {
     std::fs::write(&alias, "export interface AliasProps {}").expect("write alias type");
     std::fs::write(
         dir.path().join("tsconfig.json"),
-        r#"{"compilerOptions":{"types":[],"paths":{"alias":["./alias.ts"]}}}"#,
+        r#"{"files":[],"compilerOptions":{"types":[],"paths":{"alias":["./alias.ts"]}}}"#,
     )
     .expect("write tsconfig");
     let filename = dir

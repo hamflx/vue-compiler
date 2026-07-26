@@ -585,6 +585,163 @@ defineProps<ExplicitProps & KeptProps>()
     }
 
     #[test]
+    fn vue3_tsconfig_default_include_honors_output_dirs_and_explicit_empty_specs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let configs = dir.path().join("configs");
+        let project = dir.path().join("project");
+        for directory in [
+            configs.clone(),
+            project.join("src"),
+            project.join("nested"),
+            project.join("dist"),
+            project.join("declarations"),
+            project.join("node_modules").join("package"),
+            project.join("bower_components").join("package"),
+            project.join("jspm_packages").join("package"),
+            project.join(".hidden"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create default include fixture");
+        }
+        std::fs::write(
+            configs.join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "types": [],
+                    "outDir": "../project/dist",
+                    "declarationDir": "${configDir}/declarations"
+                }
+            }"#,
+        )
+        .expect("write default include base config");
+        let config_path = project.join("tsconfig.json");
+        std::fs::write(
+            &config_path,
+            r#"{"extends":"../configs/base.json"}"#,
+        )
+        .expect("write default include project config");
+        let root = project.join("ambient.d.ts");
+        let nested = project.join("nested").join("ambient.d.mts");
+        let out_dir = project.join("dist").join("generated.d.ts");
+        let declaration_dir = project.join("declarations").join("generated.d.ts");
+        for (path, source) in [
+            (
+                &root,
+                "declare interface DefaultIncludedProps { rootValue: string }",
+            ),
+            (
+                &nested,
+                "declare interface NestedDefaultProps { nestedValue?: number }",
+            ),
+            (
+                &out_dir,
+                "declare interface OutputDirectoryProps { outputValue: boolean }",
+            ),
+            (
+                &declaration_dir,
+                "declare interface DeclarationDirectoryProps { declarationValue: boolean }",
+            ),
+            (
+                &project
+                    .join("node_modules")
+                    .join("package")
+                    .join("ignored.d.ts"),
+                "declare interface NodeModulesDefaultProps {}",
+            ),
+            (
+                &project
+                    .join("bower_components")
+                    .join("package")
+                    .join("ignored.d.ts"),
+                "declare interface BowerDefaultProps {}",
+            ),
+            (
+                &project
+                    .join("jspm_packages")
+                    .join("package")
+                    .join("ignored.d.ts"),
+                "declare interface JspmDefaultProps {}",
+            ),
+            (
+                &project.join(".hidden").join("ignored.d.ts"),
+                "declare interface HiddenDefaultProps {}",
+            ),
+        ] {
+            std::fs::write(path, source).expect("write default include declaration");
+        }
+        let filename = project.join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+        let discover = || {
+            vue3_tsconfig_global_type_files(
+                &filename_text,
+                &vue3_type_resolver_context_for_filename(&filename_text),
+            )
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        };
+
+        assert_eq!(
+            discover(),
+            [root.clone(), nested.clone()].into_iter().collect()
+        );
+        let bounded = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_files: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_global_type_files(&filename_text, &bounded)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            [root.clone(), nested.clone()].into_iter().collect()
+        );
+        assert_eq!(
+            bounded
+                .external_type_session
+                .stats()
+                .tsconfig_discovery_files,
+            2
+        );
+        assert!(!bounded.external_type_session.metadata_is_blocked());
+        let source = r#"<script setup lang="ts">
+defineProps<DefaultIncludedProps & NestedDefaultProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("rootValue: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("nestedValue: { type: Number, required: false }"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [root.clone(), nested.clone()]
+                .into_iter()
+                .map(|path| normalize_path_string(&path))
+                .collect()
+        );
+
+        for config in [
+            r#"{"extends":"../configs/base.json","files":[]}"#,
+            r#"{"extends":"../configs/base.json","include":[]}"#,
+        ] {
+            std::fs::write(&config_path, config).expect("write empty project file spec");
+            assert!(discover().is_empty());
+        }
+
+        std::fs::write(
+            &config_path,
+            r#"{"extends":"../configs/base.json","exclude":[]}"#,
+        )
+        .expect("write explicit empty exclude");
+        assert_eq!(
+            discover(),
+            [root, nested, out_dir, declaration_dir]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
     fn vue3_tsconfig_filesystem_fields_accept_windows_separators_cross_platform() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src = dir.path().join("src");
@@ -1008,6 +1165,7 @@ defineProps<
             dir.path().join("tsconfig.json"),
             r#"{
                 "extends": "./config/base.json",
+                "files": [],
                 "compilerOptions": {
                     "types": ["chosen", "@scope/tool"]
                 },
@@ -1024,7 +1182,10 @@ defineProps<
             }"#,
         )
         .expect("write base tsconfig");
-        std::fs::write(dir.path().join("project").join("tsconfig.json"), "{}")
+        std::fs::write(
+            dir.path().join("project").join("tsconfig.json"),
+            r#"{"files":[]}"#,
+        )
             .expect("write referenced tsconfig");
         std::fs::write(
             dir.path().join("typings").join("chosen").join("index.d.ts"),
@@ -1161,7 +1322,10 @@ defineModel<ScopedGlobalModel>()
 
         std::fs::write(
             &config_path,
-            r#"{"extends":["../first/tsconfig.json","../second/tsconfig.json"]}"#,
+            r#"{
+                "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "files":[]
+            }"#,
         )
         .expect("write inherited options config");
         assert_eq!(discover(), vec![inherited_entry]);
@@ -1170,6 +1334,7 @@ defineModel<ScopedGlobalModel>()
             &config_path,
             r#"{
                 "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "files":[],
                 "compilerOptions":{"typeRoots":["./types"]}
             }"#,
         )
@@ -1180,6 +1345,7 @@ defineModel<ScopedGlobalModel>()
             &config_path,
             r#"{
                 "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "files":[],
                 "compilerOptions":{"types":["direct"]}
             }"#,
         )
@@ -1190,6 +1356,7 @@ defineModel<ScopedGlobalModel>()
             &config_path,
             r#"{
                 "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "files":[],
                 "compilerOptions":{"types":[]}
             }"#,
         )
@@ -1211,7 +1378,7 @@ defineModel<ScopedGlobalModel>()
         .expect("write inherited default roots config");
         std::fs::write(
             &config_path,
-            r#"{"extends":"../first/tsconfig.json"}"#,
+            r#"{"extends":"../first/tsconfig.json","files":[]}"#,
         )
         .expect("write default roots project config");
         assert_eq!(discover(), vec![project_default_entry]);

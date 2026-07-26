@@ -2471,6 +2471,7 @@ defineProps<TypesFieldProps & TypingsFieldProps & MainFieldProps & VersionedRoot
         std::fs::write(
             dir.path().join("tsconfig.json"),
             r#"{
+                "files": [],
                 "compilerOptions": {
                     "types": ["versioned-global"],
                     "typeRoots": ["./typings"]

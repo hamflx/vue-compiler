@@ -480,6 +480,7 @@
             dir.join("tsconfig.json"),
             r#"{
                 "extends": "./config/base.json",
+                "files": [],
                 "compilerOptions": {
                     "types": ["chosen", "@scope/tool"]
                 },
@@ -496,7 +497,10 @@
             }"#,
         )
         .expect("write base tsconfig");
-        std::fs::write(dir.join("project").join("tsconfig.json"), "{}")
+        std::fs::write(
+            dir.join("project").join("tsconfig.json"),
+            r#"{"files":[]}"#,
+        )
             .expect("write referenced tsconfig");
         std::fs::write(
             dir.join("typings").join("chosen").join("index.d.ts"),

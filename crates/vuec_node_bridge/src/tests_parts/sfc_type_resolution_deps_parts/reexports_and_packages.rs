@@ -566,6 +566,7 @@
         std::fs::write(
             dir.join("tsconfig.json"),
             r#"{
+                "files": [],
                 "compilerOptions": {
                     "types": ["versioned-global"],
                     "typeRoots": ["./typings"]
