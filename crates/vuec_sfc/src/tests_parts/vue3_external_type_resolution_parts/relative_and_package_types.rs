@@ -476,37 +476,245 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
     }
 
     #[test]
-    fn vue3_normalized_local_path_cannot_enable_dependency_self_reference() {
+    fn vue3_project_self_name_exports_map_emitted_targets_and_resolution_modes_to_sources() {
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::create_dir_all(dir.path().join("src")).expect("create source directory");
+        let source_dir = dir.path().join("src");
+        let output_dir = dir.path().join("dist");
+        let declaration_dir = dir.path().join("declarations");
+        for directory in [&source_dir, &output_dir, &declaration_dir] {
+            std::fs::create_dir_all(directory).expect("create project directory");
+        }
         std::fs::write(
             dir.path().join("package.json"),
             r#"{
-                "name":"vuec-local-self",
-                "exports":{"./feature":{"types":"./feature.d.ts"}}
+                "name":"vuec-project-self",
+                "type":"module",
+                "exports":{
+                    ".":{"types":{
+                        "import":"./dist/root.js",
+                        "require":"./declarations/root.d.cts"
+                    }},
+                    "./feature":{"types":{
+                        "import":"./dist/feature.mjs",
+                        "require":"./declarations/feature.d.cts"
+                    }}
+                }
             }"#,
         )
-        .expect("write local package manifest");
+        .expect("write project self-reference manifest");
         std::fs::write(
-            dir.path().join("feature.d.ts"),
-            "export interface FeatureProps { leaked: string }",
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "rootDir": "./src",
+                    "outDir": "./dist",
+                    "declarationDir": "./declarations"
+                }
+            }"#,
         )
-        .expect("write local self target");
-        let disguised_importer = dir
+        .expect("write project config");
+        let targets = [
+            (
+                source_dir.join("root.ts"),
+                "export interface ImportRootProps { importRoot: string }",
+            ),
+            (
+                source_dir.join("root.cts"),
+                "export interface RequireRootProps { requireRoot: number }",
+            ),
+            (
+                source_dir.join("feature.mts"),
+                "export interface ImportFeatureProps { importFeature: boolean }",
+            ),
+            (
+                source_dir.join("feature.cts"),
+                "export interface RequireFeatureProps { requireFeature?: string }",
+            ),
+        ];
+        for (path, source) in &targets {
+            std::fs::write(path, source).expect("write project self-reference source");
+        }
+        for (path, source) in [
+            (
+                output_dir.join("root.d.ts"),
+                "export interface ImportRootProps { wrongOutputRoot: never }",
+            ),
+            (
+                output_dir.join("feature.d.mts"),
+                "export interface ImportFeatureProps { wrongOutputFeature: never }",
+            ),
+            (
+                declaration_dir.join("root.d.cts"),
+                "export interface RequireRootProps { wrongDeclarationRoot: never }",
+            ),
+            (
+                declaration_dir.join("feature.d.cts"),
+                "export interface RequireFeatureProps { wrongDeclarationFeature: never }",
+            ),
+        ] {
+            std::fs::write(path, source).expect("write emitted self-reference decoy");
+        }
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ImportRootProps } from 'vuec-project-self'
+import type { ImportFeatureProps } from 'vuec-project-self/feature'
+import type { RequireRootProps } from 'vuec-project-self' with { "resolution-mode": "require" }
+import type { RequireFeatureProps } from 'vuec-project-self/feature' with { "resolution-mode": "require" }
+defineProps<ImportRootProps & ImportFeatureProps & RequireRootProps & RequireFeatureProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "importRoot: { type: String, required: true }",
+            "importFeature: { type: Boolean, required: true }",
+            "requireRoot: { type: Number, required: true }",
+            "requireFeature: { type: String, required: false }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrongOutput"), "{}", script.content);
+        assert!(
+            !script.content.contains("wrongDeclaration"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            targets
+                .iter()
+                .map(|(path, _)| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_project_self_name_exports_require_typescript_4_7() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let dependency = dir.path().join("node_modules").join("vuec-versioned-self");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::create_dir_all(&dependency).expect("create fallback dependency");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name":"vuec-versioned-self",
+                "exports":{
+                    "./feature":{"types":"./src/local.d.ts"},
+                    "./excluded":null
+                }
+            }"#,
+        )
+        .expect("write project self-reference manifest");
+        let local = source_dir.join("local.d.ts");
+        std::fs::write(&local, "export interface Props { local: string }")
+            .expect("write local self-reference target");
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"types":"feature.d.ts"}"#,
+        )
+        .expect("write fallback dependency manifest");
+        let fallback = dependency.join("feature.d.ts");
+        std::fs::write(&fallback, "export interface Props { fallback: number }")
+            .expect("write fallback dependency target");
+        for name in ["excluded.d.ts", "missing.d.ts"] {
+            std::fs::write(
+                dependency.join(name),
+                "export interface Props { wrongFallback: never }",
+            )
+            .expect("write excluded fallback decoy");
+        }
+        let importer = source_dir.join("index.d.ts");
+        std::fs::write(&importer, "export {};").expect("write project importer");
+
+        let legacy = Vue3TypeResolverContext {
+            typescript_version: (4, 6, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let current = Vue3TypeResolverContext {
+            typescript_version: (4, 7, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let importer = importer.to_string_lossy();
+
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/feature", &legacy),
+            Some(fallback)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/feature", &current),
+            Some(local)
+        );
+        assert!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/excluded", &current).is_none()
+        );
+        assert!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/missing", &current).is_none()
+        );
+        assert!(!legacy.external_type_session.metadata_is_blocked());
+        assert!(!current.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_project_self_name_without_exports_uses_bare_package_lookup() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let dependency = dir
             .path()
             .join("node_modules")
-            .join("..")
-            .join("src")
-            .join("index.d.ts");
-        let resolver = Vue3TypeResolverContext::default();
-
-        assert!(resolve_vue3_type_import(
-            &disguised_importer.to_string_lossy(),
-            "vuec-local-self/feature",
-            &resolver,
+            .join("vuec-project-no-exports");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::create_dir_all(&dependency).expect("create dependency package");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name":"vuec-project-no-exports",
+                "types":"./src/local-decoy.ts"
+            }"#,
         )
-        .is_none());
-        assert!(!resolver.external_type_session.metadata_is_blocked());
+        .expect("write project manifest without exports");
+        let local_decoy = source_dir.join("local-decoy.ts");
+        std::fs::write(
+            &local_decoy,
+            "export interface ProjectProps { wrongLocalSelf: never }",
+        )
+        .expect("write local package decoy");
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write dependency manifest");
+        let dependency_entry = dependency.join("index.d.ts");
+        std::fs::write(
+            &dependency_entry,
+            "export interface ProjectProps { dependencyValue: string }",
+        )
+        .expect("write dependency entry");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ProjectProps } from 'vuec-project-no-exports'
+defineProps<ProjectProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("dependencyValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongLocalSelf"), "{}", script.content);
+        assert_eq!(script.deps, vec![normalize_path_string(&dependency_entry)]);
+        assert!(!script.deps.contains(&normalize_path_string(&local_decoy)));
     }
 
     #[test]
@@ -791,18 +999,29 @@ defineProps<ProjectProps & ExternalProps>()
     }
 
     #[test]
-    fn vue3_project_tsconfig_paths_precede_package_imports() {
+    fn vue3_project_tsconfig_paths_precede_package_maps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_dir = dir.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("create project source directory");
         std::fs::write(
             dir.path().join("package.json"),
-            r##"{"imports":{"#choice":"./src/imports-choice.ts"}}"##,
+            r##"{
+                "name":"vuec-path-priority",
+                "imports":{"#choice":"./src/imports-choice.ts"},
+                "exports":{"./choice":{"types":"./src/self-choice.ts"}}
+            }"##,
         )
-        .expect("write project imports manifest");
+        .expect("write project package maps");
         std::fs::write(
             dir.path().join("tsconfig.json"),
-            r##"{"compilerOptions":{"paths":{"#choice":["./src/paths-choice.ts"]}}}"##,
+            r##"{
+                "compilerOptions":{
+                    "paths":{
+                        "#choice":["./src/paths-choice.ts"],
+                        "vuec-path-priority/choice":["./src/paths-self-choice.ts"]
+                    }
+                }
+            }"##,
         )
         .expect("write project config");
         let paths_choice = source_dir.join("paths-choice.ts");
@@ -811,16 +1030,28 @@ defineProps<ProjectProps & ExternalProps>()
             "export interface ChoiceProps { pathsValue: string }",
         )
         .expect("write paths target");
+        let paths_self_choice = source_dir.join("paths-self-choice.ts");
+        std::fs::write(
+            &paths_self_choice,
+            "export interface SelfChoiceProps { selfPathsValue: number }",
+        )
+        .expect("write self-name paths target");
         std::fs::write(
             source_dir.join("imports-choice.ts"),
             "export interface ChoiceProps { wrongImportsPriority: never }",
         )
         .expect("write imports decoy");
+        std::fs::write(
+            source_dir.join("self-choice.ts"),
+            "export interface SelfChoiceProps { wrongSelfPriority: never }",
+        )
+        .expect("write self-name decoy");
 
         let filename = source_dir.join("Comp.vue");
         let source = r#"<script setup lang="ts">
 import type { ChoiceProps } from '#choice'
-defineProps<ChoiceProps>()
+import type { SelfChoiceProps } from 'vuec-path-priority/choice'
+defineProps<ChoiceProps & SelfChoiceProps>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(filename.to_string_lossy(), source);
@@ -834,8 +1065,22 @@ defineProps<ChoiceProps>()
             "{}",
             script.content
         );
+        assert!(
+            script
+                .content
+                .contains("selfPathsValue: { type: Number, required: true }"),
+            "{}",
+            script.content
+        );
         assert!(!script.content.contains("wrongImportsPriority"));
-        assert_eq!(script.deps, vec![normalize_path_string(&paths_choice)]);
+        assert!(!script.content.contains("wrongSelfPriority"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [paths_choice, paths_self_choice]
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]

@@ -253,6 +253,38 @@ fn resolve_vue3_project_package_input_target_with_mode(
     None
 }
 
+fn resolve_vue3_package_relative_target_with_project_input(
+    importer: &Path,
+    package_dir: &Path,
+    target: &str,
+    emit_path_options: Option<&(PathBuf, Vue3TsconfigEmitPathOptions)>,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    target.strip_prefix("./")?;
+    let input = emit_path_options.and_then(|(config_path, options)| {
+        resolve_vue3_project_package_input_target_with_mode(
+            importer,
+            package_dir,
+            target,
+            config_path,
+            options,
+            resolution_mode,
+            type_resolver,
+        )
+    });
+    if input.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+        input
+    } else {
+        vue3_package_export_type_path_with_mode(
+            package_dir,
+            target,
+            resolution_mode,
+            type_resolver,
+        )
+    }
+}
+
 fn vue3_project_package_source_root_guesses(
     importer: &Path,
     package_dir: &Path,

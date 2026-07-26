@@ -89,7 +89,7 @@ fn resolve_vue3_type_import_uncached(
         }
         Vue3PackageImportsResolution::NotApplicable => {}
     }
-    match resolve_vue3_dependency_package_self_reference_with_mode(
+    match resolve_vue3_package_self_reference_with_mode(
         filename,
         source,
         resolution_mode,
@@ -184,27 +184,14 @@ fn resolve_vue3_package_imports_with_mode(
         &mut |target| {
             let failure_epoch = type_resolver.external_type_session.failure_epoch();
             let candidate = if target.starts_with("./") {
-                let input = emit_path_options.as_ref().and_then(|(config_path, options)| {
-                    resolve_vue3_project_package_input_target_with_mode(
-                        &filename,
-                        &package_dir,
-                        target,
-                        config_path,
-                        options,
-                        resolution_mode,
-                        type_resolver,
-                    )
-                });
-                if input.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
-                    input
-                } else {
-                    vue3_package_export_type_path_with_mode(
-                        &package_dir,
-                        target,
-                        resolution_mode,
-                        type_resolver,
-                    )
-                }
+                resolve_vue3_package_relative_target_with_project_input(
+                    &filename,
+                    &package_dir,
+                    target,
+                    emit_path_options.as_ref(),
+                    resolution_mode,
+                    type_resolver,
+                )
             } else {
                 resolve_vue3_type_import_with_mode(
                     &package_filename.to_string_lossy(),
@@ -244,20 +231,19 @@ enum Vue3PackageSelfReferenceResolution {
     MetadataBlocked,
 }
 
-fn resolve_vue3_dependency_package_self_reference_with_mode(
+fn resolve_vue3_package_self_reference_with_mode(
     filename: &str,
     source: &str,
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageSelfReferenceResolution {
     let filename = normalize_path_components(PathBuf::from(filename));
-    // Local project self-references also need tsconfig output-to-input remapping.
-    if !vue3_path_contains_node_modules(&filename) {
-        return Vue3PackageSelfReferenceResolution::NotApplicable;
-    }
     let Some((package_name, subpath)) = vue3_package_import_parts(source) else {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     };
+    if type_resolver.typescript_version < (4, 7, 0).into() {
+        return Vue3PackageSelfReferenceResolution::NotApplicable;
+    }
     let (package_dir, manifest) = match vue3_package_scope_for_path(
         &filename,
         &type_resolver.external_type_session,
@@ -273,31 +259,66 @@ fn resolve_vue3_dependency_package_self_reference_with_mode(
             return Vue3PackageSelfReferenceResolution::MetadataBlocked;
         }
     };
-    if !vue3_path_contains_node_modules(&package_dir)
-        || manifest.name.as_deref() != Some(package_name.as_str())
-        || manifest.exports.as_ref().is_none_or(serde_json::Value::is_null)
-    {
+    if manifest.name.as_deref() != Some(package_name.as_str()) {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     }
+    let Some(exports) = manifest.exports.as_ref().filter(|exports| !exports.is_null()) else {
+        return Vue3PackageSelfReferenceResolution::NotApplicable;
+    };
+    let emit_path_options = if vue3_path_contains_node_modules(&package_dir) {
+        None
+    } else {
+        vue3_tsconfig_emit_path_options(&filename.to_string_lossy(), &package_dir, type_resolver)
+    };
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageSelfReferenceResolution::MetadataBlocked;
+    }
+    let Some(_resolution_guard) = type_resolver
+        .external_type_session
+        .begin_package_resolution(&package_dir)
+    else {
+        return Vue3PackageSelfReferenceResolution::MetadataBlocked;
+    };
 
-    match resolve_vue3_package_json_type_entry_with_mode(
-        &package_dir,
+    let mut resolved = None;
+    let result = visit_vue3_package_exports_type_targets(
+        exports,
         subpath.as_deref(),
         resolution_mode,
         type_resolver,
-    ) {
-        Vue3PackageJsonTypeResolution::Resolved(path) => {
+        &mut |target| {
+            let failure_epoch = type_resolver.external_type_session.failure_epoch();
+            let candidate = resolve_vue3_package_relative_target_with_project_input(
+                &filename,
+                &package_dir,
+                target,
+                emit_path_options.as_ref(),
+                resolution_mode,
+                type_resolver,
+            );
+            if type_resolver.external_type_session.metadata_is_blocked()
+                || type_resolver.external_type_session.failure_epoch() != failure_epoch
+            {
+                Vue3PackageTargetVisit::Blocked
+            } else if let Some(candidate) = candidate {
+                resolved = Some(candidate);
+                Vue3PackageTargetVisit::Resolved
+            } else {
+                Vue3PackageTargetVisit::Missing
+            }
+        },
+    );
+    match (result, resolved) {
+        (Vue3PackageTargetVisit::Resolved, Some(path)) => {
             Vue3PackageSelfReferenceResolution::Resolved(path)
         }
-        Vue3PackageJsonTypeResolution::Blocked
-        | Vue3PackageJsonTypeResolution::NoPackageJson
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                Vue3PackageSelfReferenceResolution::MetadataBlocked
-            } else {
-                Vue3PackageSelfReferenceResolution::Rejected
-            }
+        (Vue3PackageTargetVisit::Blocked, _) => {
+            Vue3PackageSelfReferenceResolution::MetadataBlocked
         }
+        _ if type_resolver.external_type_session.metadata_is_blocked() => {
+            Vue3PackageSelfReferenceResolution::MetadataBlocked
+        }
+        _ => Vue3PackageSelfReferenceResolution::Rejected,
     }
 }
 
