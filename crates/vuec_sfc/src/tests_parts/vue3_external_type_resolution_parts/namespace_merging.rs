@@ -491,6 +491,52 @@ fn vue3_require_only_javascript_global_files_keep_module_members_private() {
 }
 
 #[test]
+fn vue3_declaration_file_formats_do_not_force_module_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let commonjs_globals = dir.path().join("commonjs-globals.d.cts");
+    let module_globals = dir.path().join("module-globals.d.mts");
+    let commonjs_private = dir.path().join("commonjs-private.d.cts");
+    std::fs::write(
+        &commonjs_globals,
+        "interface CommonJsDeclarationGlobal { commonjs: string }",
+    )
+    .expect("write CommonJS declaration globals");
+    std::fs::write(
+        &module_globals,
+        "interface ModuleDeclarationGlobal { module: number }",
+    )
+    .expect("write ESM declaration globals");
+    std::fs::write(
+        &commonjs_private,
+        "export {}; interface CommonJsDeclarationPrivate { hidden: boolean }",
+    )
+    .expect("write CommonJS declaration module");
+
+    let context = vue3_global_type_context(
+        &dir.path().join("Comp.vue").to_string_lossy(),
+        &[
+            commonjs_globals.to_string_lossy().to_string(),
+            module_globals.to_string_lossy().to_string(),
+            commonjs_private.to_string_lossy().to_string(),
+        ],
+        &Vue3TypeResolverContext::default(),
+    );
+
+    assert!(vue3_type_context_has_name(
+        &context,
+        "CommonJsDeclarationGlobal"
+    ));
+    assert!(vue3_type_context_has_name(
+        &context,
+        "ModuleDeclarationGlobal"
+    ));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "CommonJsDeclarationPrivate"
+    ));
+}
+
+#[test]
 fn vue3_split_namespaces_merge_interface_declarations() {
     let dir = tempfile::tempdir().expect("temp dir");
     let types = dir.path().join("types.ts");

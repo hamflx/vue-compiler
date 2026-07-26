@@ -1380,7 +1380,9 @@ fn vue3_global_type_projection_from_source(
     if parsed.panicked || !parsed.errors.is_empty() {
         return None;
     }
-    let program_is_global_script = !source_type.is_commonjs()
+    let format_forces_module_scope =
+        source_type.is_commonjs() && !source_type.is_typescript_definition();
+    let program_is_global_script = !format_forces_module_scope
         && !vue3_javascript_statements_have_commonjs_module_indicator(
             &parsed.program.body,
             source_type,
