@@ -8,6 +8,7 @@ pub(crate) enum Vue3PackageJsonTypeResolution {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Vue3PackageJsonTypeManifest {
+    pub(crate) name: Option<String>,
     pub(crate) version: Option<serde_json::Value>,
     pub(crate) tsconfig: Option<serde_json::Value>,
     pub(crate) exports: Option<serde_json::Value>,
@@ -46,6 +47,10 @@ impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
                 let mut manifest = Vue3PackageJsonTypeManifest::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
+                        "name" => {
+                            let value = map.next_value::<serde_json::Value>()?;
+                            manifest.name = value.as_str().map(str::to_string);
+                        }
                         "version" => manifest.version = Some(map.next_value()?),
                         "tsconfig" => manifest.tsconfig = Some(map.next_value()?),
                         "exports" => manifest.exports = Some(map.next_value()?),

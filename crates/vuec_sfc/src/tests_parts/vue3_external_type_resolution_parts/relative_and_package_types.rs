@@ -211,6 +211,261 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
     }
 
     #[test]
+    fn vue3_dependency_packages_resolve_self_name_imports_with_their_own_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let module_package = node_modules.join("@vuec").join("self-module");
+        let commonjs_package = node_modules.join("vuec-self-commonjs");
+        for package in [&module_package, &commonjs_package] {
+            std::fs::create_dir_all(package.join("types").join("import"))
+                .expect("create import type directory");
+            std::fs::create_dir_all(package.join("types").join("require"))
+                .expect("create require type directory");
+        }
+        std::fs::write(
+            module_package.join("package.json"),
+            r#"{
+                "name":"@vuec/self-module",
+                "type":"module",
+                "exports":{
+                    ".":{"types":"./types/index.d.ts"},
+                    "./feature/*":{"types":{
+                        "import":"./types/import/*.d.ts",
+                        "require":"./types/require/*.d.ts"
+                    }}
+                }
+            }"#,
+        )
+        .expect("write module self-reference manifest");
+        std::fs::write(
+            commonjs_package.join("package.json"),
+            r#"{
+                "name":"vuec-self-commonjs",
+                "type":"commonjs",
+                "exports":{
+                    ".":{"types":"./types/index.d.ts"},
+                    "./feature/*":{"types":{
+                        "import":"./types/import/*.d.ts",
+                        "require":"./types/require/*.d.ts"
+                    }}
+                }
+            }"#,
+        )
+        .expect("write CommonJS self-reference manifest");
+        std::fs::write(
+            module_package.join("types").join("index.d.ts"),
+            concat!(
+                "export { FeatureProps as ModuleStaticProps } from '@vuec/self-module/feature/item'\n",
+                "export type ModuleDynamicProps = import('@vuec/self-module/feature/item').DynamicProps",
+            ),
+        )
+        .expect("write module self-reference root");
+        std::fs::write(
+            commonjs_package.join("types").join("index.d.ts"),
+            concat!(
+                "export { FeatureProps as CommonJsStaticProps } from 'vuec-self-commonjs/feature/item'\n",
+                "export type CommonJsDynamicProps = import('vuec-self-commonjs/feature/item').DynamicProps",
+            ),
+        )
+        .expect("write CommonJS self-reference root");
+        std::fs::write(
+            module_package
+                .join("types")
+                .join("import")
+                .join("item.d.ts"),
+            concat!(
+                "export interface FeatureProps { moduleStatic: string }\n",
+                "export interface DynamicProps { moduleDynamic: boolean }",
+            ),
+        )
+        .expect("write module import target");
+        std::fs::write(
+            module_package
+                .join("types")
+                .join("require")
+                .join("item.d.ts"),
+            concat!(
+                "export interface FeatureProps { wrongModuleStatic: never }\n",
+                "export interface DynamicProps { wrongModuleDynamic: never }",
+            ),
+        )
+        .expect("write module require decoy");
+        std::fs::write(
+            commonjs_package
+                .join("types")
+                .join("require")
+                .join("item.d.ts"),
+            concat!(
+                "export interface FeatureProps { commonjsStatic: number }\n",
+                "export interface DynamicProps { commonjsDynamic?: string }",
+            ),
+        )
+        .expect("write CommonJS require target");
+        std::fs::write(
+            commonjs_package
+                .join("types")
+                .join("import")
+                .join("item.d.ts"),
+            concat!(
+                "export interface FeatureProps { wrongCommonJsStatic: never }\n",
+                "export interface DynamicProps { wrongCommonJsDynamic: never }",
+            ),
+        )
+        .expect("write CommonJS import decoy");
+        let nested_module_decoy = module_package
+            .join("types")
+            .join("node_modules")
+            .join("@vuec")
+            .join("self-module");
+        let nested_commonjs_decoy = commonjs_package
+            .join("types")
+            .join("node_modules")
+            .join("vuec-self-commonjs");
+        for decoy in [&nested_module_decoy, &nested_commonjs_decoy] {
+            std::fs::create_dir_all(decoy).expect("create nested same-name decoy");
+            std::fs::write(
+                decoy.join("package.json"),
+                r#"{"exports":{"./feature/*":{"types":"./*.d.ts"}}}"#,
+            )
+            .expect("write nested same-name decoy manifest");
+            std::fs::write(
+                decoy.join("item.d.ts"),
+                concat!(
+                    "export interface FeatureProps { nestedDecoyStatic: never }\n",
+                    "export interface DynamicProps { nestedDecoyDynamic: never }",
+                ),
+            )
+            .expect("write nested same-name decoy target");
+        }
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ModuleStaticProps, ModuleDynamicProps } from '@vuec/self-module'
+import type { CommonJsStaticProps, CommonJsDynamicProps } from 'vuec-self-commonjs'
+defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & CommonJsDynamicProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "moduleStatic: { type: String, required: true }",
+            "moduleDynamic: { type: Boolean, required: true }",
+            "commonjsStatic: { type: Number, required: true }",
+            "commonjsDynamic: { type: String, required: false }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrongModule"), "{}", script.content);
+        assert!(!script.content.contains("wrongCommonJs"), "{}", script.content);
+        assert!(!script.content.contains("nestedDecoy"), "{}", script.content);
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            module_package.join("types").join("index.d.ts"),
+            module_package
+                .join("types")
+                .join("import")
+                .join("item.d.ts"),
+            commonjs_package.join("types").join("index.d.ts"),
+            commonjs_package
+                .join("types")
+                .join("require")
+                .join("item.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+    }
+
+    #[test]
+    fn vue3_dependency_self_name_export_exclusions_do_not_fall_through() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let outer_package = dir.path().join("node_modules").join("vuec-self-blocked");
+        let nested_package = dir
+            .path()
+            .join("node_modules")
+            .join("container")
+            .join("node_modules")
+            .join("vuec-self-blocked");
+        std::fs::create_dir_all(&outer_package).expect("create outer decoy package");
+        std::fs::create_dir_all(&nested_package).expect("create nested self package");
+        std::fs::write(
+            outer_package.join("package.json"),
+            r#"{"exports":{"./private":{"types":"./private.d.ts"}}}"#,
+        )
+        .expect("write outer decoy manifest");
+        std::fs::write(
+            outer_package.join("private.d.ts"),
+            "export interface PrivateProps { leaked: string }",
+        )
+        .expect("write outer decoy type");
+        std::fs::write(
+            nested_package.join("package.json"),
+            r#"{
+                "name":"vuec-self-blocked",
+                "exports":{
+                    ".":{"types":"./index.d.ts"},
+                    "./private":null
+                }
+            }"#,
+        )
+        .expect("write nested self manifest");
+        let importer = nested_package.join("index.d.ts");
+        std::fs::write(&importer, "export {};").expect("write nested importer");
+        let outside_resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_type_import(
+                &dir.path().join("outside.ts").to_string_lossy(),
+                "vuec-self-blocked/private",
+                &outside_resolver,
+            ),
+            Some(outer_package.join("private.d.ts"))
+        );
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert!(resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "vuec-self-blocked/private",
+            &resolver,
+        )
+        .is_none());
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.metadata_files_read, 1);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_dependency_self_name_without_exports_uses_legacy_package_lookup() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("vuec-self-legacy");
+        std::fs::create_dir_all(&package).expect("create legacy self package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"vuec-self-legacy","exports":null}"#,
+        )
+        .expect("write legacy self manifest");
+        let importer = package.join("index.d.ts");
+        let leaf = package.join("leaf.d.ts");
+        std::fs::write(&importer, "export {};").expect("write legacy self importer");
+        std::fs::write(&leaf, "export interface LegacyProps { value: string }")
+            .expect("write legacy self leaf");
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import(
+                &importer.to_string_lossy(),
+                "vuec-self-legacy/leaf",
+                &resolver,
+            ),
+            Some(leaf)
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
     fn vue3_package_exports_selects_the_most_specific_pattern() {
         let resolver = Vue3TypeResolverContext::default();
         let exports = serde_json::json!({

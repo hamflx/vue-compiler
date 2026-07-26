@@ -1618,3 +1618,78 @@ fn vue3_metadata_fanout_semantic_miss_does_not_block() {
     );
     assert!(!resolver.external_type_session.metadata_is_blocked());
 }
+
+#[test]
+fn vue3_package_self_references_honor_metadata_and_source_budgets() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package = dir.path().join("node_modules").join("vuec-budget-self");
+    std::fs::create_dir_all(&package).expect("create budget self package");
+    std::fs::write(
+        package.join("package.json"),
+        r#"{
+            "name":"vuec-budget-self",
+            "exports":{"./leaf":{"types":"./leaf.d.mts"}}
+        }"#,
+    )
+    .expect("write budget self manifest");
+    let bridge = package.join("bridge.d.mts");
+    let leaf = package.join("leaf.d.mts");
+    std::fs::write(
+        &bridge,
+        "export { Leaf } from 'vuec-budget-self/leaf'",
+    )
+    .expect("write budget self bridge");
+    std::fs::write(&leaf, "export interface Leaf { value: string }")
+        .expect("write budget self leaf");
+
+    let load = |resolver: &Vue3TypeResolverContext| {
+        vue3_external_type_context_from_path(&bridge, &mut BTreeSet::new(), resolver)
+            .expect("load bounded self-reference bridge")
+    };
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_import_files: 2,
+        max_metadata_fanout_entries: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let context = load(&accepted);
+    assert!(context.declared_types.contains_key("Leaf"));
+    let stats = accepted.external_type_session.stats();
+    assert_eq!(stats.import_files_read, 2);
+    assert_eq!(stats.metadata_files_read, 1);
+    assert_eq!(stats.metadata_fanout_entries, 1);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let no_metadata = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_import_files: 2,
+        max_metadata_files: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let context = load(&no_metadata);
+    assert!(!context.declared_types.contains_key("Leaf"));
+    assert_eq!(no_metadata.external_type_session.stats().import_files_read, 1);
+    assert!(no_metadata.external_type_session.metadata_is_blocked());
+
+    let no_fanout = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_import_files: 2,
+        max_metadata_fanout_entries: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let context = load(&no_fanout);
+    assert!(!context.declared_types.contains_key("Leaf"));
+    let stats = no_fanout.external_type_session.stats();
+    assert_eq!(stats.import_files_read, 1);
+    assert_eq!(stats.metadata_fanout_entries, 0);
+    assert!(no_fanout.external_type_session.metadata_is_blocked());
+
+    let source_limited = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_import_files: 1,
+        max_metadata_fanout_entries: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let context = load(&source_limited);
+    assert!(!context.declared_types.contains_key("Leaf"));
+    let stats = source_limited.external_type_session.stats();
+    assert_eq!(stats.import_files_read, 1);
+    assert_eq!(stats.metadata_fanout_entries, 1);
+    assert!(!source_limited.external_type_session.metadata_is_blocked());
+}

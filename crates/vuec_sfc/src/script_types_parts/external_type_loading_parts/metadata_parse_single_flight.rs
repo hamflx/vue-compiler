@@ -748,4 +748,26 @@ mod metadata_parse_single_flight_tests {
             );
         }
     }
+
+    #[test]
+    fn package_name_values_are_strict_and_non_fatal() {
+        for (value, expected) in [
+            (r#""vuec-package""#, Some("vuec-package")),
+            (r#""@vuec/package""#, Some("@vuec/package")),
+            ("true", None),
+            ("null", None),
+            (r#"["vuec-package"]"#, None),
+            (r#"{"nested":"vuec-package"}"#, None),
+        ] {
+            let source = format!(r#"{{"name":{value},"types":"index.d.ts"}}"#);
+            let manifest = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source)
+                .expect("parse package manifest");
+            assert_eq!(manifest.name.as_deref(), expected, "{value}");
+            assert_eq!(
+                manifest.types.as_ref().and_then(serde_json::Value::as_str),
+                Some("index.d.ts"),
+                "{value}"
+            );
+        }
+    }
 }

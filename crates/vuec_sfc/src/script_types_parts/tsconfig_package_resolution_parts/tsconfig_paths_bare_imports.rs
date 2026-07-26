@@ -340,20 +340,55 @@ impl Iterator for Vue3AncestorSearchPaths<'_> {
     }
 }
 
-fn vue3_package_module_type_for_path(
+enum Vue3PackageScopeResolution {
+    Found {
+        package_dir: PathBuf,
+        manifest: std::sync::Arc<Vue3PackageJsonTypeManifest>,
+    },
+    Missing,
+    MetadataBlocked,
+}
+
+fn vue3_package_scope_for_path(
     path: &Path,
     session: &Vue3ExternalTypeLoadSession,
-) -> Option<Vue3PackageModuleType> {
+) -> Vue3PackageScopeResolution {
     for package_json in
         Vue3AncestorSearchPaths::new(path.parent(), "package.json", session).package_scope()
     {
         match session.package_json_from_path(&package_json) {
-            Some(package) => return Some(package.module_type),
-            None if session.metadata_is_blocked() => return None,
+            Some(manifest) => {
+                let package_dir = package_json
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf();
+                return Vue3PackageScopeResolution::Found {
+                    package_dir,
+                    manifest,
+                };
+            }
+            None if session.metadata_is_blocked() => {
+                return Vue3PackageScopeResolution::MetadataBlocked;
+            }
             None => {}
         }
     }
-    (!session.metadata_is_blocked()).then_some(Vue3PackageModuleType::CommonJs)
+    if session.metadata_is_blocked() {
+        Vue3PackageScopeResolution::MetadataBlocked
+    } else {
+        Vue3PackageScopeResolution::Missing
+    }
+}
+
+fn vue3_package_module_type_for_path(
+    path: &Path,
+    session: &Vue3ExternalTypeLoadSession,
+) -> Option<Vue3PackageModuleType> {
+    match vue3_package_scope_for_path(path, session) {
+        Vue3PackageScopeResolution::Found { manifest, .. } => Some(manifest.module_type),
+        Vue3PackageScopeResolution::Missing => Some(Vue3PackageModuleType::CommonJs),
+        Vue3PackageScopeResolution::MetadataBlocked => None,
+    }
 }
 
 pub(crate) fn vue3_node_modules_search_paths<'a>(
