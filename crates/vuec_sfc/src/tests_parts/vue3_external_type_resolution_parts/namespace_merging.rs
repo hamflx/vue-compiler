@@ -3197,6 +3197,100 @@ declare global { interface ImportedComputed { [Symbols.key]: number } }
             assert!(!vue3_type_context_has_name(&context, name));
         }
     }
+
+    let distinct_local_keys = dir.path().join("distinct-local-keys.ts");
+    let distinct_local_consumer = dir.path().join("distinct-local-consumer.d.ts");
+    std::fs::write(
+        &distinct_local_keys,
+        r#"
+export {}
+declare const firstKey: unique symbol
+declare const secondKey: unique symbol
+declare namespace First { const key: unique symbol }
+declare namespace Second { const key: unique symbol }
+declare global {
+  interface DistinctLocalKeys {
+    [firstKey]: string
+    [secondKey]: number
+    [First.key]: boolean
+    [Second.key]: Date
+  }
+}
+"#,
+    )
+    .expect("write distinct module-local computed keys");
+    std::fs::write(
+        &distinct_local_consumer,
+        "type DistinctLocalKeysConsumer = DistinctLocalKeys",
+    )
+    .expect("write distinct module-local computed consumer");
+    for files in [
+        vec![distinct_local_keys.clone(), distinct_local_consumer.clone()],
+        vec![distinct_local_consumer.clone(), distinct_local_keys.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["DistinctLocalKeys", "DistinctLocalKeysConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let exported_key = dir.path().join("exported-computed-key.ts");
+    let imported_key = dir.path().join("imported-exported-computed-key.ts");
+    let exported_consumer = dir.path().join("exported-computed-consumer.d.ts");
+    std::fs::write(
+        &exported_key,
+        r#"
+export declare const exportedKey: unique symbol
+declare global { interface ExportedComputedKey { [exportedKey]: string } }
+"#,
+    )
+    .expect("write directly exported computed key");
+    std::fs::write(
+        &imported_key,
+        r#"
+import { exportedKey } from './exported-computed-key'
+declare global { interface ExportedComputedKey { [exportedKey]: number } }
+"#,
+    )
+    .expect("write imported directly exported computed key");
+    std::fs::write(
+        &exported_consumer,
+        "type ExportedComputedKeyConsumer = ExportedComputedKey",
+    )
+    .expect("write exported computed key consumer");
+    for files in [
+        vec![
+            exported_key.clone(),
+            imported_key.clone(),
+            exported_consumer.clone(),
+        ],
+        vec![
+            exported_consumer.clone(),
+            imported_key.clone(),
+            exported_key.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["ExportedComputedKey", "ExportedComputedKeyConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
 }
 
 #[test]
