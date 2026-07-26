@@ -329,6 +329,127 @@ fn vue3_tsconfig_filesystem_paths_normalize_separators_and_bound_joined_paths() 
 }
 
 #[test]
+fn vue3_typescript_path_kinds_are_classified_independently_of_the_host() {
+    assert_eq!(
+        vue3_typescript_path_kind("types/index.d.ts"),
+        Vue3TypeScriptPathKind::Relative
+    );
+    assert_eq!(
+        vue3_typescript_path_kind("/types/index.d.ts"),
+        Vue3TypeScriptPathKind::Rooted
+    );
+    for target in ["C:/types/index.d.ts", "z:/types/index.d.ts"] {
+        assert_eq!(
+            vue3_typescript_path_kind(target),
+            Vue3TypeScriptPathKind::WindowsDriveAbsolute
+        );
+    }
+    assert_eq!(
+        vue3_typescript_path_kind("//server/share/types/index.d.ts"),
+        Vue3TypeScriptPathKind::WindowsUncAbsolute
+    );
+    for target in [
+        "C:types/index.d.ts",
+        "1:/types/index.d.ts",
+        "//server",
+        "///share/types",
+        "//?/C:/types/index.d.ts",
+        "//./C:/types/index.d.ts",
+        "//server/*/types/index.d.ts",
+        "//server/sh:are/types/index.d.ts",
+    ] {
+        assert_eq!(
+            vue3_typescript_path_kind(target),
+            Vue3TypeScriptPathKind::Unsupported,
+            "{target}"
+        );
+    }
+
+    assert_eq!(
+        vue3_materialize_normalized_typescript_path(
+            Path::new("project/config"),
+            "../types/index.d.ts",
+        ),
+        Some(PathBuf::from("project/types/index.d.ts"))
+    );
+    assert!(vue3_materialize_normalized_typescript_path(
+        Path::new("project/config"),
+        "C:types/index.d.ts",
+    )
+    .is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn vue3_typescript_rooted_paths_materialize_with_windows_volume_semantics() {
+    assert_eq!(
+        normalize_path_string(
+            &vue3_materialize_normalized_typescript_path(
+                Path::new("C:/project/config"),
+                "/types/index.d.ts",
+            )
+            .expect("materialize current-volume rooted path"),
+        ),
+        "C:/types/index.d.ts"
+    );
+    assert_eq!(
+        normalize_path_string(
+            &vue3_materialize_normalized_typescript_path(
+                Path::new("D:/project/config"),
+                "C:/types/index.d.ts",
+            )
+            .expect("materialize drive-absolute path"),
+        ),
+        "C:/types/index.d.ts"
+    );
+    assert_eq!(
+        normalize_path_string(
+            &vue3_materialize_normalized_typescript_path(
+                Path::new("C:/project/config"),
+                "//server/share/types/index.d.ts",
+            )
+            .expect("materialize UNC path"),
+        ),
+        "//server/share/types/index.d.ts"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn vue3_foreign_windows_paths_do_not_fall_back_to_relative_paths() {
+    let base = Path::new("project/config");
+    assert!(vue3_materialize_normalized_typescript_path(base, "C:/types/index.d.ts").is_none());
+    assert!(vue3_materialize_normalized_typescript_path(
+        base,
+        "//server/share/types/index.d.ts",
+    )
+    .is_none());
+
+    let resolver = Vue3TypeResolverContext::default();
+    assert!(vue3_tsconfig_target_path(
+        base,
+        base,
+        "C:/types/index.d.ts",
+        &resolver,
+    )
+    .is_none());
+    assert!(vue3_resolve_tsconfig_extends_path(
+        base,
+        "C:/configs/base.json",
+        &resolver,
+    )
+    .is_none());
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        0
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_tsconfig_plain_paths_preserve_stars_and_mappings_replace_only_the_first() {
     let resolver = Vue3TypeResolverContext::default();
     assert_eq!(

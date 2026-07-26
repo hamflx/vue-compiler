@@ -194,7 +194,9 @@ pub(crate) fn vue3_resolve_tsconfig_extends_path(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
-    if vue3_tsconfig_path_is_relative(&target) || Path::new(&target).is_absolute() {
+    if vue3_tsconfig_path_is_relative(&target)
+        || vue3_typescript_path_kind(&target) != Vue3TypeScriptPathKind::Relative
+    {
         return vue3_resolve_normalized_tsconfig_path(config_dir, &target, type_resolver);
     }
     resolve_vue3_package_tsconfig_extends(config_dir, &target, type_resolver)
@@ -214,11 +216,7 @@ fn vue3_resolve_normalized_tsconfig_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let candidate = if Path::new(target).is_absolute() {
-        normalize_path_components(PathBuf::from(target))
-    } else {
-        normalize_path_components(config_dir.join(target))
-    };
+    let candidate = vue3_materialize_normalized_typescript_path(config_dir, target)?;
     resolve_vue3_tsconfig_candidate_path(&candidate, false, type_resolver)
 }
 
@@ -236,6 +234,80 @@ pub(crate) fn vue3_normalize_typescript_path_separators(
     type_resolver
         .external_type_session
         .replace_metadata_path_pattern(target, "\\", "/")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Vue3TypeScriptPathKind {
+    Relative,
+    Rooted,
+    WindowsDriveAbsolute,
+    WindowsUncAbsolute,
+    Unsupported,
+}
+
+pub(crate) fn vue3_typescript_path_kind(target: &str) -> Vue3TypeScriptPathKind {
+    if let Some(unc) = target.strip_prefix("//") {
+        let mut parts = unc.split('/');
+        let server = parts.next().unwrap_or_default();
+        let share = parts.next().unwrap_or_default();
+        let valid_root_part = |part: &str| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.contains(':')
+                && !part.contains('*')
+                && !part.contains('?')
+        };
+        return if valid_root_part(server) && valid_root_part(share) {
+            Vue3TypeScriptPathKind::WindowsUncAbsolute
+        } else {
+            Vue3TypeScriptPathKind::Unsupported
+        };
+    }
+    if target.starts_with('/') {
+        return Vue3TypeScriptPathKind::Rooted;
+    }
+    let bytes = target.as_bytes();
+    if bytes.get(1) == Some(&b':') {
+        return if bytes[0].is_ascii_alphabetic() && bytes.get(2) == Some(&b'/') {
+            Vue3TypeScriptPathKind::WindowsDriveAbsolute
+        } else {
+            Vue3TypeScriptPathKind::Unsupported
+        };
+    }
+    Vue3TypeScriptPathKind::Relative
+}
+
+pub(crate) fn vue3_materialize_normalized_typescript_path(
+    base_dir: &Path,
+    target: &str,
+) -> Option<PathBuf> {
+    let path = match vue3_typescript_path_kind(target) {
+        Vue3TypeScriptPathKind::Relative => base_dir.join(target),
+        Vue3TypeScriptPathKind::Rooted => {
+            #[cfg(windows)]
+            {
+                base_dir.join(target)
+            }
+            #[cfg(not(windows))]
+            {
+                PathBuf::from(target)
+            }
+        }
+        Vue3TypeScriptPathKind::WindowsDriveAbsolute
+        | Vue3TypeScriptPathKind::WindowsUncAbsolute => {
+            #[cfg(windows)]
+            {
+                PathBuf::from(target)
+            }
+            #[cfg(not(windows))]
+            {
+                return None;
+            }
+        }
+        Vue3TypeScriptPathKind::Unsupported => return None,
+    };
+    Some(normalize_path_components(path))
 }
 
 pub(crate) fn resolve_vue3_tsconfig_candidate_path(

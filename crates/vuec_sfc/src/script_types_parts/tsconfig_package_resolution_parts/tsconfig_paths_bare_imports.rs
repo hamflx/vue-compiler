@@ -272,12 +272,7 @@ fn vue3_tsconfig_path_from_expanded_target(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
-    let path = Path::new(&target);
-    let path = if path.is_absolute() {
-        normalize_path_components(PathBuf::from(target))
-    } else {
-        normalize_path_components(target_base_dir.join(target))
-    };
+    let path = vue3_materialize_normalized_typescript_path(target_base_dir, &target)?;
     type_resolver
         .external_type_session
         .metadata_path_is_within_limit(&normalize_path_string(&path))
