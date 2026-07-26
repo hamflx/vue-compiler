@@ -272,9 +272,30 @@ pub(crate) struct Vue27TypeContext {
     pub(crate) silent_unresolved_type_names: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Vue3TypeModuleResolutionKind {
+    Classic,
+    #[default]
+    Node10,
+    Node16,
+    NodeNext,
+    Bundler,
+}
+
+impl Vue3TypeModuleResolutionKind {
+    pub(crate) fn uses_node_esm_specifier_rules(
+        self,
+        resolution_mode: Vue3TypeResolutionMode,
+    ) -> bool {
+        matches!(self, Self::Node16 | Self::NodeNext)
+            && resolution_mode == Vue3TypeResolutionMode::Import
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Vue3TypeResolverContext {
     pub(crate) typescript_version: nodejs_semver::Version,
+    pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
     pub(crate) external_type_session: Vue3ExternalTypeLoadSession,
 }
@@ -282,6 +303,7 @@ pub(crate) struct Vue3TypeResolverContext {
 impl PartialEq for Vue3TypeResolverContext {
     fn eq(&self, other: &Self) -> bool {
         self.typescript_version == other.typescript_version
+            && self.module_resolution == other.module_resolution
             && self.module_suffixes == other.module_suffixes
             && self.external_type_session.limits() == other.external_type_session.limits()
     }
@@ -297,6 +319,7 @@ impl Default for Vue3TypeResolverContext {
     fn default() -> Self {
         Self {
             typescript_version: vue3_package_typescript_baseline_version(),
+            module_resolution: Vue3TypeModuleResolutionKind::default(),
             module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::default(),
         }

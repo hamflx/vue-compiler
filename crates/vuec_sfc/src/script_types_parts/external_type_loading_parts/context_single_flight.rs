@@ -342,6 +342,7 @@ mod context_single_flight_tests {
             path: PathBuf::from(value),
             resolver: Vue3TypeResolverCacheIdentity {
                 typescript_version: "5.0.0".into(),
+                module_resolution: Vue3TypeModuleResolutionKind::Node10,
                 module_suffixes: vue3_default_module_suffixes(),
             },
         }

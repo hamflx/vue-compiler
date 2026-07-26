@@ -46,6 +46,91 @@ impl Vue3TsconfigModuleResolutionSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3TsconfigModuleKind {
+    Classic,
+    CommonJs,
+    EcmaScript,
+    Node16,
+    NodeNext,
+    Preserve,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3TsconfigTargetKind {
+    Default,
+    Legacy,
+    Modern,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Vue3TsconfigInheritedResolverOptions {
+    module: Option<Vue3TsconfigModuleKind>,
+    module_resolution: Option<Vue3TypeModuleResolutionKind>,
+    module_suffixes: Option<std::sync::Arc<[String]>>,
+    target: Option<Vue3TsconfigTargetKind>,
+}
+
+impl Vue3TsconfigInheritedResolverOptions {
+    fn inherit(&mut self, inherited: Self) {
+        if inherited.module.is_some() {
+            self.module = inherited.module;
+        }
+        if inherited.module_resolution.is_some() {
+            self.module_resolution = inherited.module_resolution;
+        }
+        if inherited.module_suffixes.is_some() {
+            self.module_suffixes = inherited.module_suffixes;
+        }
+        if inherited.target.is_some() {
+            self.target = inherited.target;
+        }
+    }
+
+    fn effective_module_resolution(
+        &self,
+        typescript_version: &nodejs_semver::Version,
+    ) -> Vue3TypeModuleResolutionKind {
+        if let Some(module_resolution) = self.module_resolution {
+            return module_resolution;
+        }
+        let module = self.module.unwrap_or_else(|| {
+            if typescript_version >= &(6, 0, 0).into()
+                || self.target == Some(Vue3TsconfigTargetKind::Modern)
+            {
+                Vue3TsconfigModuleKind::EcmaScript
+            } else {
+                Vue3TsconfigModuleKind::CommonJs
+            }
+        });
+        match module {
+            Vue3TsconfigModuleKind::Classic => Vue3TypeModuleResolutionKind::Classic,
+            Vue3TsconfigModuleKind::Node16 => Vue3TypeModuleResolutionKind::Node16,
+            Vue3TsconfigModuleKind::NodeNext => Vue3TypeModuleResolutionKind::NodeNext,
+            Vue3TsconfigModuleKind::Preserve => Vue3TypeModuleResolutionKind::Bundler,
+            Vue3TsconfigModuleKind::CommonJs
+                if typescript_version < &(6, 0, 0).into() =>
+            {
+                Vue3TypeModuleResolutionKind::Node10
+            }
+            Vue3TsconfigModuleKind::EcmaScript
+                if typescript_version < &(6, 0, 0).into() =>
+            {
+                Vue3TypeModuleResolutionKind::Classic
+            }
+            Vue3TsconfigModuleKind::CommonJs | Vue3TsconfigModuleKind::EcmaScript => {
+                Vue3TypeModuleResolutionKind::Bundler
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Vue3TsconfigTypeResolverOptions {
+    pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
+    pub(crate) module_suffixes: std::sync::Arc<[String]>,
+}
+
 type Vue3TsconfigGraphStateKey = (PathBuf, PathBuf, PathBuf);
 type Vue3TsconfigTypeRootsOverride = Option<std::sync::Arc<[PathBuf]>>;
 
@@ -280,6 +365,8 @@ struct Vue3TsconfigGraphTraversal {
     active_identities: BTreeSet<PathBuf>,
     global_specs: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigGlobalSpecs>,
     materialized_global_configs: BTreeSet<Vue3TsconfigGraphStateKey>,
+    resolver_options:
+        BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigInheritedResolverOptions>,
 }
 
 fn vue3_tsconfig_graph_state_key(
@@ -884,45 +971,65 @@ fn vue3_tsconfig_module_resolution_from_config(
     settings
 }
 
-pub(crate) fn vue3_tsconfig_module_suffixes(
+pub(crate) fn vue3_tsconfig_type_resolver_options(
     filename: &str,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<std::sync::Arc<[String]>> {
-    if type_resolver.typescript_version < (4, 7, 0).into() {
-        return Some(vue3_default_module_suffixes());
-    }
+) -> Option<Vue3TsconfigTypeResolverOptions> {
     let config_path = vue3_tsconfig_search_paths(filename, type_resolver).next();
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let Some(config_path) = config_path else {
-        return Some(vue3_default_module_suffixes());
+    let configured = if let Some(config_path) = config_path {
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        let mut traversal = Vue3TsconfigGraphTraversal::default();
+        vue3_tsconfig_type_resolver_options_from_config(
+            &config_path,
+            config_dir,
+            &mut traversal,
+            0,
+            type_resolver,
+        )?
+    } else {
+        Vue3TsconfigInheritedResolverOptions::default()
     };
-    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-    let mut traversal = Vue3TsconfigGraphTraversal::default();
-    let configured = vue3_tsconfig_module_suffixes_from_config(
-        &config_path,
-        config_dir,
-        &mut traversal,
-        0,
-        type_resolver,
-    )?;
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    Some(match configured {
+    let module_resolution =
+        configured.effective_module_resolution(&type_resolver.typescript_version);
+    let module_suffixes = match configured.module_suffixes {
         Some(suffixes) if !suffixes.is_empty() => suffixes,
         Some(_) | None => vue3_default_module_suffixes(),
+    };
+    Some(Vue3TsconfigTypeResolverOptions {
+        module_resolution,
+        module_suffixes,
     })
 }
 
-fn vue3_tsconfig_module_suffixes_from_config(
+#[cfg(test)]
+pub(crate) fn vue3_tsconfig_module_suffixes(
+    filename: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<[String]>> {
+    vue3_tsconfig_type_resolver_options(filename, type_resolver)
+        .map(|options| options.module_suffixes)
+}
+
+fn vue3_tsconfig_type_resolver_options_from_config(
     config_path: &Path,
     template_config_dir: &Path,
     traversal: &mut Vue3TsconfigGraphTraversal,
     depth: usize,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<Option<std::sync::Arc<[String]>>> {
+) -> Option<Vue3TsconfigInheritedResolverOptions> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    let state_key = vue3_tsconfig_graph_state_key(config_path, template_config_dir);
+    if let Some(options) = traversal.resolver_options.get(&state_key) {
+        return Some(options.clone());
+    }
     let Some(identity) = vue3_tsconfig_graph_enter(
         config_path,
         template_config_dir,
@@ -930,38 +1037,65 @@ fn vue3_tsconfig_module_suffixes_from_config(
         traversal,
         type_resolver,
     ) else {
-        return (!type_resolver.external_type_session.metadata_is_blocked()).then_some(None);
+        return (!type_resolver.external_type_session.metadata_is_blocked())
+            .then(Vue3TsconfigInheritedResolverOptions::default);
     };
     let configured = (|| {
         let Some(value) = type_resolver
             .external_type_session
             .tsconfig_from_path(config_path)
         else {
-            return (!type_resolver.external_type_session.metadata_is_blocked()).then_some(None);
+            return (!type_resolver.external_type_session.metadata_is_blocked())
+                .then(Vue3TsconfigInheritedResolverOptions::default);
         };
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-        let mut configured = None;
+        let mut configured = Vue3TsconfigInheritedResolverOptions::default();
         for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
-            let inherited = vue3_tsconfig_module_suffixes_from_config(
+            let inherited = vue3_tsconfig_type_resolver_options_from_config(
                 &extended,
                 template_config_dir,
                 traversal,
                 depth + 1,
                 type_resolver,
             )?;
-            if inherited.is_some() {
-                configured = inherited;
-            }
+            configured.inherit(inherited);
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }
-        if vue3_tsconfig_declares_compiler_option(&value, "moduleSuffixes") {
-            configured = Some(vue3_tsconfig_direct_module_suffixes(
-                &value,
+        let compiler_options = value
+            .get("compilerOptions")
+            .and_then(serde_json::Value::as_object);
+        if let Some(module) = compiler_options.and_then(|options| options.get("module")) {
+            configured.module = Some(vue3_tsconfig_direct_module_kind(
+                module,
                 type_resolver,
             )?);
         }
+        if let Some(module_resolution) =
+            compiler_options.and_then(|options| options.get("moduleResolution"))
+        {
+            configured.module_resolution = Some(vue3_tsconfig_direct_module_resolution_kind(
+                module_resolution,
+                type_resolver,
+            )?);
+        }
+        if type_resolver.typescript_version >= (4, 7, 0).into() {
+            if let Some(module_suffixes) =
+                compiler_options.and_then(|options| options.get("moduleSuffixes"))
+            {
+                configured.module_suffixes = Some(vue3_tsconfig_direct_module_suffixes(
+                    module_suffixes,
+                    type_resolver,
+                )?);
+            }
+        }
+        if let Some(target) = compiler_options.and_then(|options| options.get("target")) {
+            configured.target = Some(vue3_tsconfig_direct_target_kind(target, type_resolver)?);
+        }
+        traversal
+            .resolver_options
+            .insert(state_key, configured.clone());
         Some(configured)
     })();
     traversal.active_identities.remove(&identity);
@@ -972,11 +1106,7 @@ fn vue3_tsconfig_direct_module_suffixes(
     value: &serde_json::Value,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<std::sync::Arc<[String]>> {
-    let values = value
-        .get("compilerOptions")
-        .and_then(|options| options.get("moduleSuffixes"))
-        .and_then(serde_json::Value::as_array);
-    let Some(values) = values else {
+    let Some(values) = value.as_array() else {
         type_resolver.external_type_session.block_metadata();
         return None;
     };
@@ -1001,6 +1131,115 @@ fn vue3_tsconfig_direct_module_suffixes(
         suffixes.push(suffix.to_string());
     }
     Some(std::sync::Arc::from(suffixes))
+}
+
+fn vue3_tsconfig_direct_module_kind(
+    value: &serde_json::Value,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3TsconfigModuleKind> {
+    let Some(value) = value.as_str() else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let version = &type_resolver.typescript_version;
+    let parsed = if ["none", "amd", "system", "umd"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(Vue3TsconfigModuleKind::Classic)
+    } else if value.eq_ignore_ascii_case("commonjs") {
+        Some(Vue3TsconfigModuleKind::CommonJs)
+    } else if ["es6", "es2015", "esnext"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+        || value.eq_ignore_ascii_case("es2020") && version >= &(3, 8, 0).into()
+        || value.eq_ignore_ascii_case("es2022") && version >= &(4, 5, 0).into()
+    {
+        Some(Vue3TsconfigModuleKind::EcmaScript)
+    } else if value.eq_ignore_ascii_case("node16") && version >= &(4, 7, 0).into()
+        || value.eq_ignore_ascii_case("node18") && version >= &(5, 8, 0).into()
+        || value.eq_ignore_ascii_case("node20") && version >= &(5, 9, 0).into()
+    {
+        Some(Vue3TsconfigModuleKind::Node16)
+    } else if value.eq_ignore_ascii_case("nodenext") && version >= &(4, 7, 0).into() {
+        Some(Vue3TsconfigModuleKind::NodeNext)
+    } else if value.eq_ignore_ascii_case("preserve") && version >= &(5, 4, 0).into() {
+        Some(Vue3TsconfigModuleKind::Preserve)
+    } else {
+        None
+    };
+    parsed.or_else(|| {
+        type_resolver.external_type_session.block_metadata();
+        None
+    })
+}
+
+fn vue3_tsconfig_direct_module_resolution_kind(
+    value: &serde_json::Value,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3TypeModuleResolutionKind> {
+    let Some(value) = value.as_str() else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let version = &type_resolver.typescript_version;
+    let parsed = if value.eq_ignore_ascii_case("classic") {
+        Some(Vue3TypeModuleResolutionKind::Classic)
+    } else if ["node", "node10"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(Vue3TypeModuleResolutionKind::Node10)
+    } else if value.eq_ignore_ascii_case("node16") && version >= &(4, 7, 0).into() {
+        Some(Vue3TypeModuleResolutionKind::Node16)
+    } else if value.eq_ignore_ascii_case("nodenext") && version >= &(4, 7, 0).into() {
+        Some(Vue3TypeModuleResolutionKind::NodeNext)
+    } else if value.eq_ignore_ascii_case("bundler") && version >= &(5, 0, 0).into() {
+        Some(Vue3TypeModuleResolutionKind::Bundler)
+    } else {
+        None
+    };
+    parsed.or_else(|| {
+        type_resolver.external_type_session.block_metadata();
+        None
+    })
+}
+
+fn vue3_tsconfig_direct_target_kind(
+    value: &serde_json::Value,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3TsconfigTargetKind> {
+    let Some(value) = value.as_str() else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let version = &type_resolver.typescript_version;
+    let parsed = if value.eq_ignore_ascii_case("es3") {
+        Some(Vue3TsconfigTargetKind::Default)
+    } else if value.eq_ignore_ascii_case("es5") {
+        Some(Vue3TsconfigTargetKind::Legacy)
+    } else if ["es6", "es2015", "esnext"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+        || value.eq_ignore_ascii_case("es2016") && version >= &(2, 1, 0).into()
+        || value.eq_ignore_ascii_case("es2017") && version >= &(2, 3, 0).into()
+        || value.eq_ignore_ascii_case("es2018") && version >= &(2, 7, 0).into()
+        || value.eq_ignore_ascii_case("es2019") && version >= &(3, 2, 0).into()
+        || value.eq_ignore_ascii_case("es2020") && version >= &(3, 8, 0).into()
+        || value.eq_ignore_ascii_case("es2021") && version >= &(4, 3, 0).into()
+        || value.eq_ignore_ascii_case("es2022") && version >= &(4, 5, 0).into()
+        || value.eq_ignore_ascii_case("es2023") && version >= &(5, 2, 0).into()
+        || value.eq_ignore_ascii_case("es2024") && version >= &(5, 7, 0).into()
+        || value.eq_ignore_ascii_case("es2025") && version >= &(5, 9, 0).into()
+    {
+        Some(Vue3TsconfigTargetKind::Modern)
+    } else {
+        None
+    };
+    parsed.or_else(|| {
+        type_resolver.external_type_session.block_metadata();
+        None
+    })
 }
 
 pub(crate) fn vue3_tsconfig_global_type_files(
@@ -3394,12 +3633,14 @@ mod vue3_module_suffix_config_tests {
     #[test]
     fn module_suffix_config_fanout_is_exact_and_fail_closed() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let filename = write_config(
-            dir.path(),
+        std::fs::write(
+            dir.path().join("base.json"),
             r#"{"compilerOptions":{"moduleSuffixes":[".native",""]}}"#,
-        );
+        )
+        .expect("write inherited suffix config");
+        let filename = write_config(dir.path(), r#"{"extends":"./base.json"}"#);
         let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_metadata_fanout_entries: 2,
+            max_metadata_fanout_entries: 3,
             ..Vue3ExternalTypeLoadLimits::default()
         });
         assert_eq!(
@@ -3411,12 +3652,12 @@ mod vue3_module_suffix_config_tests {
                 .external_type_session
                 .stats()
                 .metadata_fanout_entries,
-            2
+            3
         );
         assert!(!exact.external_type_session.metadata_is_blocked());
 
         let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_metadata_fanout_entries: 1,
+            max_metadata_fanout_entries: 2,
             ..Vue3ExternalTypeLoadLimits::default()
         });
         assert!(vue3_tsconfig_module_suffixes(&filename, &short).is_none());
@@ -3425,7 +3666,7 @@ mod vue3_module_suffix_config_tests {
                 .external_type_session
                 .stats()
                 .metadata_fanout_entries,
-            1
+            2
         );
         assert!(short.external_type_session.metadata_is_blocked());
     }
@@ -3483,6 +3724,229 @@ mod vue3_module_suffix_config_tests {
 
         assert!(vue3_tsconfig_module_suffixes(&filename, &resolver).is_none());
         assert!(resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn module_resolution_defaults_follow_typescript_version_and_target() {
+        for (version, source, expected) in [
+            (
+                (5, 9, 0),
+                r#"{}"#,
+                Vue3TypeModuleResolutionKind::Node10,
+            ),
+            (
+                (5, 9, 0),
+                r#"{"compilerOptions":{"target":"ESNext"}}"#,
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (6, 0, 0),
+                r#"{}"#,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+            (
+                (6, 0, 0),
+                r#"{"compilerOptions":{"module":"CommonJS"}}"#,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert_eq!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver)
+                    .expect("resolve compiler options")
+                    .module_resolution,
+                expected,
+                "TypeScript {version:?}: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_resolution_options_inherit_independently_and_cache_diamonds() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "module": "Node16",
+                    "moduleResolution": "Node16"
+                }
+            }"#,
+        )
+        .expect("write base resolver config");
+        let inherited = dir.path().join("inherited");
+        let module_override = dir.path().join("module-override");
+        let resolution_override = dir.path().join("resolution-override");
+        for project in [&inherited, &module_override, &resolution_override] {
+            std::fs::create_dir_all(project).expect("create inherited project");
+        }
+        std::fs::write(
+            inherited.join("tsconfig.json"),
+            r#"{"extends":"../base.json"}"#,
+        )
+        .expect("write inherited project config");
+        std::fs::write(
+            module_override.join("tsconfig.json"),
+            r#"{
+                "extends":"../base.json",
+                "compilerOptions":{"module":"NodeNext"}
+            }"#,
+        )
+        .expect("write module override config");
+        std::fs::write(
+            resolution_override.join("tsconfig.json"),
+            r#"{
+                "extends":"../base.json",
+                "compilerOptions": {
+                    "module":"NodeNext",
+                    "moduleResolution":"Bundler"
+                }
+            }"#,
+        )
+        .expect("write resolution override config");
+
+        for (project, expected) in [
+            (&inherited, Vue3TypeModuleResolutionKind::Node16),
+            (&module_override, Vue3TypeModuleResolutionKind::Node16),
+            (
+                &resolution_override,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+        ] {
+            let resolver = vue3_type_resolver_context_for_filename(
+                &project.join("Comp.vue").to_string_lossy(),
+            );
+            assert_eq!(resolver.module_resolution, expected);
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let diamond = dir.path().join("diamond");
+        std::fs::create_dir_all(&diamond).expect("create diamond project");
+        std::fs::write(
+            diamond.join("shared.json"),
+            r#"{"compilerOptions":{"module":"CommonJS"}}"#,
+        )
+        .expect("write shared config");
+        std::fs::write(
+            diamond.join("left.json"),
+            r#"{
+                "extends":"./shared.json",
+                "compilerOptions":{"module":"NodeNext"}
+            }"#,
+        )
+        .expect("write left config");
+        std::fs::write(
+            diamond.join("right.json"),
+            r#"{"extends":"./shared.json"}"#,
+        )
+        .expect("write right config");
+        std::fs::write(
+            diamond.join("tsconfig.json"),
+            r#"{"extends":["./left.json","./right.json"]}"#,
+        )
+        .expect("write diamond root config");
+        let resolver = vue3_type_resolver_context_for_filename(
+            &diamond.join("Comp.vue").to_string_lossy(),
+        );
+
+        assert_eq!(
+            resolver.module_resolution,
+            Vue3TypeModuleResolutionKind::Node10
+        );
+        assert_eq!(resolver.external_type_session.stats().tsconfig_nodes, 4);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn invalid_and_version_unsupported_module_options_block_metadata() {
+        for (version, source) in [
+            ((5, 9, 0), r#"{"compilerOptions":{"module":1}}"#),
+            (
+                (5, 9, 0),
+                r#"{"compilerOptions":{"moduleResolution":"unknown"}}"#,
+            ),
+            (
+                (5, 9, 0),
+                r#"{"compilerOptions":{"target":"future"}}"#,
+            ),
+            (
+                (4, 6, 0),
+                r#"{"compilerOptions":{"moduleResolution":"NodeNext"}}"#,
+            ),
+            (
+                (4, 9, 0),
+                r#"{"compilerOptions":{"moduleResolution":"Bundler"}}"#,
+            ),
+            (
+                (5, 3, 0),
+                r#"{"compilerOptions":{"module":"Preserve"}}"#,
+            ),
+            ((5, 7, 0), r#"{"compilerOptions":{"module":"Node18"}}"#),
+            ((5, 8, 0), r#"{"compilerOptions":{"module":"Node20"}}"#),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none(),
+                "TypeScript {version:?}: {source}"
+            );
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+
+        for (version, source, expected) in [
+            (
+                (4, 7, 0),
+                r#"{"compilerOptions":{"moduleResolution":"NodeNext"}}"#,
+                Vue3TypeModuleResolutionKind::NodeNext,
+            ),
+            (
+                (5, 0, 0),
+                r#"{"compilerOptions":{"moduleResolution":"Bundler"}}"#,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+            (
+                (5, 4, 0),
+                r#"{"compilerOptions":{"module":"Preserve"}}"#,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+            (
+                (5, 8, 0),
+                r#"{"compilerOptions":{"module":"Node18"}}"#,
+                Vue3TypeModuleResolutionKind::Node16,
+            ),
+            (
+                (5, 9, 0),
+                r#"{"compilerOptions":{"module":"Node20"}}"#,
+                Vue3TypeModuleResolutionKind::Node16,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert_eq!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver)
+                    .expect("resolve supported compiler options")
+                    .module_resolution,
+                expected,
+                "TypeScript {version:?}: {source}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
     }
 
     #[test]

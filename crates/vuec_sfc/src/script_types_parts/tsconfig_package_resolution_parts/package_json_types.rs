@@ -1203,5 +1203,9 @@ fn vue3_package_type_target_path_with_mode(
         return None;
     }
     let candidate = normalize_path_components(package_dir.join(target));
-    resolve_vue3_metadata_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
+    resolve_vue3_metadata_package_target_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    )
 }

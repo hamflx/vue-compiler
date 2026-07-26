@@ -165,6 +165,101 @@
     }
 
     #[test]
+    fn vue3_node_esm_mode_reaches_tsconfig_module_targets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "module": "NodeNext",
+                    "moduleResolution": "NodeNext",
+                    "baseUrl": ".",
+                    "paths": {
+                        "path-alias": ["./path-target"],
+                        "explicit-alias": ["./explicit.js"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write NodeNext paths config");
+        let path_target = dir.path().join("path-target.ts");
+        let base_url_target = dir.path().join("base-target.ts");
+        let explicit_target = dir.path().join("explicit.ts");
+        std::fs::write(&path_target, "export interface PathProps {}")
+            .expect("write paths target");
+        std::fs::write(&base_url_target, "export interface BaseProps {}")
+            .expect("write baseUrl target");
+        std::fs::write(&explicit_target, "export interface ExplicitProps {}")
+            .expect("write explicit paths target");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let node_next = vue3_type_resolver_context_for_filename(&filename);
+        assert_eq!(
+            node_next.module_resolution,
+            Vue3TypeModuleResolutionKind::NodeNext
+        );
+
+        for source in ["path-alias", "base-target"] {
+            assert!(resolve_vue3_type_import_with_mode(
+                &filename,
+                source,
+                Vue3TypeResolutionMode::Import,
+                &node_next,
+            )
+            .is_none());
+        }
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "path-alias",
+                Vue3TypeResolutionMode::Require,
+                &node_next,
+            ),
+            Some(path_target.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "base-target",
+                Vue3TypeResolutionMode::Require,
+                &node_next,
+            ),
+            Some(base_url_target.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "explicit-alias",
+                Vue3TypeResolutionMode::Import,
+                &node_next,
+            ),
+            Some(explicit_target)
+        );
+
+        let bundler = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..node_next.clone()
+        };
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "path-alias",
+                Vue3TypeResolutionMode::Import,
+                &bundler,
+            ),
+            Some(path_target)
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "base-target",
+                Vue3TypeResolutionMode::Import,
+                &bundler,
+            ),
+            Some(base_url_target)
+        );
+    }
+
+    #[test]
     fn vue3_type_import_resolution_cache_is_a_session_snapshot() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
@@ -435,6 +530,70 @@
     }
 
     #[test]
+    fn vue3_resolution_and_context_caches_key_module_resolution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("types.ts");
+        std::fs::write(&target, "export interface Props { value: string }")
+            .expect("write resolution target");
+        let root = dir.path().join("root.ts");
+        std::fs::write(&root, "export { Props } from './types'")
+            .expect("write resolution-sensitive root");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let session = Vue3ExternalTypeLoadSession::default();
+        let node10 = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            external_type_session: session.clone(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let node_next = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..node10.clone()
+        };
+
+        for _ in 0..2 {
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &filename,
+                    "./types",
+                    Vue3TypeResolutionMode::Import,
+                    &node10,
+                ),
+                Some(target.clone())
+            );
+            assert!(resolve_vue3_type_import_with_mode(
+                &filename,
+                "./types",
+                Vue3TypeResolutionMode::Import,
+                &node_next,
+            )
+            .is_none());
+        }
+        assert_eq!(session.stats().resolution_cache_hits, 2);
+
+        let node10_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &node10,
+        )
+        .expect("load Node10 context");
+        let node_next_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &node_next,
+        )
+        .expect("load NodeNext context");
+        assert_eq!(
+            node10_context.type_sources.get("Props"),
+            Some(&normalize_path_string(&target))
+        );
+        assert!(!node_next_context.type_sources.contains_key("Props"));
+        assert!(!std::sync::Arc::ptr_eq(
+            &node10_context,
+            &node_next_context
+        ));
+    }
+
+    #[test]
     fn vue3_external_type_context_cache_charges_key_payload() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_path = dir.path().join("empty.ts");
@@ -448,6 +607,7 @@
         .is_some());
         let expected_key_weight = source_path.as_os_str().as_encoded_bytes().len()
             + measuring.typescript_version.to_string().len()
+            + std::mem::size_of::<Vue3TypeModuleResolutionKind>()
             + measuring
                 .module_suffixes
                 .iter()
@@ -514,6 +674,7 @@
         let version_limited = Vue3TypeResolverContext {
             typescript_version: nodejs_semver::Version::parse(&version_text)
                 .expect("parse long TypeScript version"),
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
             module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(
                 Vue3ExternalTypeLoadLimits {

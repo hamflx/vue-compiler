@@ -74,6 +74,71 @@ const model = defineModel<ModelValue>()
     }
 
     #[test]
+    fn vue3_nodenext_imports_require_explicit_relative_extensions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "module": "NodeNext",
+                    "moduleResolution": "NodeNext"
+                }
+            }"#,
+        )
+        .expect("write NodeNext config");
+        std::fs::write(
+            dir.path().join("extensionless.ts"),
+            "export interface ExtensionlessProps { forbiddenFile: string }",
+        )
+        .expect("write extensionless decoy");
+        let directory = dir.path().join("directory");
+        std::fs::create_dir_all(&directory).expect("create directory decoy");
+        std::fs::write(
+            directory.join("index.ts"),
+            "export interface DirectoryProps { forbiddenDirectory: number }",
+        )
+        .expect("write directory decoy");
+        let explicit = dir.path().join("explicit.ts");
+        std::fs::write(
+            &explicit,
+            "export interface ExplicitProps { explicitReplacement: boolean }",
+        )
+        .expect("write explicit replacement target");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ExtensionlessProps } from './extensionless'
+import type { DirectoryProps } from './directory'
+import type { ExplicitProps } from './explicit.js'
+defineProps<ExtensionlessProps & DirectoryProps & ExplicitProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(
+            script
+                .errors
+                .iter()
+                .any(|error| error.contains("./extensionless")),
+            "{:?}",
+            script.errors
+        );
+        assert!(
+            script
+                .errors
+                .iter()
+                .any(|error| error.contains("./directory")),
+            "{:?}",
+            script.errors
+        );
+        assert!(!script.content.contains("forbiddenFile"));
+        assert!(!script.content.contains("forbiddenDirectory"));
+        assert!(script.content.contains("explicitReplacement"));
+        assert_eq!(script.deps, vec![normalize_path_string(&explicit)]);
+    }
+
+    #[test]
     fn vue3_module_suffixes_respect_configured_order_for_relative_imports() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(

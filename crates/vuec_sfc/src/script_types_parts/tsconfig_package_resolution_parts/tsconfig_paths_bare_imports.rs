@@ -126,7 +126,7 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
             &capture,
             type_resolver,
         )?;
-        let resolved = resolve_vue3_metadata_type_import_path_with_mode(
+        let resolved = resolve_vue3_metadata_module_specifier_path_with_mode(
             &candidate,
             resolution_mode,
             type_resolver,
@@ -163,7 +163,7 @@ pub(crate) fn resolve_vue3_tsconfig_base_url_with_mode(
     {
         return None;
     }
-    resolve_vue3_metadata_type_import_path_with_mode(
+    resolve_vue3_metadata_module_specifier_path_with_mode(
         &candidate,
         resolution_mode,
         type_resolver,
@@ -536,8 +536,12 @@ pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3Typ
     if let Some(version) = vue3_typescript_version_for_filename(filename, &type_resolver) {
         type_resolver.typescript_version = version;
     }
-    type_resolver.module_suffixes = vue3_tsconfig_module_suffixes(filename, &type_resolver)
-        .unwrap_or_else(|| std::sync::Arc::from(Vec::<String>::new()));
+    if let Some(options) = vue3_tsconfig_type_resolver_options(filename, &type_resolver) {
+        type_resolver.module_resolution = options.module_resolution;
+        type_resolver.module_suffixes = options.module_suffixes;
+    } else {
+        type_resolver.module_suffixes = std::sync::Arc::from(Vec::<String>::new());
+    }
     type_resolver
 }
 
@@ -608,5 +612,9 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
-    resolve_vue3_metadata_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
+    resolve_vue3_metadata_bare_package_fallback_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    )
 }

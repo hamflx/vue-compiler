@@ -659,6 +659,7 @@ fn vue3_reachable_global_augmentation_files(
 ) -> Option<Vec<PathBuf>> {
     let type_resolver = Vue3TypeResolverContext {
         typescript_version: type_resolver.typescript_version.clone(),
+        module_resolution: type_resolver.module_resolution,
         module_suffixes: type_resolver.module_suffixes.clone(),
         external_type_session: Vue3ExternalTypeLoadSession::with_limits(
             type_resolver.external_type_session.limits(),

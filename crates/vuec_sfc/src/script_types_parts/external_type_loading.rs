@@ -161,6 +161,7 @@ enum Vue3ExternalTypeContextCacheEntry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Vue3TypeResolverCacheIdentity {
     typescript_version: String,
+    module_resolution: Vue3TypeModuleResolutionKind,
     module_suffixes: std::sync::Arc<[String]>,
 }
 
@@ -168,13 +169,16 @@ impl Vue3TypeResolverCacheIdentity {
     fn from_resolver(type_resolver: &Vue3TypeResolverContext) -> Self {
         Self {
             typescript_version: type_resolver.typescript_version.to_string(),
+            module_resolution: type_resolver.module_resolution,
             module_suffixes: type_resolver.module_suffixes.clone(),
         }
     }
 
     fn payload_weight(&self) -> usize {
         self.module_suffixes.iter().fold(
-            self.typescript_version.len(),
+            self.typescript_version
+                .len()
+                .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>()),
             |weight, suffix| {
                 weight
                     .saturating_add(std::mem::size_of::<String>())
