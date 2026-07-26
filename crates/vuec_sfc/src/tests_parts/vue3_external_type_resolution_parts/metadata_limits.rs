@@ -2351,7 +2351,8 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         serde_json::json!({ "imports": [] }),
         serde_json::json!({ "imports": { "#other": "./ok.d.mts" } }),
         serde_json::json!({ "imports": { "#alias": null } }),
-        serde_json::json!({ "imports": { "#alias": [null, "./ok.d.mts"] } }),
+        serde_json::json!({ "imports": { "#alias": [] } }),
+        serde_json::json!({ "imports": { "#alias": [null] } }),
         serde_json::json!({
             "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
         }),
@@ -2384,7 +2385,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
 
     std::fs::write(
         package.join("package.json"),
-        r##"{"imports":{"#alias":["../outside.d.mts","./ok.d.mts"]}}"##,
+        r##"{"imports":{"#alias":[null,"../outside.d.mts","./ok.d.mts"]}}"##,
     )
     .expect("write array fallback imports manifest");
     let resolver = Vue3TypeResolverContext::default();

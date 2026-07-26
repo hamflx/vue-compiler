@@ -721,6 +721,11 @@ fn visit_vue3_package_target(
         return Vue3PackageTargetVisit::Rejected;
     }
     if let Some(targets) = target.as_array() {
+        let mut fallback = if targets.is_empty() {
+            Vue3PackageTargetVisit::Rejected
+        } else {
+            Vue3PackageTargetVisit::Missing
+        };
         for target in targets {
             if !type_resolver
                 .external_type_session
@@ -736,11 +741,13 @@ fn visit_vue3_package_target(
                 type_resolver,
                 visitor,
             ) {
-                Vue3PackageTargetVisit::Missing | Vue3PackageTargetVisit::Invalid => {}
+                Vue3PackageTargetVisit::Missing => {}
+                result @ (Vue3PackageTargetVisit::Rejected
+                | Vue3PackageTargetVisit::Invalid) => fallback = result,
                 result => return result,
             }
         }
-        return Vue3PackageTargetVisit::Missing;
+        return fallback;
     }
     let Some(conditions) = target.as_object() else {
         return Vue3PackageTargetVisit::Invalid;

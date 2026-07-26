@@ -1394,10 +1394,23 @@ defineProps<OutputProps & DeclarationProps>()
             vue3_package_exports_type_target(&invalid_array_fallback, None, &resolver).as_deref(),
             Some("./valid.d.ts")
         );
-        let null_array_exclusion = serde_json::json!([null, "./valid.d.ts"]);
-        assert!(
-            vue3_package_exports_type_target(&null_array_exclusion, None, &resolver).is_none()
+        let null_array_fallback = serde_json::json!([null, "./valid.d.ts"]);
+        assert_eq!(
+            vue3_package_exports_type_target(&null_array_fallback, None, &resolver).as_deref(),
+            Some("./valid.d.ts")
         );
+        assert!(vue3_package_exports_type_target(
+            &serde_json::json!([null]),
+            None,
+            &resolver,
+        )
+        .is_none());
+        assert!(vue3_package_exports_type_target(
+            &serde_json::json!([]),
+            None,
+            &resolver,
+        )
+        .is_none());
         let legacy_prefix = serde_json::json!({
             "./legacy/": { "types": "./types/" }
         });
