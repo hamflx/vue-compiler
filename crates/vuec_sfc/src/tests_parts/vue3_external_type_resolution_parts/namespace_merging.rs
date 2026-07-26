@@ -2894,6 +2894,435 @@ fn vue3_global_value_conflicts_preserve_independent_type_dependents() {
 }
 
 #[test]
+fn vue3_provably_distinct_global_interface_heritage_blocks_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let same_file = dir.path().join("same-file.d.ts");
+    let string_base = dir.path().join("string-base.d.ts");
+    let number_base = dir.path().join("number-base.d.ts");
+    let string_fragment = dir.path().join("string-fragment.d.ts");
+    let number_fragment = dir.path().join("number-fragment.d.ts");
+    let compatible = dir.path().join("compatible.d.ts");
+    let reconciled_fragment = dir.path().join("reconciled-fragment.d.ts");
+    let consumer = dir.path().join("heritage-consumer.d.ts");
+    std::fs::write(
+        &same_file,
+        r#"
+interface SameFileStringBase { value: string }
+interface SameFileNumberBase { value: number }
+interface SameFileConflict extends SameFileStringBase, SameFileNumberBase {}
+type SameFileConsumer = SameFileConflict
+interface InvalidOwn extends SameFileStringBase, SameFileNumberBase { value: boolean }
+type InvalidOwnConsumer = InvalidOwn
+interface InvalidOptionalOwn extends SameFileStringBase { value?: string }
+type InvalidOptionalOwnConsumer = InvalidOptionalOwn
+interface Box<T> { boxed: T }
+interface GenericCombination extends Box<string>, Box<number> {}
+"#,
+    )
+    .expect("write same-file heritage conflict");
+    std::fs::write(&string_base, "interface StringBase { value: string }")
+        .expect("write string base");
+    std::fs::write(&number_base, "interface NumberBase { value: number }")
+        .expect("write number base");
+    std::fs::write(
+        &string_fragment,
+        "interface SplitConflict extends StringBase {}",
+    )
+    .expect("write string heritage fragment");
+    std::fs::write(
+        &number_fragment,
+        "interface SplitConflict extends NumberBase {}",
+    )
+    .expect("write number heritage fragment");
+    std::fs::write(
+        &compatible,
+        r#"
+interface CompatibleLeft { left: string; shared: boolean }
+interface CompatibleRight { right: number; shared: boolean }
+interface Compatible extends CompatibleLeft, CompatibleRight {}
+interface Reconciled extends StringBase {}
+interface Reconciled extends NumberBase {}
+"#,
+    )
+    .expect("write compatible heritage");
+    std::fs::write(
+        &reconciled_fragment,
+        "interface Reconciled { value: never }",
+    )
+    .expect("write reconciling own member");
+    std::fs::write(
+        &consumer,
+        r#"
+type SplitConsumer = SplitConflict
+type CompatibleConsumer = Compatible
+type ReconciledConsumer = Reconciled
+type GenericConsumer = GenericCombination
+"#,
+    )
+    .expect("write heritage consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![
+            same_file.clone(),
+            string_base.clone(),
+            number_base.clone(),
+            string_fragment.clone(),
+            number_fragment.clone(),
+            compatible.clone(),
+            reconciled_fragment.clone(),
+            consumer.clone(),
+        ],
+        vec![
+            consumer.clone(),
+            reconciled_fragment.clone(),
+            compatible.clone(),
+            number_fragment.clone(),
+            string_fragment.clone(),
+            number_base.clone(),
+            string_base.clone(),
+            same_file.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in [
+            "SameFileConflict",
+            "SameFileConsumer",
+            "InvalidOwn",
+            "InvalidOwnConsumer",
+            "InvalidOptionalOwn",
+            "InvalidOptionalOwnConsumer",
+            "SplitConflict",
+            "SplitConsumer",
+        ] {
+            assert!(
+                context.silent_unresolved_type_names.contains(name),
+                "missing blocked name {name} for {files:?}; available={:?}; unresolved={:?}",
+                vue3_type_context_names(&context),
+                context.silent_unresolved_type_names,
+            );
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+        for name in [
+            "Compatible",
+            "CompatibleConsumer",
+            "Reconciled",
+            "ReconciledConsumer",
+            "Box",
+            "GenericCombination",
+            "GenericConsumer",
+        ] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+        let props = context
+            .props_type_declarations
+            .get("Compatible")
+            .expect("compatible inherited props");
+        assert_eq!(
+            props
+                .members
+                .iter()
+                .map(|prop| prop.key.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["left", "right", "shared"])
+        );
+    }
+}
+
+#[test]
+fn vue3_unproven_interface_heritage_differences_are_not_falsely_blocked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let declarations = dir.path().join("structural-heritage.d.ts");
+    std::fs::write(
+        &declarations,
+        r#"
+interface Shape extends Date {}
+interface DateBase { value: Date }
+interface ShapeBase { value: Shape }
+interface StructuralCompatible extends DateBase, ShapeBase {}
+
+interface ExcludedBase { value: Exclude<string | number, number> }
+interface StringBase { value: string }
+interface UtilityCompatible extends ExcludedBase, StringBase {}
+
+interface OverloadedFn { (): string; (): number }
+interface ReturnTypeBase { value: ReturnType<OverloadedFn> }
+interface NumberBase { value: number }
+interface ReturnTypeCompatible extends ReturnTypeBase, NumberBase {}
+
+type Intersection = { value: string } & { value: number }
+interface IntersectionBase extends Intersection {}
+interface NeverBase { value: never }
+interface IntersectionCompatible extends IntersectionBase, NeverBase {}
+
+interface WideBase { value: string | number }
+interface NarrowBase { value: string }
+interface Narrowed extends WideBase, NarrowBase { value: string }
+
+interface OrderedUnionBase { value: string | number }
+interface ReorderedUnionBase { value: number | never | string }
+interface NormalizedUnionCompatible extends OrderedUnionBase, ReorderedUnionBase {}
+
+interface NonNullableBase { value: string }
+interface NullableBase { value: string | null }
+interface ConfigurationSensitive extends NonNullableBase, NullableBase {}
+
+class ClassFirstReconciled { value!: never }
+interface ClassFirstReconciled extends DateBase, NumberBase {}
+interface InterfaceFirstReconciled extends DateBase, NumberBase {}
+class InterfaceFirstReconciled { value!: never }
+"#,
+    )
+    .expect("write structurally compatible heritage");
+    let filename = dir.path().join("Comp.vue");
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &[declarations.to_string_lossy().to_string()],
+        &Vue3TypeResolverContext::default(),
+    );
+
+    for name in [
+        "StructuralCompatible",
+        "UtilityCompatible",
+        "ReturnTypeCompatible",
+        "IntersectionCompatible",
+        "Narrowed",
+        "NormalizedUnionCompatible",
+        "ConfigurationSensitive",
+        "ClassFirstReconciled",
+        "InterfaceFirstReconciled",
+    ] {
+        assert!(!context.silent_unresolved_type_names.contains(name));
+        assert!(vue3_type_context_has_name(&context, name));
+    }
+}
+
+#[test]
+fn vue3_provably_distinct_ambient_namespace_interface_heritage_is_blocked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let namespace = dir.path().join("namespace-heritage.d.ts");
+    std::fs::write(
+        &namespace,
+        r#"
+declare namespace HeritageNs {
+  interface Left { nested: string }
+  interface Right { nested: number }
+  interface Conflict extends Left, Right {}
+}
+type NamespaceConsumer = HeritageNs.Conflict
+"#,
+    )
+    .expect("write namespace heritage conflict");
+    let filename = dir.path().join("Comp.vue");
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &[namespace.to_string_lossy().to_string()],
+        &Vue3TypeResolverContext::default(),
+    );
+
+    for name in ["HeritageNs.Conflict", "NamespaceConsumer"] {
+        assert!(context.silent_unresolved_type_names.contains(name));
+        assert!(!vue3_type_context_has_name(&context, name));
+    }
+    for name in ["HeritageNs.Left", "HeritageNs.Right"] {
+        assert!(!context.silent_unresolved_type_names.contains(name));
+        assert!(vue3_type_context_has_name(&context, name));
+    }
+}
+
+#[test]
+fn vue3_imported_global_augmentation_reconciles_interface_heritage_before_blocking() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let string_fragment = dir.path().join("string-fragment.d.ts");
+    let number_fragment = dir.path().join("number-fragment.d.ts");
+    let augmentation_leaf = dir.path().join("augmentation-leaf.ts");
+    let augmentation = dir.path().join("augmentation.ts");
+    let transitive = dir.path().join("transitive.ts");
+    let barrel = dir.path().join("barrel.ts");
+    let import_type = dir.path().join("import-type.ts");
+    let cycle_a = dir.path().join("cycle-a.ts");
+    let cycle_b = dir.path().join("cycle-b.ts");
+    std::fs::write(
+        &string_fragment,
+        "interface StringBase { value: string }\ninterface ImportedReconciled extends StringBase {}",
+    )
+    .expect("write string heritage fragment");
+    std::fs::write(
+        &number_fragment,
+        "interface NumberBase { value: number }\ninterface ImportedReconciled extends NumberBase {}",
+    )
+    .expect("write number heritage fragment");
+    std::fs::write(
+        &augmentation_leaf,
+        "export interface AugmentationLeaf { nested: boolean }",
+    )
+    .expect("write augmentation leaf type");
+    std::fs::write(
+        &augmentation,
+        r#"
+import type { AugmentationLeaf as Leaf } from './augmentation-leaf'
+interface ModulePrivate { leaked: boolean }
+export type Marker = true
+declare global { interface ImportedReconciled { value: never; leaf: Leaf } }
+"#,
+    )
+    .expect("write global augmentation module");
+    std::fs::write(
+        &transitive,
+        "import './augmentation'\nexport type Marker = true",
+    )
+    .expect("write transitive augmentation import");
+    std::fs::write(&barrel, "export { Marker } from './augmentation'")
+        .expect("write augmentation barrel");
+    std::fs::write(
+        &import_type,
+        "export type ImportedMarker = import('./augmentation').Marker",
+    )
+    .expect("write import type augmentation edge");
+    std::fs::write(&cycle_a, "import './cycle-b'\nexport type CycleA = true")
+        .expect("write first cyclic module");
+    std::fs::write(
+        &cycle_b,
+        "import './cycle-a'\nexport { Marker } from './augmentation'",
+    )
+    .expect("write second cyclic module");
+    let filename = dir.path().join("Comp.vue");
+    let cases = [
+        (
+            "setup-side-effect",
+            r#"<script setup lang="ts">
+import './augmentation'
+defineProps<ImportedReconciled>()
+</script>"#,
+        ),
+        (
+            "normal-side-effect",
+            r#"<script lang="ts">
+import './augmentation'
+export default {}
+</script>
+<script setup lang="ts">defineProps<ImportedReconciled>()</script>"#,
+        ),
+        (
+            "normal-named",
+            r#"<script lang="ts">
+import type { Marker } from './augmentation'
+export default {}
+</script>
+<script setup lang="ts">defineProps<ImportedReconciled>()</script>"#,
+        ),
+        (
+            "transitive-side-effect",
+            r#"<script setup lang="ts">
+import './transitive'
+defineProps<ImportedReconciled>()
+</script>"#,
+        ),
+        (
+            "named-re-export",
+            r#"<script setup lang="ts">
+import type { Marker } from './barrel'
+defineProps<ImportedReconciled>()
+</script>"#,
+        ),
+        (
+            "import-type",
+            r#"<script setup lang="ts">
+import type { ImportedMarker } from './import-type'
+defineProps<ImportedReconciled>()
+</script>"#,
+        ),
+        (
+            "cyclic-module-graph",
+            r#"<script setup lang="ts">
+import './cycle-a'
+defineProps<ImportedReconciled>()
+</script>"#,
+        ),
+    ];
+    let expected_heritage_deps = [
+        normalize_path_string(&string_fragment),
+        normalize_path_string(&number_fragment),
+        normalize_path_string(&augmentation),
+        normalize_path_string(&augmentation_leaf),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+
+    for (case, source) in cases {
+        for files in [
+            vec![string_fragment.clone(), number_fragment.clone()],
+            vec![number_fragment.clone(), string_fragment.clone()],
+        ] {
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(filename.to_string_lossy(), source);
+            let script = compiler.compile_script(
+                &descriptor,
+                SfcScriptCompileOptions {
+                    global_type_files: files
+                        .iter()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .collect(),
+                    ..SfcScriptCompileOptions::default()
+                },
+            );
+
+            assert!(script.errors.is_empty(), "{case}: {:?}", script.errors);
+            assert!(
+                script
+                    .content
+                    .contains("value: { type: null, required: true }"),
+                "missing reconciled prop for {case} and {files:?}: {}",
+                script.content,
+            );
+            assert!(
+                script
+                    .content
+                    .contains("leaf: { type: Object, required: true }"),
+                "missing imported augmentation prop for {case}: {}",
+                script.content,
+            );
+            assert!(
+                expected_heritage_deps
+                    .is_subset(&script.deps.iter().cloned().collect()),
+                "missing augmentation deps for {case}: {:?}",
+                script.deps,
+            );
+            assert!(!script.content.contains("leaked:"), "{case}");
+        }
+    }
+
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(
+        filename.to_string_lossy(),
+        r#"<script setup lang="ts">
+import './augmentation'
+defineProps<ModulePrivate>()
+</script>"#,
+    );
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: vec![
+                string_fragment.to_string_lossy().to_string(),
+                number_fragment.to_string_lossy().to_string(),
+            ],
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+    assert!(!script.errors.is_empty());
+    assert!(!script.content.contains("leaked:"));
+}
+
+#[test]
 fn vue3_incompatible_global_interface_and_enum_members_block_dependents() {
     let dir = tempfile::tempdir().expect("temp dir");
     let string_interface = dir.path().join("string-interface.d.ts");

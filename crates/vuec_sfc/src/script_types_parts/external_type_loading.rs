@@ -274,6 +274,10 @@ impl Vue3ExternalTypeLoadSession {
         self.lock().limits
     }
 
+    pub(crate) fn failure_epoch(&self) -> usize {
+        self.lock().failure_epoch
+    }
+
     fn source_from_path(
         &self,
         path: &Path,

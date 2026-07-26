@@ -11,6 +11,7 @@ pub(crate) fn vue3_props_options_type_members(
                 .to_string(),
             members: vue3_runtime_props_options_from_signatures(source, &literal.members, analysis),
             errors: Vec::new(),
+            interface_heritage: None,
         }),
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
@@ -101,6 +102,7 @@ pub(crate) fn vue3_static_runtime_props_options_type_members(
             .to_string(),
         members,
         errors: Vec::new(),
+        interface_heritage: None,
     })
 }
 

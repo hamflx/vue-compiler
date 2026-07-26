@@ -14,6 +14,7 @@ pub(crate) fn vue3_merged_type_members(
                 .to_string(),
             members,
             errors,
+            interface_heritage: None,
         })
     }
 }
@@ -30,6 +31,7 @@ pub(crate) fn vue3_type_members_empty(
             .to_string(),
         members: Vec::new(),
         errors,
+        interface_heritage: None,
     }
 }
 
@@ -131,6 +133,193 @@ pub(crate) fn vue3_merge_props_type_members(
     (merged, errors)
 }
 
+pub(crate) fn vue3_take_and_merge_interface_heritage_evidence(
+    members: &mut [Vue27TypeMembers],
+) -> Option<Vue3InterfaceHeritageEvidence> {
+    let mut merged = None::<Vue3InterfaceHeritageEvidence>;
+    for members in members {
+        let Some(heritage) = members.interface_heritage.take() else {
+            continue;
+        };
+        let target = merged.get_or_insert_with(Vue3InterfaceHeritageEvidence::default);
+        for (target_members, source_members) in [
+            (&mut target.own_members, heritage.own_members),
+            (&mut target.inherited_members, heritage.inherited_members),
+        ] {
+            for (key, signatures) in source_members {
+                target_members
+                    .entry(key)
+                    .or_default()
+                    .extend(signatures);
+            }
+        }
+    }
+    merged
+}
+
+pub(crate) fn vue3_direct_interface_member_evidence(
+    member: &Vue27RuntimeProp,
+) -> Vue3InterfaceHeritageMemberEvidence {
+    let exact_primitive_types = if member.is_method {
+        None
+    } else {
+        member
+            .type_annotation_source
+            .as_deref()
+            .and_then(vue3_exact_primitive_type_source)
+    };
+    Vue3InterfaceHeritageMemberEvidence {
+        exact_primitive_types,
+        required: Some(member.required),
+    }
+}
+
+pub(crate) fn vue3_inherited_interface_member_evidence(
+    base: &Vue27TypeMembers,
+    member: &Vue27RuntimeProp,
+) -> Vue3InterfaceHeritageMemberEvidence {
+    let Some(heritage) = &base.interface_heritage else {
+        return Vue3InterfaceHeritageMemberEvidence {
+            exact_primitive_types: None,
+            required: None,
+        };
+    };
+    let candidates = heritage
+        .own_members
+        .get(&member.key)
+        .or_else(|| heritage.inherited_members.get(&member.key));
+    let Some(candidates) = candidates else {
+        return Vue3InterfaceHeritageMemberEvidence {
+            exact_primitive_types: None,
+            required: None,
+        };
+    };
+    let mut exact_primitive_types = None::<&BTreeSet<String>>;
+    let mut required = None::<bool>;
+    for candidate in candidates {
+        let Some(candidate_types) = candidate.exact_primitive_types.as_ref() else {
+            exact_primitive_types = None;
+            break;
+        };
+        if exact_primitive_types.is_some_and(|types| types != candidate_types) {
+            exact_primitive_types = None;
+            break;
+        }
+        exact_primitive_types = Some(candidate_types);
+    }
+    for candidate in candidates {
+        let Some(candidate_required) = candidate.required else {
+            required = None;
+            break;
+        };
+        if required.is_some_and(|value| value != candidate_required) {
+            required = None;
+            break;
+        }
+        required = Some(candidate_required);
+    }
+    Vue3InterfaceHeritageMemberEvidence {
+        exact_primitive_types: exact_primitive_types.cloned(),
+        required: required.filter(|required| *required == member.required),
+    }
+}
+
+fn vue3_exact_primitive_type_source(source: &str) -> Option<BTreeSet<String>> {
+    let source = source
+        .strip_prefix(':')
+        .map_or(source, str::trim)
+        .trim();
+    if source.is_empty() {
+        return None;
+    }
+    let wrapped = format!("type __VuecExactPrimitive = {source}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::ts())
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    parsed.program.body.iter().find_map(|statement| {
+        let Statement::TSTypeAliasDeclaration(declaration) = statement else {
+            return None;
+        };
+        vue3_exact_primitive_type(&declaration.type_annotation)
+    })
+}
+
+fn vue3_exact_primitive_type(ty: &TSType<'_>) -> Option<BTreeSet<String>> {
+    let primitive = match ty {
+        TSType::TSBigIntKeyword(_) => "bigint",
+        TSType::TSBooleanKeyword(_) => "boolean",
+        TSType::TSNumberKeyword(_) => "number",
+        TSType::TSStringKeyword(_) => "string",
+        TSType::TSSymbolKeyword(_) => "symbol",
+        TSType::TSNeverKeyword(_) => return Some(BTreeSet::new()),
+        TSType::TSParenthesizedType(parenthesized) => {
+            return vue3_exact_primitive_type(&parenthesized.type_annotation);
+        }
+        TSType::TSUnionType(union) => {
+            let mut exact = BTreeSet::new();
+            for ty in &union.types {
+                exact.extend(vue3_exact_primitive_type(ty)?);
+            }
+            return Some(exact);
+        }
+        _ => return None,
+    };
+    Some(BTreeSet::from([primitive.to_string()]))
+}
+
+pub(crate) fn vue3_interface_heritage_has_proven_conflict(
+    heritage: &Vue3InterfaceHeritageEvidence,
+) -> bool {
+    for (key, inherited_members) in &heritage.inherited_members {
+        if let Some(own_members) = heritage.own_members.get(key) {
+            for own in own_members {
+                for inherited in inherited_members {
+                    if matches!((inherited.required, own.required), (Some(true), Some(false)))
+                        || match (
+                            &own.exact_primitive_types,
+                            &inherited.exact_primitive_types,
+                        ) {
+                            (Some(own), Some(inherited)) => !own.is_subset(inherited),
+                            _ => false,
+                        }
+                    {
+                        return true;
+                    }
+                }
+            }
+            continue;
+        }
+        let mut inherited = None::<(Option<bool>, Option<&BTreeSet<String>>)>;
+        for member in inherited_members {
+            let exact_types = member.exact_primitive_types.as_ref();
+            if let Some((required, existing_types)) = &mut inherited {
+                if matches!((*required, member.required), (Some(left), Some(right)) if left != right)
+                {
+                    return true;
+                }
+                if required.is_none() {
+                    *required = member.required;
+                }
+                match (*existing_types, exact_types) {
+                    (Some(existing), Some(current)) if existing != current => return true,
+                    (None, Some(current)) => *existing_types = Some(current),
+                    _ => {}
+                }
+            } else {
+                inherited = Some((member.required, exact_types));
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod vue3_merge_props_type_members_tests {
     use super::*;
@@ -161,6 +350,47 @@ mod vue3_merge_props_type_members_tests {
             source: source.to_string(),
             members,
             errors: errors.iter().map(|error| (*error).to_string()).collect(),
+            interface_heritage: None,
+        }
+    }
+
+    fn heritage_member(
+        exact_primitive_types: Option<&[&str]>,
+        required: bool,
+    ) -> Vue3InterfaceHeritageMemberEvidence {
+        Vue3InterfaceHeritageMemberEvidence {
+            exact_primitive_types: exact_primitive_types.map(|types| {
+                types.iter().map(|value| (*value).to_string()).collect()
+            }),
+            required: Some(required),
+        }
+    }
+
+    fn heritage(
+        own: &[(&str, Option<&[&str]>, bool)],
+        bases: &[(&str, Option<&[&str]>, bool)],
+    ) -> Vue3InterfaceHeritageEvidence {
+        Vue3InterfaceHeritageEvidence {
+            own_members: own.iter().fold(
+                BTreeMap::<String, BTreeSet<Vue3InterfaceHeritageMemberEvidence>>::new(),
+                |mut members, (key, types, required)| {
+                    members
+                        .entry((*key).to_string())
+                        .or_default()
+                        .insert(heritage_member(*types, *required));
+                    members
+                },
+            ),
+            inherited_members: bases.iter().fold(
+                BTreeMap::<String, BTreeSet<Vue3InterfaceHeritageMemberEvidence>>::new(),
+                |mut members, (key, types, required)| {
+                    members
+                        .entry((*key).to_string())
+                        .or_default()
+                        .insert(heritage_member(*types, *required));
+                    members
+                },
+            ),
         }
     }
 
@@ -237,6 +467,135 @@ mod vue3_merge_props_type_members_tests {
         assert!(errors.is_empty());
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].types, ["Unknown", "String", "Number"]);
+    }
+
+    #[test]
+    fn heritage_conflicts_require_proof_and_respect_own_members() {
+        assert!(vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[],
+                &[
+                    ("value", Some(&["string"]), true),
+                    ("value", Some(&["number"]), true),
+                ]
+            )
+        ));
+        assert!(vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[],
+                &[("value", None, true), ("value", None, false)]
+            )
+        ));
+        assert!(!vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[("value", Some(&[]), true)],
+                &[
+                    ("value", Some(&["string"]), true),
+                    ("value", Some(&["number"]), true),
+                ]
+            )
+        ));
+        assert!(vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[("value", Some(&["boolean"]), true)],
+                &[
+                    ("value", Some(&["string"]), true),
+                    ("value", Some(&["number"]), true),
+                ]
+            )
+        ));
+        assert!(vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[("value", Some(&["string"]), false)],
+                &[("value", Some(&["string"]), true)]
+            )
+        ));
+        assert!(!vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[],
+                &[
+                    ("value", None, true),
+                    ("value", Some(&["number"]), true),
+                ]
+            )
+        ));
+        assert!(vue3_interface_heritage_has_proven_conflict(
+            &heritage(
+                &[],
+                &[
+                    ("value", None, true),
+                    ("value", Some(&["string"]), true),
+                    ("value", Some(&["number"]), true),
+                ]
+            )
+        ));
+    }
+
+    #[test]
+    fn exact_primitive_heritage_types_require_syntax_proof() {
+        assert_eq!(
+            vue3_exact_primitive_type_source("string | (number | never)"),
+            Some(BTreeSet::from(["number".to_string(), "string".to_string()]))
+        );
+        assert_eq!(
+            vue3_exact_primitive_type_source(": boolean"),
+            Some(BTreeSet::from(["boolean".to_string()]))
+        );
+        for source in [
+            "Date",
+            "Shape",
+            "Exclude<string | number, number>",
+            "ReturnType<Fn>",
+            "() => string",
+            "'literal'",
+            "any",
+            "unknown",
+            "null",
+            "undefined",
+            "void",
+            "string | null",
+        ] {
+            assert_eq!(vue3_exact_primitive_type_source(source), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn inherited_heritage_evidence_requires_interface_provenance() {
+        let mut member = prop("value", &["String", "Number"], true, "base");
+        member.type_annotation_source = Some("string".to_string());
+        let unproven_base = members("alias intersection", vec![member.clone()], &[]);
+        assert_eq!(
+            vue3_inherited_interface_member_evidence(&unproven_base, &member),
+            Vue3InterfaceHeritageMemberEvidence {
+                exact_primitive_types: None,
+                required: None,
+            }
+        );
+
+        let mut proven_base = members("merged interface", vec![member.clone()], &[]);
+        proven_base.interface_heritage = Some(heritage(
+            &[("value", Some(&[]), true)],
+            &[
+                ("value", Some(&["string"]), true),
+                ("value", Some(&["number"]), true),
+            ],
+        ));
+        assert_eq!(
+            vue3_inherited_interface_member_evidence(&proven_base, &member),
+            Vue3InterfaceHeritageMemberEvidence {
+                exact_primitive_types: Some(BTreeSet::new()),
+                required: Some(true),
+            }
+        );
+
+        member.required = false;
+        assert_eq!(
+            vue3_inherited_interface_member_evidence(&proven_base, &member),
+            Vue3InterfaceHeritageMemberEvidence {
+                exact_primitive_types: Some(BTreeSet::new()),
+                required: None,
+            }
+        );
     }
 }
 

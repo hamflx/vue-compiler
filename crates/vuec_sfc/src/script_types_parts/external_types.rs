@@ -1,3 +1,276 @@
+struct Vue3InlineModuleSource<'a> {
+    filename: &'a str,
+    source: &'a str,
+    source_type: oxc_span::SourceType,
+}
+
+struct Vue3ModuleDependencyCollector<'budget> {
+    sources: BTreeSet<String>,
+    namespace_budget: &'budget mut Vue3NamespaceProjectionBudget,
+}
+
+impl Vue3ModuleDependencyCollector<'_> {
+    fn insert(&mut self, source: &str) {
+        if self.sources.contains(source) {
+            return;
+        }
+        if self.namespace_budget.reserve(
+            source
+                .len()
+                .saturating_add(std::mem::size_of::<String>())
+                .saturating_add(1),
+        ) {
+            self.sources.insert(source.to_string());
+        }
+    }
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(source) = &expression.source {
+            self.insert(source.value.as_str());
+        }
+        oxc_ast_visit::walk::walk_import_expression(self, expression);
+    }
+
+    fn visit_ts_import_type(&mut self, import: &TSImportType<'a>) {
+        self.insert(import.source.value.as_str());
+        oxc_ast_visit::walk::walk_ts_import_type(self, import);
+    }
+
+    fn visit_ts_external_module_reference(
+        &mut self,
+        reference: &TSExternalModuleReference<'a>,
+    ) {
+        self.insert(reference.expression.value.as_str());
+    }
+}
+
+fn vue3_module_dependencies_from_source(
+    source: &str,
+    source_type: oxc_span::SourceType,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<(bool, BTreeSet<String>)> {
+    if !namespace_budget.reserve(source.len().saturating_add(1)) {
+        return None;
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Some((false, BTreeSet::new()));
+    }
+    if !namespace_budget.reserve(parsed.program.body.len()) {
+        return None;
+    }
+    let has_global_augmentation = parsed.program.body.iter().any(|statement| {
+        matches!(statement, Statement::TSGlobalDeclaration(_))
+            || matches!(
+                statement,
+                Statement::TSModuleDeclaration(declaration)
+                    if vue3_ts_module_declaration_is_global(declaration)
+            )
+            || matches!(
+                statement,
+                Statement::ExportNamedDeclaration(export)
+                    if matches!(
+                        export.declaration.as_ref(),
+                        Some(Declaration::TSModuleDeclaration(declaration))
+                            if vue3_ts_module_declaration_is_global(declaration)
+                    )
+            )
+    });
+    let mut collector = Vue3ModuleDependencyCollector {
+        sources: BTreeSet::new(),
+        namespace_budget,
+    };
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ImportDeclaration(import) => {
+                collector.insert(import.source.value.as_str());
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(source) = &export.source {
+                    collector.insert(source.value.as_str());
+                }
+            }
+            Statement::ExportAllDeclaration(export) => {
+                collector.insert(export.source.value.as_str());
+            }
+            _ => {}
+        }
+        oxc_ast_visit::Visit::visit_statement(&mut collector, statement);
+    }
+    if collector.namespace_budget.is_exhausted() {
+        None
+    } else {
+        Some((has_global_augmentation, collector.sources))
+    }
+}
+
+fn enqueue_vue3_module_dependencies(
+    importer: &str,
+    sources: BTreeSet<String>,
+    depth: usize,
+    pending: &mut VecDeque<(String, String, usize)>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    let work = sources.iter().fold(0usize, |work, source| {
+        work
+            .saturating_add(importer.len())
+            .saturating_add(source.len())
+            .saturating_add(std::mem::size_of::<(String, String, usize)>())
+            .saturating_add(1)
+    });
+    if !namespace_budget.reserve(work) {
+        return None;
+    }
+    pending.extend(
+        sources
+            .into_iter()
+            .map(|source| (importer.to_string(), source, depth)),
+    );
+    Some(())
+}
+
+fn vue3_module_path_can_contain_typescript(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn vue3_reachable_global_augmentation_files(
+    initial_global_files: &[Vue3GlobalTypeFile],
+    inline_module_sources: &[Vue3InlineModuleSource<'_>],
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vec<PathBuf>> {
+    let type_resolver = Vue3TypeResolverContext {
+        typescript_version: type_resolver.typescript_version.clone(),
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            type_resolver.external_type_session.limits(),
+        ),
+    };
+    let mut namespace_budget = Vue3NamespaceProjectionBudget::default();
+    let mut seen = BTreeSet::new();
+    let mut pending = VecDeque::new();
+    for file in initial_global_files {
+        let identity = vue3_external_type_path_identity(&file.path);
+        if seen.contains(&identity) {
+            continue;
+        }
+        let identity_work = normalize_path_string(&identity)
+            .len()
+            .saturating_add(std::mem::size_of::<PathBuf>())
+            .saturating_add(1);
+        if !namespace_budget.reserve(identity_work) {
+            return None;
+        }
+        seen.insert(identity);
+        let (_, dependencies) = vue3_module_dependencies_from_source(
+            &file.source.source,
+            file.source.source_type,
+            &mut namespace_budget,
+        )?;
+        enqueue_vue3_module_dependencies(
+            &normalize_path_string(&file.path),
+            dependencies,
+            1,
+            &mut pending,
+            &mut namespace_budget,
+        )?;
+    }
+    for root in inline_module_sources {
+        let (_, dependencies) = vue3_module_dependencies_from_source(
+            root.source,
+            root.source_type,
+            &mut namespace_budget,
+        )?;
+        enqueue_vue3_module_dependencies(
+            root.filename,
+            dependencies,
+            1,
+            &mut pending,
+            &mut namespace_budget,
+        )?;
+    }
+
+    let max_import_files = type_resolver
+        .external_type_session
+        .limits()
+        .max_import_files
+        .min(VUE3_EXTERNAL_TYPE_MAX_IMPORT_FILES);
+    let mut scanned_import_files = 0usize;
+    let mut augmentation_paths = BTreeMap::<PathBuf, PathBuf>::new();
+    while let Some((importer, source, depth)) = pending.pop_front() {
+        if depth > VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES {
+            return None;
+        }
+        let failure_epoch = type_resolver.external_type_session.failure_epoch();
+        let Some(resolved) = resolve_vue3_type_import(&importer, &source, &type_resolver) else {
+            if type_resolver.external_type_session.failure_epoch() != failure_epoch {
+                return None;
+            }
+            continue;
+        };
+        let identity = vue3_external_type_path_identity(&resolved);
+        if seen.contains(&identity) {
+            continue;
+        }
+        let normalized = normalize_path_string(&resolved);
+        if !namespace_budget.reserve(
+            normalized
+                .len()
+                .saturating_add(std::mem::size_of::<PathBuf>())
+                .saturating_add(1),
+        ) {
+            return None;
+        }
+        if !vue3_module_path_can_contain_typescript(&resolved) {
+            seen.insert(identity);
+            continue;
+        }
+        if scanned_import_files >= max_import_files {
+            return None;
+        }
+        seen.insert(identity.clone());
+        scanned_import_files = scanned_import_files.saturating_add(1);
+        let source = vue3_external_type_source_from_path(&resolved, &type_resolver)?;
+        let (has_global_augmentation, dependencies) = vue3_module_dependencies_from_source(
+            &source.source,
+            source.source_type,
+            &mut namespace_budget,
+        )?;
+        if has_global_augmentation {
+            if !namespace_budget.reserve(
+                normalized
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(std::mem::size_of::<PathBuf>() * 2)
+                    .saturating_add(1),
+            ) {
+                return None;
+            }
+            augmentation_paths.insert(identity, resolved.clone());
+        }
+        enqueue_vue3_module_dependencies(
+            &normalized,
+            dependencies,
+            depth.saturating_add(1),
+            &mut pending,
+            &mut namespace_budget,
+        )?;
+    }
+    Some(augmentation_paths.into_values().collect())
+}
+
 pub(crate) fn extend_vue3_type_context_from_external_imports(
     filename: &str,
     source: &str,
@@ -1922,7 +2195,7 @@ fn merge_vue3_namespace_declaration_projections(
 
     macro_rules! merge_members_entry {
         ($field:ident) => {{
-            let values = projections
+            let mut values = projections
                 .iter()
                 .filter_map(|projection| projection.analysis.$field.get(name).cloned())
                 .collect::<Vec<_>>();
@@ -1936,6 +2209,8 @@ fn merge_vue3_namespace_declaration_projections(
                         source_parts.push(value.source.clone());
                     }
                 }
+                let interface_heritage =
+                    vue3_take_and_merge_interface_heritage_evidence(&mut values);
                 let (members, errors) = vue3_merge_props_type_members(values, false);
                 merged.$field.insert(
                     name.to_string(),
@@ -1943,6 +2218,7 @@ fn merge_vue3_namespace_declaration_projections(
                         source: source_parts.join("\n"),
                         members,
                         errors,
+                        interface_heritage,
                     },
                 );
             }
@@ -2617,6 +2893,155 @@ mod namespace_projection_budget_tests {
             remaining_work: limit,
             exhausted: false,
         }
+    }
+
+    fn type_resolver_with_limits(
+        limits: Vue3ExternalTypeLoadLimits,
+    ) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    #[test]
+    fn module_dependency_scan_covers_typescript_module_edges_and_exact_budget() {
+        let source = r#"
+import './side-effect'
+export { Named } from './named'
+export * from './all'
+type Imported = import('./import-type').Value
+const load = () => import('./dynamic')
+import Required = require('./import-equals')
+declare global { interface Augmented { value: string } }
+"#;
+        let expected = BTreeSet::from([
+            "./all".to_string(),
+            "./dynamic".to_string(),
+            "./import-equals".to_string(),
+            "./import-type".to_string(),
+            "./named".to_string(),
+            "./side-effect".to_string(),
+        ]);
+        let mut measured = budget(usize::MAX);
+        let (has_augmentation, dependencies) = vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::ts(),
+            &mut measured,
+        )
+        .expect("measure dependency scan");
+        assert!(has_augmentation);
+        assert_eq!(dependencies, expected);
+        let required = usize::MAX - measured.remaining_work;
+        assert!(required > source.len());
+
+        let mut exact = budget(required);
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut exact,
+            ),
+            Some((true, expected)),
+        );
+        assert_eq!(exact.remaining_work, 0);
+        assert!(!exact.exhausted);
+
+        let mut short = budget(required - 1);
+        assert!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut short,
+            )
+            .is_none()
+        );
+        assert_eq!(short.remaining_work, 0);
+        assert!(short.exhausted);
+    }
+
+    #[test]
+    fn module_augmentation_scan_skips_non_script_side_effect_assets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("style.css"), ".root { color: red }")
+            .expect("write side-effect stylesheet");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 0,
+            max_import_bytes: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import './style.css'",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(&[], &roots, &resolver),
+            Some(Vec::new()),
+        );
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 0);
+        assert_eq!(stats.import_bytes, 0);
+    }
+
+    #[test]
+    fn module_augmentation_scan_uses_an_independent_import_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first = dir.path().join("runtime-first.ts");
+        let second = dir.path().join("runtime-second.ts");
+        let actual = dir.path().join("actual.ts");
+        std::fs::write(&first, "import './runtime-second'").expect("write first runtime module");
+        std::fs::write(&second, "export const value = true")
+            .expect("write second runtime module");
+        std::fs::write(&actual, "export interface Props { value: string }")
+            .expect("write actual type module");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 1,
+            max_import_bytes: 1024,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import './runtime-first'",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert!(vue3_reachable_global_augmentation_files(&[], &roots, &resolver).is_none());
+        assert_eq!(resolver.external_type_session.stats().import_files_read, 0);
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./actual", &resolver),
+            Some(actual.clone()),
+        );
+        assert!(vue3_external_type_source_from_path(&actual, &resolver).is_some());
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.resolution_lookups, 1);
+        assert_eq!(stats.import_files_read, 1);
+    }
+
+    #[test]
+    fn module_augmentation_scan_rejects_resolution_budget_partial_graphs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("z-augmentation.ts"),
+            "export {}; declare global { interface Augmented { value: string } }",
+        )
+        .expect("write augmentation module");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_resolution_lookups: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import './a-missing'\nimport './z-augmentation'",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert!(vue3_reachable_global_augmentation_files(&[], &roots, &resolver).is_none());
+        assert_eq!(resolver.external_type_session.stats().resolution_lookups, 0);
     }
 
     #[test]

@@ -50,6 +50,12 @@ fn vue3_external_type_members_cache_cost(members: &Vue27TypeMembers) -> usize {
                 }),
         )
         .saturating_add(vue3_external_string_vec_cost(&members.errors))
+        .saturating_add(
+            members
+                .interface_heritage
+                .as_ref()
+                .map_or(0, Vue3InterfaceHeritageEvidence::work),
+        )
 }
 
 fn vue3_external_runtime_tuple_cache_cost(tuple: &Vue3RuntimeTypeTuple) -> usize {
@@ -713,9 +719,44 @@ fn vue3_external_emits_cache_cost(emits: &Vue27EmitsType) -> usize {
         .saturating_add(vue3_external_string_vec_cost(&emits.events))
 }
 
-fn vue3_external_type_context_cache_cost(context: &Vue27TypeContext) -> usize {
-    let generic_aliases_cost =
-        vue3_external_generic_aliases_cache_cost(&context.generic_type_aliases);
+fn vue3_external_generic_aliases_shallow_clone_work(
+    aliases: &BTreeMap<String, Vue3GenericTypeAlias>,
+) -> usize {
+    vue3_external_string_map_cost(aliases, |alias| {
+        vue3_external_generic_alias_payload_cost(alias).saturating_add(
+            std::mem::size_of::<Vue3GenericTypeScope>()
+                .saturating_mul(alias.interface_fragments.len().saturating_add(1)),
+        )
+    })
+}
+
+fn vue3_external_generic_aliases_stability_comparison_work(
+    aliases: &BTreeMap<String, Vue3GenericTypeAlias>,
+) -> usize {
+    let mut work = vue3_external_generic_aliases_shallow_clone_work(aliases);
+    let mut environments = BTreeSet::new();
+    for alias in aliases.values() {
+        let scopes = std::iter::once(&alias.scope)
+            .chain(alias.interface_fragments.iter().map(|fragment| &fragment.scope));
+        for scope in scopes {
+            let Vue3GenericTypeScope::Captured(environment) = scope else {
+                continue;
+            };
+            let identity = std::sync::Arc::as_ptr(environment) as usize;
+            if environments.insert(identity) {
+                work = work.saturating_add(vue3_external_generic_environment_cache_cost(
+                    environment,
+                ));
+            }
+        }
+    }
+    work
+}
+
+fn vue3_external_type_context_cost_with_generic_aliases(
+    context: &Vue27TypeContext,
+    generic_aliases_cost: usize,
+) -> usize {
     [
         vue3_external_string_map_cost(&context.declared_types, |types| {
             vue3_external_string_vec_cost(types)
@@ -809,6 +850,31 @@ fn vue3_external_type_context_cache_cost(context: &Vue27TypeContext) -> usize {
     ]
     .into_iter()
     .fold(0usize, usize::saturating_add)
+}
+
+fn vue3_external_type_context_cache_cost(context: &Vue27TypeContext) -> usize {
+    vue3_external_type_context_cost_with_generic_aliases(
+        context,
+        vue3_external_generic_aliases_cache_cost(&context.generic_type_aliases),
+    )
+}
+
+pub(crate) fn vue3_external_type_context_shallow_clone_work(
+    context: &Vue27TypeContext,
+) -> usize {
+    vue3_external_type_context_cost_with_generic_aliases(
+        context,
+        vue3_external_generic_aliases_shallow_clone_work(&context.generic_type_aliases),
+    )
+}
+
+pub(crate) fn vue3_external_type_context_stability_comparison_work(
+    context: &Vue27TypeContext,
+) -> usize {
+    vue3_external_type_context_cost_with_generic_aliases(
+        context,
+        vue3_external_generic_aliases_stability_comparison_work(&context.generic_type_aliases),
+    )
 }
 
 #[cfg(test)]

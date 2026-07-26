@@ -684,6 +684,52 @@ defineProps<First<string>>()
 }
 
 #[test]
+fn vue3_unrelated_global_declarations_do_not_exhaust_generic_fixed_point_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut files = Vec::new();
+    for index in 0..8 {
+        let file = dir.path().join(format!("global-{index}.d.ts"));
+        let generic = if index == 0 {
+            r#"
+interface Box<T> { boxed: T }
+interface GenericCombination extends Box<string>, Box<number> {}
+"#
+        } else {
+            ""
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "interface Stable{index} {{ value{index}: string }}\n\
+                 type StableAlias{index} = Stable{index}\n{generic}"
+            ),
+        )
+        .expect("write global declaration file");
+        files.push(file);
+    }
+    let context = vue3_global_type_context(
+        &dir.path().join("Comp.vue").to_string_lossy(),
+        &files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        &Vue3TypeResolverContext::default(),
+    );
+
+    for index in 0..8 {
+        for name in [format!("Stable{index}"), format!("StableAlias{index}")] {
+            assert!(
+                vue3_type_context_has_name(&context, &name),
+                "missing {name}; available={:?}",
+                vue3_type_context_names(&context),
+            );
+        }
+    }
+    assert!(context.generic_type_aliases.contains_key("Box"));
+    assert!(vue3_type_context_has_name(&context, "GenericCombination"));
+}
+
+#[test]
 fn vue3_global_merge_rejects_incompatible_complete_type_parameter_lists() {
     let dir = tempfile::tempdir().expect("temp dir");
     let cases = [

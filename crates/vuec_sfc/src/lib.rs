@@ -13,22 +13,22 @@ use oxc_ast::ast::{
     ClassElement, Declaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
     ExportNamedDeclaration, ExportSpecifier, Expression, ForStatementInit, ForStatementLeft,
     FormalParameter, FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier,
-    ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
-    TSFunctionType, TSImportType, TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration,
-    TSInterfaceHeritage, TSLiteral, TSMappedType, TSMappedTypeModifierOperator,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
-    TSTemplateLiteralType, TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
-    TSTypeLiteral, TSTypeName, TSTypeOperatorOperator, TSTypeQuery, TSTypeQueryExprName,
-    TSTypeReference, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-    WithClauseKeyword, WithStatement,
+    ImportExpression, ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty,
+    ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+    TSEnumDeclaration, TSExternalModuleReference, TSFunctionType, TSImportType,
+    TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral,
+    TSMappedType, TSMappedTypeModifierOperator, TSModuleDeclaration, TSModuleDeclarationBody,
+    TSModuleDeclarationName, TSSignature, TSTemplateLiteralType, TSTupleElement, TSType,
+    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
+    TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
+    VariableDeclarationKind, VariableDeclarator, WithClauseKeyword, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use vuec_ast::JsProgramId;

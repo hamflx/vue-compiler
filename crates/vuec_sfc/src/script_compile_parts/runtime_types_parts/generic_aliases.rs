@@ -272,11 +272,13 @@ fn vue3_resolve_generic_interface_fragments(
         ));
         source_parts.push(fragment.source.clone());
     }
+    let interface_heritage = vue3_take_and_merge_interface_heritage_evidence(&mut resolved);
     let (members, errors) = vue3_merge_props_type_members(resolved, false);
     Some(Vue27TypeMembers {
         source: source_parts.join("\n"),
         members,
         errors,
+        interface_heritage,
     })
 }
 

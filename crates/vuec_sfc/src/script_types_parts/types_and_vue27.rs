@@ -52,6 +52,46 @@ pub(crate) struct Vue27TypeMembers {
     pub(crate) source: String,
     pub(crate) members: Vec<Vue27RuntimeProp>,
     pub(crate) errors: Vec<String>,
+    pub(crate) interface_heritage: Option<Vue3InterfaceHeritageEvidence>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Vue3InterfaceHeritageEvidence {
+    pub(crate) own_members:
+        BTreeMap<String, BTreeSet<Vue3InterfaceHeritageMemberEvidence>>,
+    pub(crate) inherited_members:
+        BTreeMap<String, BTreeSet<Vue3InterfaceHeritageMemberEvidence>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Vue3InterfaceHeritageMemberEvidence {
+    pub(crate) exact_primitive_types: Option<BTreeSet<String>>,
+    pub(crate) required: Option<bool>,
+}
+
+impl Vue3InterfaceHeritageEvidence {
+    pub(crate) fn work(&self) -> usize {
+        [&self.own_members, &self.inherited_members]
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .fold(0usize, |work, (key, members)| {
+                members.iter().fold(
+                    work.saturating_add(key.len()).saturating_add(1),
+                    |work, member| {
+                        let work = work
+                            .saturating_add(std::mem::size_of::<
+                                Vue3InterfaceHeritageMemberEvidence,
+                            >())
+                            .saturating_add(1);
+                        member.exact_primitive_types.as_ref().map_or(work, |types| {
+                            types.iter().fold(work, |work, ty| {
+                                work.saturating_add(ty.len()).saturating_add(1)
+                            })
+                        })
+                    },
+                )
+            })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

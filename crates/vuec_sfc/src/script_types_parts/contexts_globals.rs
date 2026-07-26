@@ -59,8 +59,22 @@ pub(crate) fn vue3_normal_script_type_context(
     global_type_files: &[String],
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
-    let mut context =
-        vue3_global_type_context(&descriptor.filename, global_type_files, type_resolver);
+    let inline_module_sources = descriptor
+        .script
+        .iter()
+        .chain(&descriptor.script_setup)
+        .map(|script| Vue3InlineModuleSource {
+            filename: &descriptor.filename,
+            source: script.content.as_str(),
+            source_type: script_source_type_from_attrs(&script.attrs),
+        })
+        .collect::<Vec<_>>();
+    let mut context = vue3_global_type_context_with_module_sources(
+        &descriptor.filename,
+        global_type_files,
+        &inline_module_sources,
+        type_resolver,
+    );
     let Some(script) = descriptor.script.as_ref() else {
         return context;
     };
@@ -700,9 +714,236 @@ enum Vue3GlobalProjectionAccounting {
     InternalFixedPoint,
 }
 
+fn vue3_global_generic_propagation_horizon(
+    context: &Vue27TypeContext,
+    kinds: &Vue3GlobalDeclarationKinds,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<usize> {
+    let root_work = context.generic_type_aliases.keys().fold(0usize, |work, name| {
+        work
+            .saturating_add(name.len())
+            .saturating_add(std::mem::size_of::<(bool, String)>())
+            .saturating_add(1)
+    });
+    let reference_node_work = kinds
+        .type_declaration_type_references
+        .values()
+        .chain(kinds.type_declaration_value_references.values())
+        .chain(kinds.value_declaration_type_references.values())
+        .chain(kinds.value_declaration_value_references.values())
+        .fold(0usize, |work, references| {
+            work.saturating_add(
+                references
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(bool, String)>())
+                    .saturating_mul(2),
+            )
+        });
+    if !namespace_budget.reserve(
+        kinds
+            .work()
+            .saturating_mul(2)
+            .saturating_add(root_work.saturating_mul(2))
+            .saturating_add(reference_node_work),
+    ) {
+        return None;
+    }
+    let mut reachable = BTreeSet::<(bool, String)>::new();
+    let mut pending = Vec::new();
+    for name in context.generic_type_aliases.keys() {
+        let node = (false, name.clone());
+        reachable.insert(node.clone());
+        pending.push(node);
+    }
+    while let Some((value_space, name)) = pending.pop() {
+        let (type_references, value_references) = if value_space {
+            (
+                kinds.value_declaration_type_references.get(&name),
+                kinds.value_declaration_value_references.get(&name),
+            )
+        } else {
+            (
+                kinds.type_declaration_type_references.get(&name),
+                kinds.type_declaration_value_references.get(&name),
+            )
+        };
+        for (reference_value_space, references) in
+            [(false, type_references), (true, value_references)]
+        {
+            let Some(references) = references else {
+                continue;
+            };
+            for reference in references {
+                let node = (reference_value_space, reference.clone());
+                if reachable.insert(node.clone()) {
+                    pending.push(node);
+                }
+            }
+        }
+    }
+    Some(reachable.len().saturating_add(1).max(1))
+}
+
+fn vue3_global_generic_alias_payloads_eq(
+    left: &BTreeMap<String, Vue3GenericTypeAlias>,
+    right: &BTreeMap<String, Vue3GenericTypeAlias>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|((left_name, left), (right_name, right))| {
+            left_name == right_name && vue3_generic_type_alias_semantically_eq(left, right)
+        })
+}
+
+fn vue3_global_generic_environment_stability_eq(
+    left: &Vue3GenericTypeEnvironment,
+    right: &Vue3GenericTypeEnvironment,
+) -> bool {
+    left.definition_filename == right.definition_filename
+        && vue3_global_generic_alias_payloads_eq(
+            &left.generic_type_aliases,
+            &right.generic_type_aliases,
+        )
+        && left.declared_types == right.declared_types
+        && left.define_model_declared_types == right.define_model_declared_types
+        && left.type_query_declared_types == right.type_query_declared_types
+        && left.define_model_type_query_declared_types
+            == right.define_model_type_query_declared_types
+        && left.keyof_type_query_declared_types == right.keyof_type_query_declared_types
+        && left.props_type_declarations == right.props_type_declarations
+        && left.keyof_runtime_type_declarations == right.keyof_runtime_type_declarations
+        && left.tuple_runtime_type_declarations == right.tuple_runtime_type_declarations
+        && left.define_model_tuple_runtime_type_declarations
+            == right.define_model_tuple_runtime_type_declarations
+        && left.array_element_runtime_type_declarations
+            == right.array_element_runtime_type_declarations
+        && left.define_model_array_element_runtime_type_declarations
+            == right.define_model_array_element_runtime_type_declarations
+        && left.parameter_tuple_runtime_type_declarations
+            == right.parameter_tuple_runtime_type_declarations
+        && left.define_model_parameter_tuple_runtime_type_declarations
+            == right.define_model_parameter_tuple_runtime_type_declarations
+        && left.constructor_parameter_tuple_runtime_type_declarations
+            == right.constructor_parameter_tuple_runtime_type_declarations
+        && left.define_model_constructor_parameter_tuple_runtime_type_declarations
+            == right.define_model_constructor_parameter_tuple_runtime_type_declarations
+        && left.return_type_runtime_type_declarations
+            == right.return_type_runtime_type_declarations
+        && left.define_model_return_type_runtime_type_declarations
+            == right.define_model_return_type_runtime_type_declarations
+        && left.props_options_type_declarations == right.props_options_type_declarations
+        && left.return_type_props_options_declarations
+            == right.return_type_props_options_declarations
+        && left.string_literal_type_declarations == right.string_literal_type_declarations
+        && left.ordered_string_literal_type_declarations
+            == right.ordered_string_literal_type_declarations
+        && left.unresolved_import_sources == right.unresolved_import_sources
+        && left.silent_unresolved_type_names == right.silent_unresolved_type_names
+}
+
+fn vue3_global_generic_scope_stability_eq(
+    left: &Vue3GenericTypeScope,
+    right: &Vue3GenericTypeScope,
+) -> bool {
+    match (left, right) {
+        (Vue3GenericTypeScope::Local, Vue3GenericTypeScope::Local) => true,
+        (Vue3GenericTypeScope::Captured(left), Vue3GenericTypeScope::Captured(right)) => {
+            std::sync::Arc::ptr_eq(left, right)
+                || vue3_global_generic_environment_stability_eq(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn vue3_global_generic_alias_stability_eq(
+    left: &Vue3GenericTypeAlias,
+    right: &Vue3GenericTypeAlias,
+) -> bool {
+    vue3_generic_type_alias_semantically_eq(left, right)
+        && vue3_global_generic_scope_stability_eq(&left.scope, &right.scope)
+        && left
+            .interface_fragments
+            .iter()
+            .zip(&right.interface_fragments)
+            .all(|(left, right)| {
+                vue3_global_generic_scope_stability_eq(&left.scope, &right.scope)
+            })
+}
+
+fn vue3_global_generic_aliases_stability_eq(
+    left: &BTreeMap<String, Vue3GenericTypeAlias>,
+    right: &BTreeMap<String, Vue3GenericTypeAlias>,
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_name, left), (right_name, right))| {
+                left_name == right_name && vue3_global_generic_alias_stability_eq(left, right)
+            })
+}
+
+fn vue3_global_type_context_stability_eq(
+    left: &Vue27TypeContext,
+    right: &Vue27TypeContext,
+) -> bool {
+    left.declared_types == right.declared_types
+        && left.define_model_declared_types == right.define_model_declared_types
+        && left.type_query_declared_types == right.type_query_declared_types
+        && left.define_model_type_query_declared_types
+            == right.define_model_type_query_declared_types
+        && left.keyof_type_query_declared_types == right.keyof_type_query_declared_types
+        && left.props_type_declarations == right.props_type_declarations
+        && left.keyof_runtime_type_declarations == right.keyof_runtime_type_declarations
+        && left.tuple_runtime_type_declarations == right.tuple_runtime_type_declarations
+        && left.define_model_tuple_runtime_type_declarations
+            == right.define_model_tuple_runtime_type_declarations
+        && left.array_element_runtime_type_declarations
+            == right.array_element_runtime_type_declarations
+        && left.define_model_array_element_runtime_type_declarations
+            == right.define_model_array_element_runtime_type_declarations
+        && left.parameter_tuple_runtime_type_declarations
+            == right.parameter_tuple_runtime_type_declarations
+        && left.define_model_parameter_tuple_runtime_type_declarations
+            == right.define_model_parameter_tuple_runtime_type_declarations
+        && left.constructor_parameter_tuple_runtime_type_declarations
+            == right.constructor_parameter_tuple_runtime_type_declarations
+        && left.define_model_constructor_parameter_tuple_runtime_type_declarations
+            == right.define_model_constructor_parameter_tuple_runtime_type_declarations
+        && left.return_type_runtime_type_declarations
+            == right.return_type_runtime_type_declarations
+        && left.define_model_return_type_runtime_type_declarations
+            == right.define_model_return_type_runtime_type_declarations
+        && left.props_options_type_declarations == right.props_options_type_declarations
+        && left.return_type_props_options_declarations
+            == right.return_type_props_options_declarations
+        && vue3_global_generic_aliases_stability_eq(
+            &left.generic_type_aliases,
+            &right.generic_type_aliases,
+        )
+        && left.string_literal_type_declarations == right.string_literal_type_declarations
+        && left.ordered_string_literal_type_declarations
+            == right.ordered_string_literal_type_declarations
+        && left.emits_type_declarations == right.emits_type_declarations
+        && left.type_sources == right.type_sources
+        && left.type_direct_deps == right.type_direct_deps
+        && left.type_deps == right.type_deps
+        && left.unresolved_import_sources == right.unresolved_import_sources
+        && left.silent_unresolved_type_names == right.silent_unresolved_type_names
+}
+
+#[cfg(test)]
 pub(crate) fn vue3_global_type_context(
     filename: &str,
     global_type_files: &[String],
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue27TypeContext {
+    vue3_global_type_context_with_module_sources(filename, global_type_files, &[], type_resolver)
+}
+
+fn vue3_global_type_context_with_module_sources(
+    filename: &str,
+    global_type_files: &[String],
+    inline_module_sources: &[Vue3InlineModuleSource<'_>],
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     let mut seen = BTreeSet::new();
@@ -719,16 +960,38 @@ pub(crate) fn vue3_global_type_context(
         }
         paths.push(path);
     }
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Some(source) = vue3_external_global_type_source_from_path(&path, type_resolver) else {
+            return Vue27TypeContext::default();
+        };
+        files.push(Vue3GlobalTypeFile { path, source });
+    }
+    let Some(augmentation_paths) = vue3_reachable_global_augmentation_files(
+        &files,
+        inline_module_sources,
+        type_resolver,
+    ) else {
+        return Vue27TypeContext::default();
+    };
+    for path in augmentation_paths {
+        if seen.insert(vue3_external_type_context_cache_key(
+            &path,
+            &type_resolver.typescript_version,
+        )) {
+            let Some(source) = vue3_external_global_type_source_from_path(&path, type_resolver)
+            else {
+                return Vue27TypeContext::default();
+            };
+            files.push(Vue3GlobalTypeFile { path, source });
+        }
+    }
 
     let mut context = Vue27TypeContext::default();
     let mut kinds = Vue3GlobalDeclarationKinds::default();
     let mut accepted = Vec::new();
     let mut merge_budget = Vue3NamespaceProjectionBudget::default();
-    for path in paths {
-        let Some(source) = vue3_external_global_type_source_from_path(&path, type_resolver) else {
-            continue;
-        };
-        let file = Vue3GlobalTypeFile { path, source };
+    for file in files {
         if !reserve_vue3_global_type_file_rebuild_work(&file, &context, &mut merge_budget) {
             return Vue27TypeContext::default();
         }
@@ -760,21 +1023,43 @@ pub(crate) fn vue3_global_type_context(
         accepted.push(file);
     }
     if accepted.len() < 2 {
-        return context;
+        return if apply_vue3_global_interface_heritage_conflicts(
+            &mut context,
+            &mut kinds,
+            &mut merge_budget,
+        ) {
+            context
+        } else {
+            Vue27TypeContext::default()
+        };
     }
 
     let has_generic_declarations = !context.generic_type_aliases.is_empty();
-    // A Jacobi round advances one declaration edge. Captured generic scopes use
-    // pointer identity, so generic contexts run the finite declaration-graph
-    // bound instead of comparing freshly allocated environments for convergence.
     let convergence_limit = context
         .type_sources
         .len()
         .saturating_add(accepted.len())
         .saturating_add(1);
+    // A Jacobi round advances one type/value declaration edge. Fresh captured
+    // environments retain older Arc DAGs, so pointer equality cannot detect
+    // convergence; require enough shallow-stable rounds to cover every graph
+    // node reachable from a generic declaration instead.
+    let generic_propagation_horizon = if has_generic_declarations {
+        let Some(horizon) = vue3_global_generic_propagation_horizon(
+            &context,
+            &kinds,
+            &mut merge_budget,
+        ) else {
+            return Vue27TypeContext::default();
+        };
+        horizon.min(convergence_limit)
+    } else {
+        1
+    };
+    let mut stable_rounds = 0usize;
     let mut converged = has_generic_declarations;
     for _ in 0..convergence_limit {
-        let clone_work = vue3_external_type_context_cache_cost(&context)
+        let clone_work = vue3_external_type_context_shallow_clone_work(&context)
             .saturating_add(kinds.work());
         if !merge_budget.reserve(clone_work) {
             return Vue27TypeContext::default();
@@ -817,30 +1102,174 @@ pub(crate) fn vue3_global_type_context(
         if !completed {
             return Vue27TypeContext::default();
         }
-        let stable = if has_generic_declarations {
-            false
+        let comparison_work = if has_generic_declarations {
+            vue3_external_type_context_stability_comparison_work(&context)
+                .saturating_add(vue3_external_type_context_stability_comparison_work(
+                    &next_context,
+                ))
         } else {
-            let comparison_work = vue3_external_type_context_cache_cost(&context)
+            vue3_external_type_context_cache_cost(&context)
                 .saturating_add(vue3_external_type_context_cache_cost(&next_context))
-                .saturating_add(kinds.work())
-                .saturating_add(next_kinds.work());
-            if !merge_budget.reserve(comparison_work) {
-                return Vue27TypeContext::default();
-            }
-            next_context == context && next_kinds == kinds
+        }
+        .saturating_add(kinds.work())
+        .saturating_add(next_kinds.work());
+        if !merge_budget.reserve(comparison_work) {
+            return Vue27TypeContext::default();
+        }
+        let stable = next_kinds == kinds
+            && if has_generic_declarations {
+                vue3_global_type_context_stability_eq(&context, &next_context)
+            } else {
+                next_context == context
+            };
+        if stable {
+            stable_rounds = stable_rounds.saturating_add(1);
+        } else {
+            stable_rounds = 0;
         };
         context = next_context;
         kinds = next_kinds;
-        if stable {
+        if stable_rounds >= generic_propagation_horizon {
             converged = true;
             break;
         }
     }
-    if converged {
+    if converged
+        && apply_vue3_global_interface_heritage_conflicts(
+            &mut context,
+            &mut kinds,
+            &mut merge_budget,
+        )
+    {
         context
     } else {
         Vue27TypeContext::default()
     }
+}
+
+fn apply_vue3_global_interface_heritage_conflicts(
+    context: &mut Vue27TypeContext,
+    kinds: &mut Vue3GlobalDeclarationKinds,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> bool {
+    let comparison_work = kinds.interface_names.iter().fold(0usize, |work, name| {
+        let heritage_work = context
+            .props_type_declarations
+            .get(name)
+            .and_then(|members| members.interface_heritage.as_ref())
+            .map_or(0, Vue3InterfaceHeritageEvidence::work);
+        work
+            .saturating_add(name.len())
+            .saturating_add(heritage_work.saturating_mul(2))
+            .saturating_add(1)
+    });
+    if !namespace_budget.reserve(comparison_work) {
+        return false;
+    }
+    let root_type_conflicts = kinds
+        .interface_names
+        .iter()
+        .filter(|name| {
+            !kinds.class_names.contains(*name)
+                && context
+                    .props_type_declarations
+                    .get(*name)
+                    .and_then(|members| members.interface_heritage.as_ref())
+                    .is_some_and(vue3_interface_heritage_has_proven_conflict)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if root_type_conflicts.is_empty() {
+        return true;
+    }
+    let Some((mut blocked_type_names, mut blocked_value_names)) =
+        vue3_global_blocked_declaration_spaces(
+            kinds,
+            &Vue3GlobalDeclarationKinds::default(),
+            &root_type_conflicts,
+            &BTreeSet::new(),
+            namespace_budget,
+        )
+    else {
+        return false;
+    };
+    blocked_type_names.retain(|name| kinds.declaration_counts.contains_key(name));
+    blocked_value_names.retain(|name| kinds.declaration_counts.contains_key(name));
+    let type_mutation_work = blocked_type_names.iter().fold(0usize, |work, name| {
+        let preserved_value_work = (!blocked_value_names.contains(name)
+            && kinds.value_names.contains(name))
+        .then(|| kinds.value_type_projections.get(name))
+        .flatten()
+        .map_or(0, Vue3ValueTypeProjection::work);
+        work
+            .saturating_add(vue3_external_type_alias_projection_work(
+                context,
+                name,
+                name.len(),
+                "",
+            ))
+            .saturating_add(name.len().saturating_mul(9))
+            .saturating_add(preserved_value_work.saturating_mul(2))
+            .saturating_add(1)
+    });
+    let value_mutation_work = blocked_value_names.iter().fold(0usize, |work, name| {
+        work
+            .saturating_add(vue3_external_type_alias_projection_work(
+                context,
+                name,
+                name.len(),
+                "",
+            ))
+            .saturating_add(name.len().saturating_mul(4))
+            .saturating_add(1)
+    });
+    let conflict_tracking_work = root_type_conflicts
+        .iter()
+        .chain(&blocked_type_names)
+        .chain(&blocked_value_names)
+        .fold(0usize, |work, name| {
+            work.saturating_add(name.len()).saturating_add(1)
+        });
+    let mutation_work = type_mutation_work
+        .saturating_add(value_mutation_work)
+        .saturating_add(conflict_tracking_work);
+    if !namespace_budget.reserve(mutation_work) {
+        return false;
+    }
+    let preserved_value_projections = blocked_type_names
+        .difference(&blocked_value_names)
+        .filter(|name| kinds.value_names.contains(*name))
+        .map(|name| {
+            (
+                name.clone(),
+                kinds
+                    .value_type_projections
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for name in &blocked_type_names {
+        clear_vue3_conflicting_global_type_projection(context, name);
+        if let Some(projection) = preserved_value_projections.get(name) {
+            projection.apply(context, name);
+        }
+        context.silent_unresolved_type_names.insert(name.clone());
+    }
+    for name in blocked_value_names.difference(&blocked_type_names) {
+        clear_vue3_conflicting_global_value_projection(context, name);
+    }
+    kinds
+        .conflicting_type_names
+        .extend(root_type_conflicts.iter().cloned());
+    kinds.blocked_type_names.extend(
+        blocked_type_names
+            .into_iter()
+            .filter(|name| !root_type_conflicts.contains(name)),
+    );
+    kinds.blocked_value_names.extend(blocked_value_names);
+    true
 }
 
 fn reserve_vue3_global_type_file_rebuild_work(
@@ -5977,6 +6406,59 @@ mod vue3_global_merge_budget_tests {
         (projection.context, projection.kinds)
     }
 
+    fn interface_heritage_conflict_target(
+    ) -> (Vue27TypeContext, Vue3GlobalDeclarationKinds) {
+        let name = "Conflict".to_string();
+        let mut context = Vue27TypeContext::default();
+        context.props_type_declarations.insert(
+            name.clone(),
+            Vue27TypeMembers {
+                source: "interface Conflict extends Left, Right {}".to_string(),
+                members: Vec::new(),
+                errors: Vec::new(),
+                interface_heritage: Some(Vue3InterfaceHeritageEvidence {
+                    own_members: BTreeMap::new(),
+                    inherited_members: BTreeMap::from([(
+                        "value".to_string(),
+                        BTreeSet::from([
+                            Vue3InterfaceHeritageMemberEvidence {
+                                exact_primitive_types: Some(BTreeSet::from([
+                                    "number".to_string(),
+                                ])),
+                                required: Some(true),
+                            },
+                            Vue3InterfaceHeritageMemberEvidence {
+                                exact_primitive_types: Some(BTreeSet::from([
+                                    "string".to_string(),
+                                ])),
+                                required: Some(true),
+                            },
+                        ]),
+                    )]),
+                }),
+            },
+        );
+        context
+            .type_sources
+            .insert(name.clone(), "global.d.ts".to_string());
+        let mut kinds = Vue3GlobalDeclarationKinds::default();
+        kinds.interface_names.insert(name);
+        kinds.finish_file_scan();
+        (context, kinds)
+    }
+
+    fn captured_generic_alias(
+        environment: Vue3GenericTypeEnvironment,
+    ) -> Vue3GenericTypeAlias {
+        Vue3GenericTypeAlias {
+            source: "type Box<T> = T".to_string(),
+            kind: Vue3GenericTypeAliasKind::TypeAlias,
+            params: vec!["T".to_string()],
+            scope: Vue3GenericTypeScope::Captured(std::sync::Arc::new(environment)),
+            interface_fragments: Vec::new(),
+        }
+    }
+
     fn leading_work(source: &Vue3GlobalTypeFileProjection) -> usize {
         vue3_external_type_context_cache_cost(&source.context)
             .saturating_add(source.kinds.work())
@@ -6068,6 +6550,222 @@ mod vue3_global_merge_budget_tests {
         assert_eq!(kinds, kinds_snapshot);
         assert_eq!(shared.remaining_work, 0);
         assert!(shared.exhausted);
+    }
+
+    #[test]
+    fn interface_heritage_conflict_budget_is_exact_and_failure_atomic() {
+        let (mut measured_context, mut measured_kinds) =
+            interface_heritage_conflict_target();
+        let mut measured = budget(usize::MAX);
+        assert!(apply_vue3_global_interface_heritage_conflicts(
+            &mut measured_context,
+            &mut measured_kinds,
+            &mut measured,
+        ));
+        let required = usize::MAX - measured.remaining_work;
+        assert!(required > 1);
+        assert!(!vue3_type_context_has_name(&measured_context, "Conflict"));
+        assert!(measured_context
+            .silent_unresolved_type_names
+            .contains("Conflict"));
+
+        let (mut exact_context, mut exact_kinds) = interface_heritage_conflict_target();
+        let mut exact = budget(required);
+        assert!(apply_vue3_global_interface_heritage_conflicts(
+            &mut exact_context,
+            &mut exact_kinds,
+            &mut exact,
+        ));
+        assert_eq!(exact.remaining_work, 0);
+        assert!(!exact.exhausted);
+
+        let (mut short_context, mut short_kinds) = interface_heritage_conflict_target();
+        let context_snapshot = short_context.clone();
+        let kinds_snapshot = short_kinds.clone();
+        let mut short = budget(required - 1);
+        assert!(!apply_vue3_global_interface_heritage_conflicts(
+            &mut short_context,
+            &mut short_kinds,
+            &mut short,
+        ));
+        assert_eq!(short_context, context_snapshot);
+        assert_eq!(short_kinds, kinds_snapshot);
+        assert_eq!(short.remaining_work, 0);
+        assert!(short.exhausted);
+    }
+
+    #[test]
+    fn generic_global_stability_compares_captured_environment_semantics() {
+        let environment = Vue3GenericTypeEnvironment {
+            definition_filename: Some("global.d.ts".to_string()),
+            declared_types: BTreeMap::from([(
+                "Leaf".to_string(),
+                vec!["String".to_string()],
+            )]),
+            ..Vue3GenericTypeEnvironment::default()
+        };
+        let mut left = Vue27TypeContext::default();
+        left.generic_type_aliases
+            .insert("Box".to_string(), captured_generic_alias(environment.clone()));
+        let mut right = Vue27TypeContext::default();
+        right
+            .generic_type_aliases
+            .insert("Box".to_string(), captured_generic_alias(environment));
+
+        assert_ne!(left, right);
+        assert!(vue3_global_type_context_stability_eq(&left, &right));
+
+        let Vue3GenericTypeScope::Captured(environment) = &mut right
+            .generic_type_aliases
+            .get_mut("Box")
+            .expect("right alias")
+            .scope
+        else {
+            panic!("captured right alias");
+        };
+        std::sync::Arc::make_mut(environment)
+            .declared_types
+            .insert("Leaf".to_string(), vec!["Number".to_string()]);
+        assert!(!vue3_global_type_context_stability_eq(&left, &right));
+
+        let Vue3GenericTypeScope::Captured(environment) = &mut right
+            .generic_type_aliases
+            .get_mut("Box")
+            .expect("right alias")
+            .scope
+        else {
+            panic!("captured right alias");
+        };
+        let environment = std::sync::Arc::make_mut(environment);
+        environment.declared_types = BTreeMap::from([(
+            "Leaf".to_string(),
+            vec!["String".to_string()],
+        )]);
+        environment.definition_filename = Some("other.d.ts".to_string());
+        assert!(!vue3_global_type_context_stability_eq(&left, &right));
+    }
+
+    #[test]
+    fn generic_global_propagation_horizon_traverses_type_and_value_spaces() {
+        let mut context = Vue27TypeContext::default();
+        context.generic_type_aliases.insert(
+            "Root".to_string(),
+            Vue3GenericTypeAlias {
+                source: "type Root<T> = ReturnType<typeof factory>".to_string(),
+                kind: Vue3GenericTypeAliasKind::TypeAlias,
+                params: vec!["T".to_string()],
+                scope: Vue3GenericTypeScope::Local,
+                interface_fragments: Vec::new(),
+            },
+        );
+        let mut kinds = Vue3GlobalDeclarationKinds::default();
+        kinds
+            .type_declaration_value_references
+            .insert("Root".to_string(), BTreeSet::from(["factory".to_string()]));
+        kinds
+            .value_declaration_type_references
+            .insert("factory".to_string(), BTreeSet::from(["Middle".to_string()]));
+        kinds.type_declaration_type_references.insert(
+            "Middle".to_string(),
+            BTreeSet::from(["Leaf".to_string()]),
+        );
+        kinds.type_declaration_type_references.insert(
+            "Leaf".to_string(),
+            BTreeSet::from(["Root".to_string()]),
+        );
+        let mut measured = budget(usize::MAX);
+        assert_eq!(
+            vue3_global_generic_propagation_horizon(&context, &kinds, &mut measured),
+            Some(5),
+        );
+        let required = usize::MAX - measured.remaining_work;
+        assert!(required > 0);
+
+        let mut exact = budget(required);
+        assert_eq!(
+            vue3_global_generic_propagation_horizon(&context, &kinds, &mut exact),
+            Some(5),
+        );
+        assert_eq!(exact.remaining_work, 0);
+        assert!(!exact.exhausted);
+
+        let mut short = budget(required - 1);
+        assert_eq!(
+            vue3_global_generic_propagation_horizon(&context, &kinds, &mut short),
+            None,
+        );
+        assert_eq!(short.remaining_work, 0);
+        assert!(short.exhausted);
+    }
+
+    #[test]
+    fn reachable_global_augmentation_loading_is_budget_atomic() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = dir.path().join("base.d.ts");
+        let augmentation = dir.path().join("augmentation.ts");
+        let base_source = "interface Base { base: string }";
+        let augmentation_source =
+            "export {}; declare global { interface Augmented { value: number } }";
+        std::fs::write(&base, base_source).expect("write base global type");
+        std::fs::write(&augmentation, augmentation_source)
+            .expect("write imported global augmentation");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let files = [base.to_string_lossy().to_string()];
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import './augmentation'",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+        let total_bytes = base_source.len().saturating_add(augmentation_source.len());
+
+        let exact_resolver = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_global_files: 2,
+                    max_global_bytes: total_bytes,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        let exact = vue3_global_type_context_with_module_sources(
+            &filename,
+            &files,
+            &roots,
+            &exact_resolver,
+        );
+        assert!(vue3_type_context_has_name(&exact, "Base"));
+        assert!(vue3_type_context_has_name(&exact, "Augmented"));
+        let exact_stats = exact_resolver.external_type_session.stats();
+        assert_eq!(exact_stats.global_files_read, 2);
+        assert_eq!(exact_stats.global_bytes, total_bytes);
+        assert_eq!(exact_stats.import_files_read, 0);
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_global_files: 1,
+                max_global_bytes: total_bytes,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_global_files: 2,
+                max_global_bytes: total_bytes - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+                ..Vue3TypeResolverContext::default()
+            };
+            let context = vue3_global_type_context_with_module_sources(
+                &filename,
+                &files,
+                &roots,
+                &resolver,
+            );
+            assert_eq!(context, Vue27TypeContext::default());
+            assert_eq!(resolver.external_type_session.stats().import_files_read, 0);
+        }
     }
 }
 

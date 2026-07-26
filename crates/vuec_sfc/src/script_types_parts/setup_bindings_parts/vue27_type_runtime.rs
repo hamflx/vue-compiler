@@ -55,6 +55,7 @@ pub(crate) fn vue27_type_members_from_literal(
             .to_string(),
         members: vue27_runtime_props_from_signatures(source, &literal.members, analysis),
         errors: Vec::new(),
+        interface_heritage: None,
     }
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn vue27_type_members_from_interface_body(
             .to_string(),
         members: vue27_runtime_props_from_signatures(source, &body.body, analysis),
         errors: Vec::new(),
+        interface_heritage: None,
     }
 }
 

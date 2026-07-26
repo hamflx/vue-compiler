@@ -11,6 +11,7 @@ pub(crate) fn vue3_type_members_from_literal(
             .to_string(),
         members,
         errors,
+        interface_heritage: None,
     }
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn vue3_type_members_from_mapped_type(
             })
             .collect(),
         errors: Vec::new(),
+        interface_heritage: None,
     })
 }
 
@@ -110,6 +112,7 @@ pub(crate) fn vue3_type_members_from_record_type(
             })
             .collect(),
         errors: Vec::new(),
+        interface_heritage: None,
     })
 }
 
@@ -126,6 +129,7 @@ pub(crate) fn vue3_type_members_from_interface_body(
             .to_string(),
         members,
         errors,
+        interface_heritage: None,
     }
 }
 
@@ -135,6 +139,19 @@ pub(crate) fn vue3_type_members_from_interface(
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Vue27TypeMembers {
     let mut members = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
+    let mut interface_heritage = Vue3InterfaceHeritageEvidence {
+        own_members: members.members.iter().fold(
+            BTreeMap::<String, BTreeSet<Vue3InterfaceHeritageMemberEvidence>>::new(),
+            |mut own_members, member| {
+                own_members
+                    .entry(member.key.clone())
+                    .or_default()
+                    .insert(vue3_direct_interface_member_evidence(member));
+                own_members
+            },
+        ),
+        inherited_members: BTreeMap::new(),
+    };
     for heritage in &declaration.extends {
         if vue3_interface_heritage_has_vue_ignore(source, heritage) {
             continue;
@@ -144,6 +161,15 @@ pub(crate) fn vue3_type_members_from_interface(
             members.errors.push(vue3_failed_extends_base_type_error());
             continue;
         };
+        if base.errors.is_empty() {
+            for member in &base.members {
+                interface_heritage
+                    .inherited_members
+                    .entry(member.key.clone())
+                    .or_default()
+                    .insert(vue3_inherited_interface_member_evidence(&base, member));
+            }
+        }
         members.errors.extend(base.errors);
         for prop in base.members {
             if !members.members.iter().any(|member| member.key == prop.key) {
@@ -151,6 +177,7 @@ pub(crate) fn vue3_type_members_from_interface(
             }
         }
     }
+    members.interface_heritage = Some(interface_heritage);
     members
 }
 
@@ -181,16 +208,20 @@ pub(crate) fn vue3_type_members_from_interface_declarations(
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Vue27TypeMembers {
     let source_text = vue3_interface_declarations_source(source, declarations);
+    let mut resolved = declarations
+        .iter()
+        .map(|declaration| vue3_type_members_from_interface(source, declaration, analysis))
+        .collect::<Vec<_>>();
+    let interface_heritage = vue3_take_and_merge_interface_heritage_evidence(&mut resolved);
     let (members, errors) = vue3_merge_props_type_members(
-        declarations
-            .iter()
-            .map(|declaration| vue3_type_members_from_interface(source, declaration, analysis)),
+        resolved,
         false,
     );
     Vue27TypeMembers {
         source: source_text,
         members,
         errors,
+        interface_heritage,
     }
 }
 
