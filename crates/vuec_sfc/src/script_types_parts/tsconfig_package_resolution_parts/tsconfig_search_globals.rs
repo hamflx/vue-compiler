@@ -120,6 +120,74 @@ impl Vue3TsconfigFileSpecs {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct Vue3TsconfigGlobalTypePackageSpecs {
+    types: Option<std::sync::Arc<[String]>>,
+    type_roots: Option<Vue3TsconfigFileSpecList>,
+}
+
+impl Vue3TsconfigGlobalTypePackageSpecs {
+    fn overlay(&mut self, overlay: Self) {
+        if overlay.types.is_some() {
+            self.types = overlay.types;
+        }
+        if overlay.type_roots.is_some() {
+            self.type_roots = overlay.type_roots;
+        }
+    }
+
+    fn apply_direct(
+        &mut self,
+        value: &serde_json::Value,
+        config_dir: &Path,
+        template_config_dir: &Path,
+    ) {
+        let Some(compiler_options) = value
+            .get("compilerOptions")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return;
+        };
+        if let Some(types) = compiler_options.get("types") {
+            self.types = Some(std::sync::Arc::from(vue3_tsconfig_string_array(Some(
+                types,
+            ))));
+        }
+        if let Some(type_roots) = compiler_options.get("typeRoots") {
+            self.type_roots = Some(Vue3TsconfigFileSpecList::new(
+                type_roots,
+                config_dir,
+                template_config_dir,
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Vue3TsconfigGlobalSpecs {
+    file_specs: Vue3TsconfigFileSpecs,
+    type_package_specs: Vue3TsconfigGlobalTypePackageSpecs,
+}
+
+impl Vue3TsconfigGlobalSpecs {
+    fn overlay(&mut self, overlay: Self) {
+        self.file_specs.overlay(overlay.file_specs);
+        self.type_package_specs.overlay(overlay.type_package_specs);
+    }
+
+    fn apply_direct(
+        &mut self,
+        value: &serde_json::Value,
+        config_dir: &Path,
+        template_config_dir: &Path,
+    ) {
+        self.file_specs
+            .apply_direct(value, config_dir, template_config_dir);
+        self.type_package_specs
+            .apply_direct(value, config_dir, template_config_dir);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Vue3TsconfigTypeRoots {
     paths: std::sync::Arc<[PathBuf]>,
@@ -130,8 +198,8 @@ struct Vue3TsconfigTypeRoots {
 struct Vue3TsconfigGraphTraversal {
     seen_states: BTreeSet<Vue3TsconfigGraphStateKey>,
     active_identities: BTreeSet<PathBuf>,
-    global_file_specs: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigFileSpecs>,
-    materialized_global_file_configs: BTreeSet<Vue3TsconfigGraphStateKey>,
+    global_specs: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigGlobalSpecs>,
+    materialized_global_configs: BTreeSet<Vue3TsconfigGraphStateKey>,
 }
 
 fn vue3_tsconfig_graph_state_key(
@@ -769,26 +837,26 @@ pub(crate) fn vue3_tsconfig_global_type_files(
 fn vue3_tsconfig_global_type_files_from_config(
     config_path: &Path,
     template_config_dir: &Path,
-    materialize_file_specs: bool,
+    materialize_global_specs: bool,
     traversal: &mut Vue3TsconfigGraphTraversal,
     seen_files: &mut BTreeSet<String>,
     files: &mut Vec<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
     depth: usize,
-) -> Option<Vue3TsconfigFileSpecs> {
+) -> Option<Vue3TsconfigGlobalSpecs> {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
     let state_key = vue3_tsconfig_graph_state_key(config_path, template_config_dir);
-    if let Some(file_specs) = traversal.global_file_specs.get(&state_key).cloned() {
-        if materialize_file_specs {
+    if let Some(global_specs) = traversal.global_specs.get(&state_key).cloned() {
+        if materialize_global_specs {
             let value = type_resolver
                 .external_type_session
                 .tsconfig_from_path(config_path)?;
-            if !vue3_materialize_tsconfig_global_file_specs(
+            if !vue3_materialize_tsconfig_global_specs(
                 config_path,
                 &value,
-                &file_specs,
+                &global_specs,
                 &state_key,
                 depth,
                 traversal,
@@ -799,7 +867,7 @@ fn vue3_tsconfig_global_type_files_from_config(
                 return None;
             }
         }
-        return Some(file_specs);
+        return Some(global_specs);
     }
     let identity = vue3_tsconfig_graph_enter(
         config_path,
@@ -808,12 +876,12 @@ fn vue3_tsconfig_global_type_files_from_config(
         traversal,
         type_resolver,
     )?;
-    let file_specs = (|| {
+    let global_specs = (|| {
         let value = type_resolver
             .external_type_session
             .tsconfig_from_path(config_path)?;
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-        let mut file_specs = Vue3TsconfigFileSpecs::default();
+        let mut global_specs = Vue3TsconfigGlobalSpecs::default();
         for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
             if let Some(extended_specs) = vue3_tsconfig_global_type_files_from_config(
                 &extended,
@@ -825,34 +893,21 @@ fn vue3_tsconfig_global_type_files_from_config(
                 type_resolver,
                 depth + 1,
             ) {
-                file_specs.overlay(extended_specs);
+                global_specs.overlay(extended_specs);
             }
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }
-        file_specs.apply_direct(&value, config_dir, template_config_dir);
-        vue3_append_tsconfig_global_type_files(
-            vue3_tsconfig_compiler_option_global_type_files(
-                &value,
-                config_dir,
-                template_config_dir,
-                type_resolver,
-            ),
-            seen_files,
-            files,
-        );
-        if type_resolver.external_type_session.metadata_is_blocked() {
-            return None;
-        }
+        global_specs.apply_direct(&value, config_dir, template_config_dir);
         traversal
-            .global_file_specs
-            .insert(state_key.clone(), file_specs.clone());
-        if materialize_file_specs
-            && !vue3_materialize_tsconfig_global_file_specs(
+            .global_specs
+            .insert(state_key.clone(), global_specs.clone());
+        if materialize_global_specs
+            && !vue3_materialize_tsconfig_global_specs(
                 config_path,
                 &value,
-                &file_specs,
+                &global_specs,
                 &state_key,
                 depth,
                 traversal,
@@ -863,16 +918,16 @@ fn vue3_tsconfig_global_type_files_from_config(
         {
             return None;
         }
-        Some(file_specs)
+        Some(global_specs)
     })();
     traversal.active_identities.remove(&identity);
-    file_specs
+    global_specs
 }
 
-fn vue3_materialize_tsconfig_global_file_specs(
+fn vue3_materialize_tsconfig_global_specs(
     config_path: &Path,
     value: &serde_json::Value,
-    file_specs: &Vue3TsconfigFileSpecs,
+    global_specs: &Vue3TsconfigGlobalSpecs,
     state_key: &Vue3TsconfigGraphStateKey,
     depth: usize,
     traversal: &mut Vue3TsconfigGraphTraversal,
@@ -882,7 +937,7 @@ fn vue3_materialize_tsconfig_global_file_specs(
 ) -> bool {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
     if traversal
-        .materialized_global_file_configs
+        .materialized_global_configs
         .contains(state_key)
     {
         return true;
@@ -892,10 +947,22 @@ fn vue3_materialize_tsconfig_global_file_specs(
         return false;
     }
     traversal
-        .materialized_global_file_configs
+        .materialized_global_configs
         .insert(state_key.clone());
     vue3_append_tsconfig_global_type_files(
-        vue3_tsconfig_file_spec_global_type_files(file_specs, type_resolver),
+        vue3_tsconfig_file_spec_global_type_files(&global_specs.file_specs, type_resolver),
+        seen_files,
+        files,
+    );
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return false;
+    }
+    vue3_append_tsconfig_global_type_files(
+        vue3_tsconfig_global_type_package_files(
+            &global_specs.type_package_specs,
+            config_dir,
+            type_resolver,
+        ),
         seen_files,
         files,
     );
@@ -1007,16 +1074,16 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
     template_config_dir: &Path,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
-    let mut file_specs = Vue3TsconfigFileSpecs::default();
-    file_specs.apply_direct(value, config_dir, template_config_dir);
-    let mut files = vue3_tsconfig_file_spec_global_type_files(&file_specs, type_resolver);
+    let mut global_specs = Vue3TsconfigGlobalSpecs::default();
+    global_specs.apply_direct(value, config_dir, template_config_dir);
+    let mut files =
+        vue3_tsconfig_file_spec_global_type_files(&global_specs.file_specs, type_resolver);
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vec::new();
     }
-    files.extend(vue3_tsconfig_compiler_option_global_type_files(
-        value,
+    files.extend(vue3_tsconfig_global_type_package_files(
+        &global_specs.type_package_specs,
         config_dir,
-        template_config_dir,
         type_resolver,
     ));
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -1036,56 +1103,48 @@ pub(crate) fn vue3_tsconfig_string_array(value: Option<&serde_json::Value>) -> V
         .collect()
 }
 
-pub(crate) fn vue3_tsconfig_compiler_option_global_type_files(
-    value: &serde_json::Value,
+fn vue3_tsconfig_global_type_package_files(
+    specs: &Vue3TsconfigGlobalTypePackageSpecs,
     config_dir: &Path,
-    template_config_dir: &Path,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
-    let compiler_options = value
-        .get("compilerOptions")
-        .and_then(serde_json::Value::as_object);
-    let configured_types = compiler_options
-        .and_then(|options| options.get("types"))
-        .map(|types| vue3_tsconfig_string_array(Some(types)));
-    if configured_types.as_ref().is_some_and(Vec::is_empty) {
+    if specs.types.as_ref().is_some_and(|types| types.is_empty()) {
         return Vec::new();
     }
-    let has_configured_type_roots =
-        compiler_options.is_some_and(|options| options.get("typeRoots").is_some());
-    let mut configured_type_roots = Vec::new();
-    for target in
-        vue3_tsconfig_string_array(compiler_options.and_then(|options| options.get("typeRoots")))
-    {
-        if !type_resolver
-            .external_type_session
-            .claim_tsconfig_discovery_entry()
-        {
-            return Vec::new();
+    let type_roots = if let Some(type_roots) = specs.type_roots.as_ref() {
+        let mut configured = Vec::new();
+        for target in type_roots.targets.iter() {
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_discovery_entry()
+            {
+                return Vec::new();
+            }
+            let Some(path) = vue3_tsconfig_target_path(
+                &type_roots.config_dir,
+                &type_roots.template_config_dir,
+                target,
+                type_resolver,
+            ) else {
+                return Vec::new();
+            };
+            if path.is_dir() {
+                configured.push(path);
+            }
         }
-        let Some(path) =
-            vue3_tsconfig_target_path(config_dir, template_config_dir, &target, type_resolver)
-        else {
-            return Vec::new();
-        };
-        if path.is_dir() {
-            configured_type_roots.push(path);
-        }
-    }
-    let type_roots = if has_configured_type_roots {
-        configured_type_roots
+        configured
     } else {
         vue3_tsconfig_default_type_roots(config_dir, type_resolver)
     };
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vec::new();
     }
-    if let Some(types) = configured_types {
+    if let Some(types) = specs.types.as_ref() {
         let mut files = Vec::new();
-        for type_name in types {
+        for type_name in types.iter() {
             files.extend(vue3_tsconfig_named_type_global_type_files(
                 &type_roots,
-                &type_name,
+                type_name,
                 type_resolver,
             ));
             if type_resolver.external_type_session.metadata_is_blocked() {

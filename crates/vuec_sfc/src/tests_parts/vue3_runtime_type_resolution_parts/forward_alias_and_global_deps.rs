@@ -985,7 +985,7 @@ defineProps<
     }
 
     #[test]
-    fn vue3_compile_script_discovers_tsconfig_types_and_type_roots_global_deps() {
+    fn vue3_compile_script_uses_effective_tsconfig_types_and_type_roots_global_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(dir.path().join("src").join("components"))
             .expect("create component dir");
@@ -995,8 +995,6 @@ defineProps<
             .expect("create scoped type root");
         std::fs::create_dir_all(dir.path().join("typings").join("ignored"))
             .expect("create ignored type root");
-        std::fs::create_dir_all(dir.path().join("base-types").join("base-root"))
-            .expect("create base type root");
         std::fs::create_dir_all(
             dir.path()
                 .join("node_modules")
@@ -1011,8 +1009,7 @@ defineProps<
             r#"{
                 "extends": "./config/base.json",
                 "compilerOptions": {
-                    "types": ["chosen", "@scope/tool"],
-                    "typeRoots": ["./typings"]
+                    "types": ["chosen", "@scope/tool"]
                 },
                 "references": [{ "path": "./project" }]
             }"#,
@@ -1022,7 +1019,7 @@ defineProps<
             dir.path().join("config").join("base.json"),
             r#"{
                 "compilerOptions": {
-                    "typeRoots": ["${configDir}/base-types"]
+                    "typeRoots": ["${configDir}/typings"]
                 }
             }"#,
         )
@@ -1053,14 +1050,6 @@ defineProps<
         .expect("write ignored type root");
         std::fs::write(
             dir.path()
-                .join("base-types")
-                .join("base-root")
-                .join("index.d.ts"),
-            "declare interface BaseRootGlobalProps { baseRoot?: number }",
-        )
-        .expect("write base root global");
-        std::fs::write(
-            dir.path()
                 .join("node_modules")
                 .join("@types")
                 .join("defaulted")
@@ -1077,10 +1066,6 @@ defineProps<
             .map(|path| normalize_path_string(&path))
             .collect::<BTreeSet<_>>();
         let expected_discovered = [
-            dir.path()
-                .join("base-types")
-                .join("base-root")
-                .join("index.d.ts"),
             dir.path().join("typings").join("chosen").join("index.d.ts"),
             dir.path()
                 .join("typings")
@@ -1099,7 +1084,7 @@ defineProps<
         assert_eq!(discovered, expected_discovered);
 
         let source = r#"<script setup lang="ts">
-defineProps<ChosenGlobalProps & BaseRootGlobalProps & DefaultTypesGlobalProps>()
+defineProps<ChosenGlobalProps & DefaultTypesGlobalProps>()
 defineModel<ScopedGlobalModel>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
@@ -1110,9 +1095,6 @@ defineModel<ScopedGlobalModel>()
         assert!(script
             .content
             .contains("chosen: { type: String, required: true }"));
-        assert!(script
-            .content
-            .contains("baseRoot: { type: Number, required: false }"));
         assert!(script
             .content
             .contains("defaulted: { type: Boolean, required: true }"));
@@ -1127,6 +1109,112 @@ defineModel<ScopedGlobalModel>()
             .deps
             .iter()
             .any(|dep| dep.contains("ignored") || dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_tsconfig_global_type_packages_follow_extends_option_overrides() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("src")).expect("create project source dir");
+        std::fs::create_dir_all(&second).expect("create second config dir");
+        let write_package = |root: &std::path::Path, name: &str| {
+            let package = root.join(name);
+            std::fs::create_dir_all(&package).expect("create global type package");
+            let entry = package.join("index.d.ts");
+            std::fs::write(&entry, format!("declare interface {name}Global {{}}"))
+                .expect("write global type package");
+            entry
+        };
+        let _first_entry = write_package(&first.join("types"), "first");
+        let inherited_entry = write_package(&first.join("types"), "second");
+        let direct_entry = write_package(&first.join("types"), "direct");
+        let overridden_root_entry = write_package(&project.join("types"), "second");
+        let _base_default_entry = write_package(
+            &first.join("node_modules").join("@types"),
+            "default-origin",
+        );
+        let project_default_entry = write_package(
+            &project.join("node_modules").join("@types"),
+            "default-origin",
+        );
+        std::fs::write(
+            first.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":["first"],"typeRoots":["./types"]}}"#,
+        )
+        .expect("write first config");
+        std::fs::write(
+            second.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":["second"]}}"#,
+        )
+        .expect("write second config");
+        let config_path = project.join("tsconfig.json");
+        let filename = project.join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+        let discover = || {
+            vue3_tsconfig_global_type_files(
+                &filename_text,
+                &vue3_type_resolver_context_for_filename(&filename_text),
+            )
+        };
+
+        std::fs::write(
+            &config_path,
+            r#"{"extends":["../first/tsconfig.json","../second/tsconfig.json"]}"#,
+        )
+        .expect("write inherited options config");
+        assert_eq!(discover(), vec![inherited_entry]);
+
+        std::fs::write(
+            &config_path,
+            r#"{
+                "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "compilerOptions":{"typeRoots":["./types"]}
+            }"#,
+        )
+        .expect("write direct type roots config");
+        assert_eq!(discover(), vec![overridden_root_entry]);
+
+        std::fs::write(
+            &config_path,
+            r#"{
+                "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "compilerOptions":{"types":["direct"]}
+            }"#,
+        )
+        .expect("write direct types config");
+        assert_eq!(discover(), vec![direct_entry]);
+
+        std::fs::write(
+            &config_path,
+            r#"{
+                "extends":["../first/tsconfig.json","../second/tsconfig.json"],
+                "compilerOptions":{"types":[]}
+            }"#,
+        )
+        .expect("write empty types config");
+        let resolver = vue3_type_resolver_context_for_filename(&filename_text);
+        assert!(vue3_tsconfig_global_type_files(&filename_text, &resolver).is_empty());
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .tsconfig_discovery_entries,
+            0
+        );
+
+        std::fs::write(
+            first.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":["default-origin"]}}"#,
+        )
+        .expect("write inherited default roots config");
+        std::fs::write(
+            &config_path,
+            r#"{"extends":"../first/tsconfig.json"}"#,
+        )
+        .expect("write default roots project config");
+        assert_eq!(discover(), vec![project_default_entry]);
     }
 
     #[test]

@@ -461,7 +461,7 @@
     }
 
     #[test]
-    fn vue3_sfc_bridge_compile_script_discovers_tsconfig_types_type_roots_deps() {
+    fn vue3_sfc_bridge_compile_script_uses_effective_tsconfig_type_package_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-tsconfig-types-type-roots-deps-{}",
             std::process::id()
@@ -472,7 +472,6 @@
         std::fs::create_dir_all(dir.join("typings").join("@scope").join("tool"))
             .expect("create scoped");
         std::fs::create_dir_all(dir.join("typings").join("ignored")).expect("create ignored");
-        std::fs::create_dir_all(dir.join("base-types").join("base-root")).expect("create base");
         std::fs::create_dir_all(dir.join("node_modules").join("@types").join("defaulted"))
             .expect("create default @types");
         std::fs::create_dir_all(dir.join("config")).expect("create config");
@@ -482,8 +481,7 @@
             r#"{
                 "extends": "./config/base.json",
                 "compilerOptions": {
-                    "types": ["chosen", "@scope/tool"],
-                    "typeRoots": ["./typings"]
+                    "types": ["chosen", "@scope/tool"]
                 },
                 "references": [{ "path": "./project" }]
             }"#,
@@ -493,7 +491,7 @@
             dir.join("config").join("base.json"),
             r#"{
                 "compilerOptions": {
-                    "typeRoots": ["${configDir}/base-types"]
+                    "typeRoots": ["${configDir}/typings"]
                 }
             }"#,
         )
@@ -519,11 +517,6 @@
         )
         .expect("write ignored global");
         std::fs::write(
-            dir.join("base-types").join("base-root").join("index.d.ts"),
-            "declare interface BaseRootGlobalProps { baseRoot?: number }",
-        )
-        .expect("write base root global");
-        std::fs::write(
             dir.join("node_modules")
                 .join("@types")
                 .join("defaulted")
@@ -538,7 +531,7 @@
             json!({
                 "source": concat!(
                     "<script setup lang=\"ts\">",
-                    "defineProps<ChosenGlobalProps & BaseRootGlobalProps & DefaultTypesGlobalProps>()\n",
+                    "defineProps<ChosenGlobalProps & DefaultTypesGlobalProps>()\n",
                     "defineModel<ScopedGlobalModel>()",
                     "</script>"
                 ),
@@ -550,7 +543,6 @@
         let content = compiled["content"].as_str().unwrap_or_default();
         assert!(compiled["errors"].as_array().unwrap().is_empty());
         assert!(content.contains("chosen: { type: String, required: true }"));
-        assert!(content.contains("baseRoot: { type: Number, required: false }"));
         assert!(content.contains("defaulted: { type: Boolean, required: true }"));
         assert!(content.contains("\"modelValue\": { type: [Number, Boolean] },"));
         assert!(!content.contains("ignored: { type: String"));
@@ -562,7 +554,6 @@
             .map(|dep| dep.as_str().unwrap().to_string())
             .collect::<std::collections::BTreeSet<_>>();
         let expected = [
-            dir.join("base-types").join("base-root").join("index.d.ts"),
             dir.join("typings").join("chosen").join("index.d.ts"),
             dir.join("typings")
                 .join("@scope")
