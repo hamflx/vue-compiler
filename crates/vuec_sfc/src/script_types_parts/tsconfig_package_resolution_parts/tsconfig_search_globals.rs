@@ -1142,7 +1142,8 @@ fn vue3_tsconfig_direct_module_kind(
         return None;
     };
     let version = &type_resolver.typescript_version;
-    let parsed = if ["none", "amd", "system", "umd"]
+    let parsed = if version < &(7, 0, 0).into()
+        && ["none", "amd", "system", "umd"]
         .iter()
         .any(|candidate| value.eq_ignore_ascii_case(candidate))
     {
@@ -1183,11 +1184,12 @@ fn vue3_tsconfig_direct_module_resolution_kind(
         return None;
     };
     let version = &type_resolver.typescript_version;
-    let parsed = if value.eq_ignore_ascii_case("classic") {
+    let parsed = if value.eq_ignore_ascii_case("classic") && version < &(7, 0, 0).into() {
         Some(Vue3TypeModuleResolutionKind::Classic)
-    } else if ["node", "node10"]
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    } else if (value.eq_ignore_ascii_case("node") && version < &(7, 0, 0).into())
+        || (value.eq_ignore_ascii_case("node10")
+            && version >= &(5, 0, 0).into()
+            && version < &(7, 0, 0).into())
     {
         Some(Vue3TypeModuleResolutionKind::Node10)
     } else if value.eq_ignore_ascii_case("node16") && version >= &(4, 7, 0).into() {
@@ -1214,23 +1216,23 @@ fn vue3_tsconfig_direct_target_kind(
         return None;
     };
     let version = &type_resolver.typescript_version;
-    let parsed = if value.eq_ignore_ascii_case("es3") {
+    let parsed = if value.eq_ignore_ascii_case("es3") && version < &(7, 0, 0).into() {
         Some(Vue3TsconfigTargetKind::Default)
-    } else if value.eq_ignore_ascii_case("es5") {
+    } else if value.eq_ignore_ascii_case("es5") && version < &(7, 0, 0).into() {
         Some(Vue3TsconfigTargetKind::Legacy)
     } else if ["es6", "es2015", "esnext"]
         .iter()
         .any(|candidate| value.eq_ignore_ascii_case(candidate))
         || value.eq_ignore_ascii_case("es2016") && version >= &(2, 1, 0).into()
-        || value.eq_ignore_ascii_case("es2017") && version >= &(2, 3, 0).into()
+        || value.eq_ignore_ascii_case("es2017") && version >= &(2, 1, 0).into()
         || value.eq_ignore_ascii_case("es2018") && version >= &(2, 7, 0).into()
-        || value.eq_ignore_ascii_case("es2019") && version >= &(3, 2, 0).into()
-        || value.eq_ignore_ascii_case("es2020") && version >= &(3, 8, 0).into()
+        || value.eq_ignore_ascii_case("es2019") && version >= &(3, 4, 0).into()
+        || value.eq_ignore_ascii_case("es2020") && version >= &(3, 5, 0).into()
         || value.eq_ignore_ascii_case("es2021") && version >= &(4, 3, 0).into()
-        || value.eq_ignore_ascii_case("es2022") && version >= &(4, 5, 0).into()
-        || value.eq_ignore_ascii_case("es2023") && version >= &(5, 2, 0).into()
+        || value.eq_ignore_ascii_case("es2022") && version >= &(4, 6, 0).into()
+        || value.eq_ignore_ascii_case("es2023") && version >= &(5, 5, 0).into()
         || value.eq_ignore_ascii_case("es2024") && version >= &(5, 7, 0).into()
-        || value.eq_ignore_ascii_case("es2025") && version >= &(5, 9, 0).into()
+        || value.eq_ignore_ascii_case("es2025") && version >= &(6, 0, 0).into()
     {
         Some(Vue3TsconfigTargetKind::Modern)
     } else {
@@ -3944,6 +3946,129 @@ mod vue3_module_suffix_config_tests {
                     .module_resolution,
                 expected,
                 "TypeScript {version:?}: {source}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn resolver_option_version_boundaries_match_typescript() {
+        for (version, option, value) in [
+            ((2, 0, 0), "target", "ES2017"),
+            ((3, 3, 0), "target", "ES2019"),
+            ((3, 4, 0), "target", "ES2020"),
+            ((4, 5, 0), "target", "ES2022"),
+            ((5, 4, 0), "target", "ES2023"),
+            ((5, 6, 0), "target", "ES2024"),
+            ((5, 9, 0), "target", "ES2025"),
+            ((4, 9, 0), "moduleResolution", "Node10"),
+            ((7, 0, 0), "target", "ES3"),
+            ((7, 0, 0), "target", "ES5"),
+            ((7, 0, 0), "moduleResolution", "Node"),
+            ((7, 0, 0), "moduleResolution", "Node10"),
+            ((7, 0, 0), "moduleResolution", "Classic"),
+            ((7, 0, 0), "module", "None"),
+            ((7, 0, 0), "module", "AMD"),
+            ((7, 0, 0), "module", "System"),
+            ((7, 0, 0), "module", "UMD"),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = format!(r#"{{"compilerOptions":{{"{option}":"{value}"}}}}"#);
+            let filename = write_config(dir.path(), &source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none(),
+                "TypeScript {version:?}: {option}={value}"
+            );
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+
+        for (version, option, value, expected) in [
+            (
+                (2, 1, 0),
+                "target",
+                "ES2017",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (3, 4, 0),
+                "target",
+                "ES2019",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (3, 5, 0),
+                "target",
+                "ES2020",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (4, 6, 0),
+                "target",
+                "ES2022",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (5, 5, 0),
+                "target",
+                "ES2023",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (5, 7, 0),
+                "target",
+                "ES2024",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (6, 0, 0),
+                "target",
+                "ES2025",
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+            (
+                (5, 0, 0),
+                "moduleResolution",
+                "Node10",
+                Vue3TypeModuleResolutionKind::Node10,
+            ),
+            (
+                (6, 0, 0),
+                "moduleResolution",
+                "Classic",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (6, 0, 0),
+                "module",
+                "AMD",
+                Vue3TypeModuleResolutionKind::Classic,
+            ),
+            (
+                (6, 0, 0),
+                "target",
+                "ES5",
+                Vue3TypeModuleResolutionKind::Bundler,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = format!(r#"{{"compilerOptions":{{"{option}":"{value}"}}}}"#);
+            let filename = write_config(dir.path(), &source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert_eq!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver)
+                    .expect("resolve supported compiler option")
+                    .module_resolution,
+                expected,
+                "TypeScript {version:?}: {option}={value}"
             );
             assert!(!resolver.external_type_session.metadata_is_blocked());
         }
