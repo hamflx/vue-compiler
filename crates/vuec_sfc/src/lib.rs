@@ -13,16 +13,16 @@ use oxc_ast::ast::{
     AssignmentTarget, BindingPattern, CallExpression, ClassElement, Declaration,
     ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
     ExportSpecifier, Expression, ForStatementInit, ForStatementLeft, FormalParameter,
-    FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier, ImportExpression,
-    ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
-    TSExternalModuleReference, TSFunctionType, TSImportType, TSImportTypeQualifier,
-    TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral, TSMappedType,
-    TSMappedTypeModifierOperator, TSModuleDeclaration, TSModuleDeclarationBody,
+    FormalParameters, Function, FunctionBody, ImportAttributeKey, ImportDeclarationSpecifier,
+    ImportExpression, ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty,
+    ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+    TSEnumDeclaration, TSExternalModuleReference, TSFunctionType, TSImportType,
+    TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral,
+    TSMappedType, TSMappedTypeModifierOperator, TSModuleDeclaration, TSModuleDeclarationBody,
     TSModuleDeclarationName, TSSignature, TSTemplateLiteralType, TSTupleElement, TSType,
     TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
     TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WithClauseKeyword, WithStatement,
+    VariableDeclarationKind, VariableDeclarator, WithClause, WithClauseKeyword, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};

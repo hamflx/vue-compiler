@@ -1516,6 +1516,7 @@ fn vue3_global_type_projection_from_source(
     let re_exported = project_vue3_global_type_re_exports(
         filename,
         &parsed.program.body,
+        source_type,
         &mut analysis,
         type_resolver,
         namespace_budget,
@@ -7611,6 +7612,7 @@ fn collect_vue3_ambient_global_type_from_statement(
 pub(crate) fn project_vue3_global_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
+    source_type: oxc_span::SourceType,
     analysis: &mut Vue3ScriptSetupAnalysis,
     type_resolver: &Vue3TypeResolverContext,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
@@ -7624,6 +7626,7 @@ pub(crate) fn project_vue3_global_type_re_exports(
         names.extend(project_vue3_type_re_exports(
             filename,
             &global.body.body,
+            vue3_static_resolution_mode(source_type),
             analysis,
             &mut seen,
             type_resolver,
@@ -7697,6 +7700,7 @@ fn vue3_global_type_file_import_scope_identities_with_budget(
 ) -> Option<BTreeMap<String, String>> {
     let importer = Path::new(definition_key);
     let importer_directory = importer.parent().unwrap_or_else(|| Path::new(""));
+    let static_resolution_mode = vue3_static_resolution_mode(vue3_type_source_type(definition_key));
     let mut identities = BTreeMap::new();
     for statement in statements {
         let Statement::ImportDeclaration(import) = statement else {
@@ -7706,7 +7710,17 @@ fn vue3_global_type_file_import_scope_identities_with_budget(
             continue;
         };
         let source = import.source.value.as_str();
-        let resolved = resolve_vue3_type_import(definition_key, source, type_resolver);
+        let resolution_mode = vue3_declaration_resolution_mode(
+            import.import_kind,
+            import.with_clause.as_deref(),
+            static_resolution_mode,
+        );
+        let resolved = resolve_vue3_type_import_with_mode(
+            definition_key,
+            source,
+            resolution_mode,
+            type_resolver,
+        );
         let source_key = match resolved {
             Some(resolved) => {
                 if !namespace_budget.reserve(

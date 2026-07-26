@@ -64,9 +64,108 @@ impl Vue3ModuleDependencyCollector<'_> {
         self.insert(Vue3ModuleDependency::module(source, resolution_mode));
     }
 
-    fn insert_static_module(&mut self, source: &str) {
-        self.insert_module(source, self.static_resolution_mode);
+}
+
+fn vue3_resolution_mode_from_value(value: &str) -> Option<Vue3TypeResolutionMode> {
+    match value {
+        "import" => Some(Vue3TypeResolutionMode::Import),
+        "require" => Some(Vue3TypeResolutionMode::Require),
+        _ => None,
     }
+}
+
+fn vue3_static_resolution_mode(source_type: oxc_span::SourceType) -> Vue3TypeResolutionMode {
+    if source_type.is_commonjs() {
+        Vue3TypeResolutionMode::Require
+    } else {
+        Vue3TypeResolutionMode::Import
+    }
+}
+
+fn vue3_resolution_mode_from_with_clause(
+    with_clause: Option<&WithClause<'_>>,
+) -> Option<Vue3TypeResolutionMode> {
+    let entries = &with_clause?.with_entries;
+    let [attribute] = entries.as_slice() else {
+        return None;
+    };
+    let ImportAttributeKey::StringLiteral(key) = &attribute.key else {
+        return None;
+    };
+    if key.value != "resolution-mode" {
+        return None;
+    }
+    vue3_resolution_mode_from_value(attribute.value.value.as_str())
+}
+
+fn vue3_declaration_resolution_mode(
+    kind: ImportOrExportKind,
+    with_clause: Option<&WithClause<'_>>,
+    default: Vue3TypeResolutionMode,
+) -> Vue3TypeResolutionMode {
+    if kind == ImportOrExportKind::Type {
+        vue3_resolution_mode_from_with_clause(with_clause).unwrap_or(default)
+    } else {
+        default
+    }
+}
+
+fn vue3_single_plain_object_property<'a>(
+    object: &'a ObjectExpression<'a>,
+) -> Option<&'a ObjectProperty<'a>> {
+    let [property] = object.properties.as_slice() else {
+        return None;
+    };
+    let ObjectPropertyKind::ObjectProperty(property) = property else {
+        return None;
+    };
+    if property.kind != PropertyKind::Init
+        || property.method
+        || property.shorthand
+        || property.computed
+    {
+        return None;
+    }
+    Some(property)
+}
+
+fn vue3_resolution_mode_from_ts_import_type_options(
+    options: Option<&ObjectExpression<'_>>,
+) -> Option<Vue3TypeResolutionMode> {
+    let wrapper = vue3_single_plain_object_property(options?)?;
+    let PropertyKey::StaticIdentifier(wrapper_key) = &wrapper.key else {
+        return None;
+    };
+    if !matches!(wrapper_key.name.as_str(), "with" | "assert") {
+        return None;
+    }
+    let Expression::ObjectExpression(attributes) = &wrapper.value else {
+        return None;
+    };
+    let attribute = vue3_single_plain_object_property(attributes)?;
+    let PropertyKey::StringLiteral(key) = &attribute.key else {
+        return None;
+    };
+    if key.value != "resolution-mode" {
+        return None;
+    }
+    match &attribute.value {
+        Expression::StringLiteral(value) => {
+            vue3_resolution_mode_from_value(value.value.as_str())
+        }
+        Expression::TemplateLiteral(value) => value
+            .single_quasi()
+            .and_then(|value| vue3_resolution_mode_from_value(value.as_str())),
+        _ => None,
+    }
+}
+
+fn vue3_ts_import_type_resolution_mode(
+    import_type: &TSImportType<'_>,
+    default: Vue3TypeResolutionMode,
+) -> Vue3TypeResolutionMode {
+    vue3_resolution_mode_from_ts_import_type_options(import_type.options.as_deref())
+        .unwrap_or(default)
 }
 
 fn vue3_is_commonjs_require_call(call: &CallExpression<'_>) -> bool {
@@ -257,7 +356,10 @@ impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
     }
 
     fn visit_ts_import_type(&mut self, import: &TSImportType<'a>) {
-        self.insert_static_module(import.source.value.as_str());
+        self.insert_module(
+            import.source.value.as_str(),
+            vue3_ts_import_type_resolution_mode(import, self.static_resolution_mode),
+        );
         oxc_ast_visit::walk::walk_ts_import_type(self, import);
     }
 
@@ -397,11 +499,7 @@ fn vue3_module_dependencies_from_source(
     let mut collector = Vue3ModuleDependencyCollector {
         dependencies: BTreeSet::new(),
         collect_commonjs_requires: source_type.is_javascript(),
-        static_resolution_mode: if source_type.is_commonjs() {
-            Vue3TypeResolutionMode::Require
-        } else {
-            Vue3TypeResolutionMode::Import
-        },
+        static_resolution_mode: vue3_static_resolution_mode(source_type),
         namespace_budget,
     };
     let first_syntax_start = parsed
@@ -458,15 +556,36 @@ fn vue3_module_dependencies_from_source(
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
-                collector.insert_static_module(import.source.value.as_str());
+                collector.insert_module(
+                    import.source.value.as_str(),
+                    vue3_declaration_resolution_mode(
+                        import.import_kind,
+                        import.with_clause.as_deref(),
+                        collector.static_resolution_mode,
+                    ),
+                );
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
-                    collector.insert_static_module(source.value.as_str());
+                    collector.insert_module(
+                        source.value.as_str(),
+                        vue3_declaration_resolution_mode(
+                            export.export_kind,
+                            export.with_clause.as_deref(),
+                            collector.static_resolution_mode,
+                        ),
+                    );
                 }
             }
             Statement::ExportAllDeclaration(export) => {
-                collector.insert_static_module(export.source.value.as_str());
+                collector.insert_module(
+                    export.source.value.as_str(),
+                    vue3_declaration_resolution_mode(
+                        export.export_kind,
+                        export.with_clause.as_deref(),
+                        collector.static_resolution_mode,
+                    ),
+                );
             }
             _ => {}
         }
@@ -741,6 +860,7 @@ pub(crate) fn extend_vue3_type_context_from_external_imports_with_seen(
     if !namespace_budget.reserve(vue3_external_type_context_cache_cost(context)) {
         return false;
     }
+    let static_resolution_mode = vue3_static_resolution_mode(source_type);
     let mut working_context = context.clone();
     for statement in &parsed.program.body {
         let Statement::ImportDeclaration(import) = statement else {
@@ -750,8 +870,17 @@ pub(crate) fn extend_vue3_type_context_from_external_imports_with_seen(
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let Some(resolved) = resolve_vue3_type_import(filename, import_source, type_resolver)
-        else {
+        let resolution_mode = vue3_declaration_resolution_mode(
+            import.import_kind,
+            import.with_clause.as_deref(),
+            static_resolution_mode,
+        );
+        let Some(resolved) = resolve_vue3_type_import_with_mode(
+            filename,
+            import_source,
+            resolution_mode,
+            type_resolver,
+        ) else {
             if !clear_vue3_failed_import_bindings(
                 &mut working_context,
                 specifiers,
@@ -937,6 +1066,7 @@ fn vue3_external_type_context_from_source_inner(
     let Some(re_exported) = project_vue3_type_re_exports(
         filename,
         &parsed.program.body,
+        vue3_static_resolution_mode(source_type),
         &mut analysis,
         seen,
         type_resolver,
@@ -1156,6 +1286,7 @@ pub(crate) fn seed_vue3_external_type_deps(filename: &str, analysis: &mut Vue3Sc
 pub(crate) fn project_vue3_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
+    static_resolution_mode: Vue3TypeResolutionMode,
     analysis: &mut Vue3ScriptSetupAnalysis,
     seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
@@ -1169,9 +1300,15 @@ pub(crate) fn project_vue3_type_re_exports(
                     continue;
                 };
                 let import_source = source.value.as_str();
+                let resolution_mode = vue3_declaration_resolution_mode(
+                    declaration.export_kind,
+                    declaration.with_clause.as_deref(),
+                    static_resolution_mode,
+                );
                 let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
+                    resolution_mode,
                     seen,
                     type_resolver,
                 ) else {
@@ -1197,9 +1334,15 @@ pub(crate) fn project_vue3_type_re_exports(
             }
             Statement::ExportAllDeclaration(declaration) => {
                 let import_source = declaration.source.value.as_str();
+                let resolution_mode = vue3_declaration_resolution_mode(
+                    declaration.export_kind,
+                    declaration.with_clause.as_deref(),
+                    static_resolution_mode,
+                );
                 let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
+                    resolution_mode,
                     seen,
                     type_resolver,
                 ) else {
@@ -1227,10 +1370,12 @@ pub(crate) struct Vue3ResolvedExternalTypeContext {
 pub(crate) fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue3ResolvedExternalTypeContext> {
-    let resolved = resolve_vue3_type_import(filename, source, type_resolver)?;
+    let resolved =
+        resolve_vue3_type_import_with_mode(filename, source, resolution_mode, type_resolver)?;
     let dependency = normalize_path_string(&resolved);
     let context = vue3_external_type_context_from_path(&resolved, seen, type_resolver)?;
     Some(Vue3ResolvedExternalTypeContext {
@@ -1296,7 +1441,16 @@ pub(crate) fn vue3_resolve_import_type(
     let source = import_type.source.value.as_str();
     let name = vue3_import_type_qualifier_key(import_type.qualifier.as_ref()?);
     let filename = analysis.type_filename.as_deref()?;
-    let resolved = resolve_vue3_type_import(filename, source, &analysis.type_resolver)?;
+    let resolution_mode = vue3_ts_import_type_resolution_mode(
+        import_type,
+        vue3_static_resolution_mode(vue3_type_source_type(filename)),
+    );
+    let resolved = resolve_vue3_type_import_with_mode(
+        filename,
+        source,
+        resolution_mode,
+        &analysis.type_resolver,
+    )?;
     let dependency = normalize_path_string(&resolved);
     let mut seen = analysis.type_seen.clone();
     let context =
@@ -3506,6 +3660,100 @@ const load = () => import('./dynamic')
     }
 
     #[test]
+    fn resolution_mode_attributes_override_only_type_only_edges_and_are_bounded() {
+        let source = r#"
+import type { ImportRequired } from './import-required' with { "resolution-mode": "require" }
+export type { ExportRequired } from './export-required' with { "resolution-mode": "require" }
+export type * from './export-all-required' with { "resolution-mode": "require" }
+type ImportedRequired = import('./type-required', { with: { "resolution-mode": "require" } }).Value
+type AssertedRequired = import('./assert-required', { assert: { "resolution-mode": "require" } }).Value
+type TemplateRequired = import('./template-required', { with: { "resolution-mode": `require` } }).Value
+import { type SpecifierOnly } from './specifier-only' with { "resolution-mode": "require" }
+export { type ExportSpecifierOnly } from './export-specifier-only' with { "resolution-mode": "require" }
+import './runtime-attribute' with { "resolution-mode": "require" }
+const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
+import type { Extra } from './extra-attribute' with { "resolution-mode": "require", type: "json" }
+import type { Invalid } from './invalid-value' with { "resolution-mode": "Require" }
+"#;
+        let expected = BTreeSet::from([
+            Vue3ModuleDependency::module("./assert-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./export-all-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./export-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module(
+                "./export-specifier-only",
+                Vue3TypeResolutionMode::Import,
+            ),
+            Vue3ModuleDependency::module("./extra-attribute", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./import-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./invalid-value", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./runtime-attribute", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./specifier-only", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./template-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./type-required", Vue3TypeResolutionMode::Require),
+        ]);
+        let mut measured = budget(usize::MAX);
+        let dependencies = vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::ts(),
+            &mut measured,
+        )
+        .expect("measure resolution-mode attribute scan")
+        .1;
+        assert_eq!(dependencies, expected);
+        let required = usize::MAX - measured.remaining_work;
+
+        let mut exact = budget(required);
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut exact,
+            ),
+            Some((false, expected)),
+        );
+        assert_eq!(exact.remaining_work, 0);
+        assert!(!exact.exhausted);
+
+        let mut short = budget(required - 1);
+        assert!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut short,
+            )
+            .is_none()
+        );
+        assert_eq!(short.remaining_work, 0);
+        assert!(short.exhausted);
+
+        let commonjs_source = r#"
+import type { ImportMode } from './import-mode' with { "resolution-mode": "import" }
+export type { ExportMode } from './export-mode' with { "resolution-mode": "import" }
+export type * from './export-all-mode' with { "resolution-mode": "import" }
+type ImportedMode = import('./type-mode', { with: { "resolution-mode": "import" } }).Value
+import { type SpecifierOnly } from './specifier-only' with { "resolution-mode": "import" }
+const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
+"#;
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                commonjs_source,
+                oxc_span::SourceType::from_path("types.cts").expect("CommonJS source type"),
+                &mut budget(usize::MAX),
+            )
+            .map(|(_, dependencies)| dependencies),
+            Some(BTreeSet::from([
+                Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module("./export-all-mode", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module("./export-mode", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module("./import-mode", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module("./specifier-only", Vue3TypeResolutionMode::Require),
+                Vue3ModuleDependency::module("./type-mode", Vue3TypeResolutionMode::Import),
+            ])),
+        );
+    }
+
+    #[test]
     fn commonjs_module_indicator_matches_static_export_assignment_rules() {
         for source in [
             "exports.api.value = 1",
@@ -3603,6 +3851,37 @@ const load = () => import('./dynamic')
                 &Vue3TypeResolverContext::default(),
             ),
             Some(vec![require_entry.clone()]),
+        );
+
+        let attribute_require_root = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: r#"import type { Required } from 'conditional-module' with { "resolution-mode": "require" }"#,
+            source_type: oxc_span::SourceType::ts(),
+        }];
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &attribute_require_root,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(vec![require_entry.clone()]),
+        );
+
+        let attribute_import_root = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: r#"import type { Imported } from 'conditional-module' with { "resolution-mode": "import" }"#,
+            source_type: oxc_span::SourceType::from_path("root.cts")
+                .expect("CommonJS source type"),
+        }];
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &attribute_import_root,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(vec![import_entry.clone()]),
         );
 
         let dual_root = [Vue3InlineModuleSource {

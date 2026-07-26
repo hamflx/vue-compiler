@@ -331,6 +331,129 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
     }
 
     #[test]
+    fn vue3_resolution_mode_attributes_drive_imported_and_re_exported_macro_types() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-resolution-mode-attributes");
+        std::fs::create_dir_all(&package).expect("create conditional package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            "export interface CommonJsImportedSource { commonJsImported: string }",
+        )
+        .expect("write import condition types");
+        std::fs::write(
+            &require_entry,
+            r#"
+export interface DirectRequired { directRequired: string }
+export interface NamedRequiredSource { namedRequired: number }
+export interface AllRequired { allRequired: boolean }
+export interface CommonJsDefaultImportedSource { commonJsDefaultImported: number }
+export interface CommonJsDefaultImportTypeSource { commonJsDefaultImportType: boolean }
+export interface ImportTypeRequired { importTypeRequired: string }
+"#,
+        )
+        .expect("write require condition types");
+
+        let named_bridge = dir.path().join("named-bridge.d.ts");
+        let all_bridge = dir.path().join("all-bridge.d.ts");
+        let commonjs_bridge = dir.path().join("commonjs-bridge.d.cts");
+        let commonjs_default_bridge = dir.path().join("commonjs-default-bridge.d.cts");
+        std::fs::write(
+            &named_bridge,
+            r#"export type { NamedRequiredSource as NamedRequired } from 'vuec-resolution-mode-attributes' with { "resolution-mode": "require" }"#,
+        )
+        .expect("write named require bridge");
+        std::fs::write(
+            &all_bridge,
+            r#"export type * from 'vuec-resolution-mode-attributes' with { "resolution-mode": "require" }"#,
+        )
+        .expect("write export-all require bridge");
+        std::fs::write(
+            &commonjs_bridge,
+            r#"export type { CommonJsImportedSource as CommonJsImported } from 'vuec-resolution-mode-attributes' with { "resolution-mode": "import" }"#,
+        )
+        .expect("write CommonJS import bridge");
+        std::fs::write(
+            &commonjs_default_bridge,
+            r#"
+import type { CommonJsDefaultImportedSource } from 'vuec-resolution-mode-attributes'
+export type CommonJsDefaultImported = CommonJsDefaultImportedSource
+export type CommonJsDefaultImportType = import('vuec-resolution-mode-attributes').CommonJsDefaultImportTypeSource
+"#,
+        )
+        .expect("write CommonJS default-mode bridge");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { DirectRequired } from 'vuec-resolution-mode-attributes' with { "resolution-mode": "require" }
+import type { NamedRequired } from './named-bridge'
+import type { AllRequired } from './all-bridge'
+import type { CommonJsImported } from './commonjs-bridge.d.cts'
+import type { CommonJsDefaultImported, CommonJsDefaultImportType } from './commonjs-default-bridge.d.cts'
+type ImportTypeRequired = import('vuec-resolution-mode-attributes', { with: { "resolution-mode": `require` } }).ImportTypeRequired
+defineProps<DirectRequired & NamedRequired & AllRequired & CommonJsImported & CommonJsDefaultImported & CommonJsDefaultImportType & ImportTypeRequired>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("directRequired: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("namedRequired: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("allRequired: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("commonJsImported: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("commonJsDefaultImported: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("commonJsDefaultImportType: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("importTypeRequired: { type: String, required: true }"));
+        for dependency in [
+            import_entry,
+            require_entry,
+            named_bridge,
+            all_bridge,
+            commonjs_bridge,
+            commonjs_default_bridge,
+        ] {
+            assert!(
+                script.deps.contains(&normalize_path_string(&dependency)),
+                "missing dependency {}",
+                dependency.display()
+            );
+        }
+    }
+
+    #[test]
     fn vue3_package_types_version_selector_supports_node_semver_ranges() {
         for selector in [
             "*",

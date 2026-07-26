@@ -1,3 +1,4 @@
+#[cfg(test)]
 pub(crate) fn resolve_vue3_type_import(
     filename: &str,
     source: &str,
