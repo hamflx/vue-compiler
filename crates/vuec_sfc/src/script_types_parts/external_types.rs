@@ -4,37 +4,63 @@ struct Vue3InlineModuleSource<'a> {
     source_type: oxc_span::SourceType,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Vue3ModuleDependency {
+    Module(String),
+    ReferencePath(String),
+    ReferenceTypes(String),
+}
+
+impl Vue3ModuleDependency {
+    fn source(&self) -> &str {
+        match self {
+            Self::Module(source) | Self::ReferencePath(source) | Self::ReferenceTypes(source) => {
+                source
+            }
+        }
+    }
+
+    fn is_global_program_reference(&self) -> bool {
+        !matches!(self, Self::Module(_))
+    }
+}
+
 struct Vue3ModuleDependencyCollector<'budget> {
-    sources: BTreeSet<String>,
+    dependencies: BTreeSet<Vue3ModuleDependency>,
     namespace_budget: &'budget mut Vue3NamespaceProjectionBudget,
 }
 
 impl Vue3ModuleDependencyCollector<'_> {
-    fn insert(&mut self, source: &str) {
-        if self.sources.contains(source) {
+    fn insert(&mut self, dependency: Vue3ModuleDependency) {
+        if self.dependencies.contains(&dependency) {
             return;
         }
         if self.namespace_budget.reserve(
-            source
+            dependency
+                .source()
                 .len()
-                .saturating_add(std::mem::size_of::<String>())
+                .saturating_add(std::mem::size_of::<Vue3ModuleDependency>())
                 .saturating_add(1),
         ) {
-            self.sources.insert(source.to_string());
+            self.dependencies.insert(dependency);
         }
+    }
+
+    fn insert_module(&mut self, source: &str) {
+        self.insert(Vue3ModuleDependency::Module(source.to_string()));
     }
 }
 
 impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(source) = &expression.source {
-            self.insert(source.value.as_str());
+            self.insert_module(source.value.as_str());
         }
         oxc_ast_visit::walk::walk_import_expression(self, expression);
     }
 
     fn visit_ts_import_type(&mut self, import: &TSImportType<'a>) {
-        self.insert(import.source.value.as_str());
+        self.insert_module(import.source.value.as_str());
         oxc_ast_visit::walk::walk_ts_import_type(self, import);
     }
 
@@ -42,7 +68,74 @@ impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
         &mut self,
         reference: &TSExternalModuleReference<'a>,
     ) {
-        self.insert(reference.expression.value.as_str());
+        self.insert_module(reference.expression.value.as_str());
+    }
+}
+
+enum Vue3TripleSlashReference<'a> {
+    Path(&'a str),
+    Types(&'a str),
+    Unsupported,
+}
+
+fn vue3_triple_slash_reference(comment: &str) -> Option<Vue3TripleSlashReference<'_>> {
+    let input = comment.strip_prefix('/')?.trim_start();
+    let tag = input.get(.."<reference".len())?;
+    if !tag.eq_ignore_ascii_case("<reference") {
+        return None;
+    }
+    let input = &input[tag.len()..];
+    if !input.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let mut input = input.trim_end().strip_suffix("/>")?;
+    let mut path = None;
+    let mut types = None;
+    let mut has_lib = false;
+    let mut no_default_lib = false;
+    let mut has_resolution_mode = false;
+    while !input.trim_start().is_empty() {
+        input = input.trim_start();
+        let name_end = input
+            .find(|character: char| character.is_whitespace() || character == '=')
+            .unwrap_or(input.len());
+        if name_end == 0 {
+            return None;
+        }
+        let name = &input[..name_end];
+        input = input[name_end..].trim_start().strip_prefix('=')?.trim_start();
+        let quote = input.chars().next()?;
+        if !matches!(quote, '\'' | '"') {
+            return None;
+        }
+        input = &input[quote.len_utf8()..];
+        let value_end = input.find(quote)?;
+        let value = &input[..value_end];
+        input = &input[value_end + quote.len_utf8()..];
+        if name.eq_ignore_ascii_case("path") {
+            path = Some(value);
+        } else if name.eq_ignore_ascii_case("types") {
+            types = Some(value);
+        } else if name.eq_ignore_ascii_case("lib") {
+            has_lib = true;
+        } else if name.eq_ignore_ascii_case("no-default-lib")
+            && value.eq_ignore_ascii_case("true")
+        {
+            no_default_lib = true;
+        } else if name.eq_ignore_ascii_case("resolution-mode") {
+            has_resolution_mode = true;
+        }
+    }
+    if has_resolution_mode {
+        Some(Vue3TripleSlashReference::Unsupported)
+    } else if no_default_lib {
+        None
+    } else if let Some(types) = types {
+        Some(Vue3TripleSlashReference::Types(types))
+    } else if has_lib {
+        None
+    } else {
+        path.map(Vue3TripleSlashReference::Path)
     }
 }
 
@@ -50,7 +143,7 @@ fn vue3_module_dependencies_from_source(
     source: &str,
     source_type: oxc_span::SourceType,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
-) -> Option<(bool, BTreeSet<String>)> {
+) -> Option<(bool, BTreeSet<Vue3ModuleDependency>)> {
     if !namespace_budget.reserve(source.len().saturating_add(1)) {
         return None;
     }
@@ -85,21 +178,67 @@ fn vue3_module_dependencies_from_source(
             )
     });
     let mut collector = Vue3ModuleDependencyCollector {
-        sources: BTreeSet::new(),
+        dependencies: BTreeSet::new(),
         namespace_budget,
     };
+    let first_syntax_start = parsed
+        .program
+        .directives
+        .first()
+        .map(|directive| directive.span.start as usize)
+        .into_iter()
+        .chain(
+            parsed
+                .program
+                .body
+                .first()
+                .map(|statement| statement.span().start as usize),
+        )
+        .min()
+        .unwrap_or(source.len());
+    for comment in &parsed.program.comments {
+        if !comment.is_line() || comment.span.end as usize > first_syntax_start {
+            continue;
+        }
+        let comment_start = comment.span.start as usize;
+        let line_start = source
+            .get(..comment_start)?
+            .as_bytes()
+            .iter()
+            .rposition(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(0, |index| index + 1);
+        if !source
+            .get(line_start..comment_start)?
+            .chars()
+            .all(char::is_whitespace)
+        {
+            continue;
+        }
+        let span = comment.content_span();
+        let comment_source = source.get(span.start as usize..span.end as usize)?;
+        match vue3_triple_slash_reference(comment_source) {
+            Some(Vue3TripleSlashReference::Path(path)) => {
+                collector.insert(Vue3ModuleDependency::ReferencePath(path.to_string()));
+            }
+            Some(Vue3TripleSlashReference::Types(types)) => {
+                collector.insert(Vue3ModuleDependency::ReferenceTypes(types.to_string()));
+            }
+            Some(Vue3TripleSlashReference::Unsupported) => return None,
+            None => {}
+        }
+    }
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
-                collector.insert(import.source.value.as_str());
+                collector.insert_module(import.source.value.as_str());
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
-                    collector.insert(source.value.as_str());
+                    collector.insert_module(source.value.as_str());
                 }
             }
             Statement::ExportAllDeclaration(export) => {
-                collector.insert(export.source.value.as_str());
+                collector.insert_module(export.source.value.as_str());
             }
             _ => {}
         }
@@ -108,31 +247,35 @@ fn vue3_module_dependencies_from_source(
     if collector.namespace_budget.is_exhausted() {
         None
     } else {
-        Some((has_global_augmentation, collector.sources))
+        Some((has_global_augmentation, collector.dependencies))
     }
 }
 
 fn enqueue_vue3_module_dependencies(
     importer: &str,
-    sources: BTreeSet<String>,
+    dependencies: BTreeSet<Vue3ModuleDependency>,
     depth: usize,
-    pending: &mut VecDeque<(String, String, usize)>,
+    pending: &mut VecDeque<(String, Vue3ModuleDependency, usize)>,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<()> {
-    let work = sources.iter().fold(0usize, |work, source| {
+    let work = dependencies.iter().fold(0usize, |work, dependency| {
         work
             .saturating_add(importer.len())
-            .saturating_add(source.len())
-            .saturating_add(std::mem::size_of::<(String, String, usize)>())
+            .saturating_add(dependency.source().len())
+            .saturating_add(std::mem::size_of::<(
+                String,
+                Vue3ModuleDependency,
+                usize,
+            )>())
             .saturating_add(1)
     });
     if !namespace_budget.reserve(work) {
         return None;
     }
     pending.extend(
-        sources
+        dependencies
             .into_iter()
-            .map(|source| (importer.to_string(), source, depth)),
+            .map(|dependency| (importer.to_string(), dependency, depth)),
     );
     Some(())
 }
@@ -148,6 +291,7 @@ fn vue3_module_path_can_contain_typescript(path: &Path) -> bool {
 }
 
 fn vue3_reachable_global_augmentation_files(
+    project_filename: &str,
     initial_global_files: &[Vue3GlobalTypeFile],
     inline_module_sources: &[Vue3InlineModuleSource<'_>],
     type_resolver: &Vue3TypeResolverContext,
@@ -208,21 +352,42 @@ fn vue3_reachable_global_augmentation_files(
         .max_import_files
         .min(VUE3_EXTERNAL_TYPE_MAX_IMPORT_FILES);
     let mut scanned_import_files = 0usize;
-    let mut augmentation_paths = BTreeMap::<PathBuf, PathBuf>::new();
-    while let Some((importer, source, depth)) = pending.pop_front() {
+    let mut additional_global_paths = BTreeMap::<PathBuf, PathBuf>::new();
+    while let Some((importer, dependency, depth)) = pending.pop_front() {
         if depth > VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES {
             return None;
         }
+        let is_global_program_reference = dependency.is_global_program_reference();
         let failure_epoch = type_resolver.external_type_session.failure_epoch();
-        let Some(resolved) = resolve_vue3_type_import(&importer, &source, &type_resolver) else {
-            if type_resolver.external_type_session.failure_epoch() != failure_epoch {
+        let resolved = match &dependency {
+            Vue3ModuleDependency::Module(source) => {
+                resolve_vue3_type_import(&importer, source, &type_resolver)
+            }
+            Vue3ModuleDependency::ReferencePath(reference) => {
+                resolve_vue3_type_reference_path(&importer, reference, &type_resolver)
+            }
+            Vue3ModuleDependency::ReferenceTypes(reference) => {
+                resolve_vue3_type_reference_directive(
+                    project_filename,
+                    &importer,
+                    reference,
+                    &type_resolver,
+                )
+            }
+        };
+        let Some(resolved) = resolved else {
+            if is_global_program_reference
+                || type_resolver.external_type_session.failure_epoch() != failure_epoch
+            {
                 return None;
             }
             continue;
         };
         let identity = vue3_external_type_path_identity(&resolved);
-        if seen.contains(&identity) {
-            continue;
+        if is_global_program_reference
+            && identity == vue3_external_type_path_identity(Path::new(&importer))
+        {
+            return None;
         }
         let normalized = normalize_path_string(&resolved);
         if !namespace_budget.reserve(
@@ -234,7 +399,26 @@ fn vue3_reachable_global_augmentation_files(
             return None;
         }
         if !vue3_module_path_can_contain_typescript(&resolved) {
+            if is_global_program_reference {
+                return None;
+            }
             seen.insert(identity);
+            continue;
+        }
+        if is_global_program_reference && !additional_global_paths.contains_key(&identity)
+        {
+            if !namespace_budget.reserve(
+                normalized
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(std::mem::size_of::<PathBuf>() * 2)
+                    .saturating_add(1),
+            ) {
+                return None;
+            }
+            additional_global_paths.insert(identity.clone(), resolved.clone());
+        }
+        if seen.contains(&identity) {
             continue;
         }
         if scanned_import_files >= max_import_files {
@@ -248,7 +432,7 @@ fn vue3_reachable_global_augmentation_files(
             source.source_type,
             &mut namespace_budget,
         )?;
-        if has_global_augmentation {
+        if has_global_augmentation && !additional_global_paths.contains_key(&identity) {
             if !namespace_budget.reserve(
                 normalized
                     .len()
@@ -258,7 +442,7 @@ fn vue3_reachable_global_augmentation_files(
             ) {
                 return None;
             }
-            augmentation_paths.insert(identity, resolved.clone());
+            additional_global_paths.insert(identity, resolved.clone());
         }
         enqueue_vue3_module_dependencies(
             &normalized,
@@ -268,7 +452,7 @@ fn vue3_reachable_global_augmentation_files(
             &mut namespace_budget,
         )?;
     }
-    Some(augmentation_paths.into_values().collect())
+    Some(additional_global_paths.into_values().collect())
 }
 
 pub(crate) fn extend_vue3_type_context_from_external_imports(
@@ -2907,6 +3091,9 @@ mod namespace_projection_budget_tests {
     #[test]
     fn module_dependency_scan_covers_typescript_module_edges_and_exact_budget() {
         let source = r#"
+/// <reference path="./reference-path" />
+/// <REFERENCE TYPES='./reference-types' />
+/// <reference lib="esnext" path="./ignored-lib" />
 import './side-effect'
 export { Named } from './named'
 export * from './all'
@@ -2916,12 +3103,14 @@ import Required = require('./import-equals')
 declare global { interface Augmented { value: string } }
 "#;
         let expected = BTreeSet::from([
-            "./all".to_string(),
-            "./dynamic".to_string(),
-            "./import-equals".to_string(),
-            "./import-type".to_string(),
-            "./named".to_string(),
-            "./side-effect".to_string(),
+            Vue3ModuleDependency::Module("./all".to_string()),
+            Vue3ModuleDependency::Module("./dynamic".to_string()),
+            Vue3ModuleDependency::Module("./import-equals".to_string()),
+            Vue3ModuleDependency::Module("./import-type".to_string()),
+            Vue3ModuleDependency::Module("./named".to_string()),
+            Vue3ModuleDependency::Module("./side-effect".to_string()),
+            Vue3ModuleDependency::ReferencePath("./reference-path".to_string()),
+            Vue3ModuleDependency::ReferenceTypes("./reference-types".to_string()),
         ]);
         let mut measured = budget(usize::MAX);
         let (has_augmentation, dependencies) = vue3_module_dependencies_from_source(
@@ -2961,6 +3150,201 @@ declare global { interface Augmented { value: string } }
     }
 
     #[test]
+    fn triple_slash_references_are_limited_to_leading_line_comments() {
+        let source = r#"
+/* ordinary leading comment */
+/// <reference path="./leading" />
+//// <reference path="./four-slashes" />
+//   / <reference path="./spaced-third-slash" />
+/* / <reference path="./block" /> */
+/* same line */ /// <reference path="./after-block" />
+"use strict";
+/// <reference path="./after-directive" />
+export {}
+/// <reference types="after-statement" />
+"#;
+        let mut namespace_budget = budget(usize::MAX);
+        let (_, dependencies) = vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::ts(),
+            &mut namespace_budget,
+        )
+        .expect("scan triple-slash directives");
+
+        assert_eq!(
+            dependencies,
+            BTreeSet::from([Vue3ModuleDependency::ReferencePath(
+                "./leading".to_string(),
+            )]),
+        );
+    }
+
+    #[test]
+    fn unsupported_triple_slash_resolution_modes_fail_closed() {
+        let source = r#"/// <reference types="mode-specific" resolution-mode="require" />
+export {}"#;
+        let mut namespace_budget = budget(usize::MAX);
+
+        assert!(vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::ts(),
+            &mut namespace_budget,
+        )
+        .is_none());
+        assert!(!namespace_budget.exhausted);
+    }
+
+    #[test]
+    fn reference_paths_promote_global_program_files_after_module_deduplication() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let referenced = dir.path().join("referenced.d.ts");
+        std::fs::write(
+            &referenced,
+            "interface ReferencedProps { value: string }",
+        )
+        .expect("write referenced global file");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: r#"/// <reference path="./referenced.d.ts" />
+import './referenced.d.ts'"#,
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &resolver),
+            Some(vec![referenced]),
+        );
+    }
+
+    #[test]
+    fn missing_and_self_referential_program_references_fail_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("Comp.vue");
+        std::fs::write(&filename, "").expect("write root file identity");
+        std::fs::write(dir.path().join("unsupported.css"), "body {}").expect("write asset");
+        let filename = filename.to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+        for source in [
+            r#"/// <reference path="./missing.d.ts" />"#,
+            r#"/// <reference path="./Comp.vue" />"#,
+            r#"/// <reference path="./unsupported.css" />"#,
+            r#"/// <reference types="missing-package" />"#,
+        ] {
+            let roots = [Vue3InlineModuleSource {
+                filename: &filename,
+                source,
+                source_type: oxc_span::SourceType::ts(),
+            }];
+            assert!(vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &roots,
+                &resolver,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn reference_path_resolution_uses_typescript_extensions_without_index_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let referenced = dir.path().join("referenced.ts");
+        let javascript = dir.path().join("referenced.js");
+        let modern = dir.path().join("modern.mts");
+        let index_dir = dir.path().join("directory");
+        std::fs::create_dir_all(&index_dir).expect("create reference directory");
+        std::fs::write(&referenced, "interface Referenced {}")
+            .expect("write extensionless reference target");
+        std::fs::write(&javascript, "export const value = 1")
+            .expect("write disallowed JavaScript reference target");
+        std::fs::write(&modern, "export interface Modern {}")
+            .expect("write modern reference target");
+        std::fs::write(index_dir.join("index.d.ts"), "interface IndexFallback {}")
+            .expect("write disallowed index fallback");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced", &resolver),
+            Some(referenced),
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, r#".\referenced"#, &resolver),
+            Some(dir.path().join("referenced.ts")),
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced.js", &resolver),
+            None,
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./modern", &resolver),
+            None,
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./modern.mts", &resolver),
+            Some(modern),
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./directory", &resolver),
+            None,
+        );
+    }
+
+    #[test]
+    fn reference_path_resolution_cache_is_kind_scoped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let module_dir = dir.path().join("shared");
+        std::fs::create_dir_all(&module_dir).expect("create module directory");
+        let module_index = module_dir.join("index.ts");
+        std::fs::write(&module_index, "export interface Imported {}")
+            .expect("write module index");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./shared", &resolver),
+            Some(module_index),
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./shared", &resolver),
+            None,
+        );
+        assert_eq!(resolver.external_type_session.stats().resolution_cache_hits, 0);
+    }
+
+    #[test]
+    fn reference_path_resolution_honors_exact_generated_path_limit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let referenced = dir.path().join("referenced.d.ts");
+        std::fs::write(&referenced, "interface Referenced {}")
+            .expect("write referenced declaration");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let required = referenced.as_os_str().as_encoded_bytes().len();
+        let exact = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: required,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced.d.ts", &exact),
+            Some(referenced.clone()),
+        );
+        assert_eq!(exact.external_type_session.failure_epoch(), 0);
+
+        let short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: required - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced.d.ts", &short),
+            None,
+        );
+        assert_eq!(short.external_type_session.failure_epoch(), 1);
+    }
+
+    #[test]
     fn module_augmentation_scan_skips_non_script_side_effect_assets() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("style.css"), ".root { color: red }")
@@ -2978,7 +3362,7 @@ declare global { interface Augmented { value: string } }
         }];
 
         assert_eq!(
-            vue3_reachable_global_augmentation_files(&[], &roots, &resolver),
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &resolver),
             Some(Vec::new()),
         );
         let stats = resolver.external_type_session.stats();
@@ -3009,7 +3393,9 @@ declare global { interface Augmented { value: string } }
             source_type: oxc_span::SourceType::ts(),
         }];
 
-        assert!(vue3_reachable_global_augmentation_files(&[], &roots, &resolver).is_none());
+        assert!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &resolver).is_none()
+        );
         assert_eq!(resolver.external_type_session.stats().import_files_read, 0);
         assert_eq!(
             resolve_vue3_type_import(&filename, "./actual", &resolver),
@@ -3040,7 +3426,9 @@ declare global { interface Augmented { value: string } }
             source_type: oxc_span::SourceType::ts(),
         }];
 
-        assert!(vue3_reachable_global_augmentation_files(&[], &roots, &resolver).is_none());
+        assert!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &resolver).is_none()
+        );
         assert_eq!(resolver.external_type_session.stats().resolution_lookups, 0);
     }
 

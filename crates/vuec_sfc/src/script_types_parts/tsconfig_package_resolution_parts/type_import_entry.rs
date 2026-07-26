@@ -7,6 +7,7 @@ pub(crate) fn resolve_vue3_type_import(
     match type_resolver
         .external_type_session
         .begin_type_import_resolution(
+            Vue3TypeResolutionKind::Import,
             filename,
             source,
             &type_resolver.typescript_version,

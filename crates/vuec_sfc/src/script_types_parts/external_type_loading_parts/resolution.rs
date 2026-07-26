@@ -1,5 +1,13 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Vue3TypeResolutionKind {
+    Import,
+    ReferencePath,
+    ReferenceTypes,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Vue3TypeImportResolutionCacheKey {
+    kind: Vue3TypeResolutionKind,
     importer: PathBuf,
     relative_current_dir: Option<PathBuf>,
     source: String,
@@ -63,6 +71,7 @@ enum Vue3TypeImportResolutionLoad {
 impl Vue3ExternalTypeLoadSession {
     fn begin_type_import_resolution(
         &self,
+        kind: Vue3TypeResolutionKind,
         filename: &str,
         source: &str,
         typescript_version: &nodejs_semver::Version,
@@ -101,6 +110,7 @@ impl Vue3ExternalTypeLoadSession {
             .saturating_add(std::mem::size_of::<Vue3TypeImportResolutionCacheEntry>());
         let cache_key = (minimum_weight <= max_cache_entry_weight).then(|| {
             Vue3TypeImportResolutionCacheKey {
+                kind,
                 importer: PathBuf::from(filename),
                 relative_current_dir,
                 source: source.to_string(),

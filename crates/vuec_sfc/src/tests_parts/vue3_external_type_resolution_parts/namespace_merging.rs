@@ -3323,6 +3323,301 @@ defineProps<ModulePrivate>()
 }
 
 #[test]
+fn vue3_triple_slash_references_add_global_program_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path_globals = dir.path().join("path-globals.d.ts");
+    let script_globals = dir.path().join("script-globals.ts");
+    let augmentation = dir.path().join("augmentation.ts");
+    let transitive = dir.path().join("transitive.ts");
+    let forced_module = dir.path().join("forced-module.mts");
+    let import_equals_module = dir.path().join("import-equals-module.ts");
+    let cycle_a = dir.path().join("cycle-a.d.ts");
+    let cycle_b = dir.path().join("cycle-b.d.ts");
+    let type_package = dir
+        .path()
+        .join("node_modules")
+        .join("@types")
+        .join("reference-package");
+    let type_index = type_package.join("index.d.ts");
+    let modern_type_package = dir
+        .path()
+        .join("node_modules")
+        .join("@types")
+        .join("modern-reference-package");
+    let modern_type_index = modern_type_package.join("index.d.mts");
+    let script_declaration_package = dir
+        .path()
+        .join("node_modules")
+        .join("@types")
+        .join("script-declaration-package");
+    let script_declaration_index = script_declaration_package.join("index.d.mts");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"types":[]}}"#,
+    )
+    .expect("write tsconfig with disabled automatic types");
+    std::fs::write(
+        &path_globals,
+        "interface PathProps { pathValue: string }",
+    )
+    .expect("write path reference globals");
+    std::fs::write(
+        &script_globals,
+        r#"interface ScriptProps { scriptValue: string }
+namespace ScriptNamespace {
+  interface Private { privateValue: boolean }
+  export interface Public { publicValue: number }
+}"#,
+    )
+    .expect("write script reference globals");
+    std::fs::write(
+        &augmentation,
+        "export {}; declare global { interface AugmentedProps { augmentedValue: number } }",
+    )
+    .expect("write reference augmentation module");
+    std::fs::write(
+        &transitive,
+        "/// <reference path='./path-globals.d.ts' />\nexport {}",
+    )
+    .expect("write transitive reference module");
+    std::fs::write(
+        &forced_module,
+        "declare interface ForcedModulePrivate { forcedModuleValue: string }",
+    )
+    .expect("write forced module reference");
+    std::fs::write(
+        &import_equals_module,
+        r#"import Dependency = require('./missing')
+declare interface ImportEqualsPrivate { importEqualsValue: string }
+type Marker = Dependency"#,
+    )
+    .expect("write import-equals module reference");
+    std::fs::write(
+        &cycle_a,
+        "/// <reference path='./cycle-b.d.ts' />\ninterface CycleA { first: boolean }",
+    )
+    .expect("write first reference cycle file");
+    std::fs::write(
+        &cycle_b,
+        "/// <reference path='./cycle-a.d.ts' />\ninterface CycleB { second: bigint }",
+    )
+    .expect("write second reference cycle file");
+    std::fs::create_dir_all(&type_package).expect("create reference type package");
+    std::fs::write(
+        type_package.join("package.json"),
+        r#"{"types":"index.d.ts"}"#,
+    )
+    .expect("write reference type package metadata");
+    std::fs::write(
+        &type_index,
+        "interface TypeReferenceProps { typeValue: symbol }",
+    )
+    .expect("write reference type package entry");
+    std::fs::create_dir_all(&modern_type_package).expect("create modern reference type package");
+    std::fs::write(
+        modern_type_package.join("package.json"),
+        r#"{"types":"index.d.mts"}"#,
+    )
+    .expect("write modern reference type package metadata");
+    std::fs::write(
+        &modern_type_index,
+        "export {}; declare global { interface ModernReferenceProps { modernValue: Date } }",
+    )
+    .expect("write modern reference type package entry");
+    std::fs::create_dir_all(&script_declaration_package)
+        .expect("create script declaration type package");
+    std::fs::write(
+        script_declaration_package.join("package.json"),
+        r#"{"types":"index.d.mts"}"#,
+    )
+    .expect("write script declaration package metadata");
+    std::fs::write(
+        &script_declaration_index,
+        "interface ScriptDeclarationProps { declarationValue: string }",
+    )
+    .expect("write script declaration package entry");
+
+    let filename = dir.path().join("Comp.vue");
+    let cases = [
+        (
+            "root-path",
+            r#"<script setup lang="ts">
+/// <reference path="./path-globals" />
+defineProps<PathProps>()
+</script>"#,
+            "pathValue: { type: String, required: true }",
+            path_globals.clone(),
+        ),
+        (
+            "transitive-path",
+            r#"<script setup lang="ts">
+import './transitive'
+defineProps<PathProps>()
+</script>"#,
+            "pathValue: { type: String, required: true }",
+            path_globals.clone(),
+        ),
+        (
+            "script-path",
+            r#"<script setup lang="ts">
+/// <reference path="./script-globals.ts" />
+defineProps<ScriptProps & ScriptNamespace.Public>()
+</script>"#,
+            "scriptValue: { type: String, required: true }",
+            script_globals.clone(),
+        ),
+        (
+            "script-namespace-path",
+            r#"<script setup lang="ts">
+/// <reference path="./script-globals.ts" />
+defineProps<ScriptNamespace.Public>()
+</script>"#,
+            "publicValue: { type: Number, required: true }",
+            script_globals.clone(),
+        ),
+        (
+            "external-module-path",
+            r#"<script setup lang="ts">
+/// <reference path="./augmentation.ts" />
+defineProps<AugmentedProps>()
+</script>"#,
+            "augmentedValue: { type: Number, required: true }",
+            augmentation.clone(),
+        ),
+        (
+            "explicit-types",
+            r#"<script setup lang="ts">
+/// <reference types="reference-package" />
+defineProps<TypeReferenceProps>()
+</script>"#,
+            "typeValue: { type: Symbol, required: true }",
+            type_index.clone(),
+        ),
+        (
+            "modern-explicit-types",
+            r#"<script setup lang="ts">
+/// <reference types="modern-reference-package" />
+defineProps<ModernReferenceProps>()
+</script>"#,
+            "modernValue: { type: Date, required: true }",
+            modern_type_index.clone(),
+        ),
+        (
+            "script-declaration-types",
+            r#"<script setup lang="ts">
+/// <reference types="script-declaration-package" />
+defineProps<ScriptDeclarationProps>()
+</script>"#,
+            "declarationValue: { type: String, required: true }",
+            script_declaration_index.clone(),
+        ),
+    ];
+
+    for (case, source, expected_prop, expected_dep) in cases {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{case}: {:?}", script.errors);
+        assert!(
+            script.content.contains(expected_prop),
+            "missing {case} prop: {}",
+            script.content,
+        );
+        assert!(
+            script
+                .deps
+                .contains(&normalize_path_string(&expected_dep)),
+            "missing {case} dependency: {:?}",
+            script.deps,
+        );
+    }
+
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(
+        filename.to_string_lossy(),
+        r#"<script setup lang="ts">
+/// <reference path="./cycle-a.d.ts" />
+defineProps<CycleA & CycleB>()
+</script>"#,
+    );
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("first: { type: Boolean, required: true }"), "{}", script.content);
+    assert!(script
+        .content
+        .contains("second: { type: null, required: true }"), "{}", script.content);
+    let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+    assert!(deps.contains(&normalize_path_string(&cycle_a)));
+    assert!(deps.contains(&normalize_path_string(&cycle_b)));
+
+    for (case, source, private_member) in [
+        (
+            "namespace-private",
+            r#"<script setup lang="ts">
+/// <reference path="./script-globals.ts" />
+defineProps<ScriptNamespace.Private>()
+</script>"#,
+            "privateValue:",
+        ),
+        (
+            "forced-module-private",
+            r#"<script setup lang="ts">
+/// <reference path="./forced-module.mts" />
+defineProps<ForcedModulePrivate>()
+</script>"#,
+            "forcedModuleValue:",
+        ),
+        (
+            "import-equals-private",
+            r#"<script setup lang="ts">
+/// <reference path="./import-equals-module.ts" />
+defineProps<ImportEqualsPrivate>()
+</script>"#,
+            "importEqualsValue:",
+        ),
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert!(
+            !script.content.contains(private_member),
+            "leaked {case} member: {}",
+            script.content,
+        );
+    }
+}
+
+#[test]
+fn vue3_reference_types_do_not_promote_implementation_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = dir.path().join("runtime.ts");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"types":[]}}"#,
+    )
+    .expect("write tsconfig with disabled automatic types");
+    std::fs::write(
+        &runtime,
+        "interface RuntimeOnlyProps { leaked: string }",
+    )
+    .expect("write implementation file");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+/// <reference types="./runtime" />
+defineProps<RuntimeOnlyProps>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(!script.content.contains("leaked:"), "{}", script.content);
+    assert!(!script.deps.contains(&normalize_path_string(&runtime)));
+}
+
+#[test]
 fn vue3_incompatible_global_interface_and_enum_members_block_dependents() {
     let dir = tempfile::tempdir().expect("temp dir");
     let string_interface = dir.path().join("string-interface.d.ts");

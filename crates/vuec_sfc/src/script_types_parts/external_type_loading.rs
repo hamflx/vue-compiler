@@ -299,6 +299,10 @@ impl Vue3ExternalTypeLoadSession {
         self.lock().failure_epoch += 1;
     }
 
+    fn record_resolution_failure(&self) {
+        self.lock().failure_epoch += 1;
+    }
+
     fn has_context_build_capacity(&self) -> bool {
         let state = self.lock();
         state.stats.context_lookups < state.limits.max_context_lookups

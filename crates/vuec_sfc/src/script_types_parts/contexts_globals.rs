@@ -967,14 +967,15 @@ fn vue3_global_type_context_with_module_sources(
         };
         files.push(Vue3GlobalTypeFile { path, source });
     }
-    let Some(augmentation_paths) = vue3_reachable_global_augmentation_files(
+    let Some(additional_global_paths) = vue3_reachable_global_augmentation_files(
+        filename,
         &files,
         inline_module_sources,
         type_resolver,
     ) else {
         return Vue27TypeContext::default();
     };
-    for path in augmentation_paths {
+    for path in additional_global_paths {
         if seen.insert(vue3_external_type_context_cache_key(
             &path,
             &type_resolver.typescript_version,
@@ -1382,6 +1383,9 @@ fn vue3_global_type_projection_from_source(
             kinds: Vue3GlobalDeclarationKinds::default(),
         });
     }
+    let program_is_global_script = (source_type.is_typescript_definition()
+        || parsed.program.source_type.is_script())
+        && vue3_statements_are_ambient_global_scope(&parsed.program.body);
 
     let dependency = normalize_path_string(Path::new(filename));
     if !namespace_budget.reserve(vue3_external_type_context_cache_cost(base_context)) {
@@ -1405,6 +1409,7 @@ fn vue3_global_type_projection_from_source(
         &dependency,
         &parsed.program.body,
         source_type.is_typescript_definition(),
+        program_is_global_script,
         type_resolver,
         base_kinds,
         namespace_budget,
@@ -1496,6 +1501,7 @@ fn vue3_global_type_projection_from_source(
             source,
             &parsed.program.body,
             source_type.is_typescript_definition(),
+            program_is_global_script,
             base_context,
             base_kinds,
             &kinds,
@@ -1626,6 +1632,7 @@ fn vue3_global_declaration_kinds(
     definition_key: &str,
     statements: &[Statement<'_>],
     is_typescript_definition: bool,
+    program_is_global_script: bool,
     type_resolver: &Vue3TypeResolverContext,
     base_kinds: &Vue3GlobalDeclarationKinds,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
@@ -1633,7 +1640,7 @@ fn vue3_global_declaration_kinds(
     if !namespace_budget.reserve(source.len().saturating_add(statements.len())) {
         return None;
     }
-    let is_ambient = vue3_statements_are_ambient_global_scope(statements);
+    let is_ambient = program_is_global_script;
     let import_names =
         vue3_global_type_file_import_names_with_budget(statements, namespace_budget)?;
     if !namespace_budget.reserve(definition_key.len().saturating_add(1)) {
@@ -1705,12 +1712,14 @@ fn vue3_global_declaration_kinds(
         )?;
     }
     let mut kinds = Vue3GlobalDeclarationKinds::default();
-    for group in &groups {
+    for (index, group) in groups.iter().enumerate() {
+        let namespace_ambient = !is_ambient || index != 0 || is_typescript_definition;
         collect_vue3_global_declaration_kinds_from_statements(
             source,
             group,
             None,
             true,
+            namespace_ambient,
             0,
             &scoped_roots,
             &mut kinds,
@@ -2021,7 +2030,8 @@ fn collect_vue3_global_declaration_kinds_from_statements(
     source: &str,
     statements: &[Statement<'_>],
     prefix: Option<&str>,
-    ambient: bool,
+    members_are_ambient: bool,
+    namespace_is_ambient: bool,
     depth: usize,
     scoped_roots: &Vue3GlobalScopedRoots,
     kinds: &mut Vue3GlobalDeclarationKinds,
@@ -2033,7 +2043,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
     }
     for statement in statements {
         match statement {
-            Statement::TSTypeAliasDeclaration(declaration) if ambient => {
+            Statement::TSTypeAliasDeclaration(declaration) if members_are_ambient => {
                 insert_vue3_global_type_alias_declaration_kind(
                     prefix,
                     declaration.id.name.as_str(),
@@ -2041,7 +2051,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     namespace_budget,
                 )?;
             }
-            Statement::FunctionDeclaration(function) if ambient => {
+            Statement::FunctionDeclaration(function) if members_are_ambient => {
                 if let Some(id) = &function.id {
                     insert_vue3_global_function_declaration_kind(
                         prefix,
@@ -2051,7 +2061,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     )?;
                 }
             }
-            Statement::VariableDeclaration(declaration) if ambient => {
+            Statement::VariableDeclaration(declaration) if members_are_ambient => {
                 collect_vue3_global_variable_declaration_kind_names(
                     declaration,
                     prefix,
@@ -2059,7 +2069,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     namespace_budget,
                 )?;
             }
-            Statement::TSInterfaceDeclaration(declaration) if ambient => {
+            Statement::TSInterfaceDeclaration(declaration) if members_are_ambient => {
                 insert_vue3_global_interface_declaration_kind(
                     source,
                     declaration,
@@ -2069,7 +2079,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     namespace_budget,
                 )?;
             }
-            Statement::TSEnumDeclaration(declaration) if ambient => {
+            Statement::TSEnumDeclaration(declaration) if members_are_ambient => {
                 insert_vue3_global_enum_declaration_kind(
                     declaration,
                     prefix,
@@ -2078,7 +2088,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     namespace_budget,
                 )?;
             }
-            Statement::ClassDeclaration(declaration) if ambient => {
+            Statement::ClassDeclaration(declaration) if members_are_ambient => {
                 insert_vue3_global_class_declaration_kind(
                     source,
                     declaration,
@@ -2095,7 +2105,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                     source,
                     declaration,
                     prefix,
-                    ambient || declaration.declare,
+                    namespace_is_ambient || declaration.declare,
                     depth.saturating_add(1),
                     scoped_roots,
                     kinds,
@@ -2165,7 +2175,7 @@ fn collect_vue3_global_declaration_kinds_from_statements(
                         source,
                         declaration,
                         prefix,
-                        ambient || declaration.declare,
+                        namespace_is_ambient || declaration.declare,
                         depth.saturating_add(1),
                         scoped_roots,
                         kinds,
@@ -4879,6 +4889,7 @@ fn collect_vue3_global_declaration_kinds_from_namespace(
                 &block.body,
                 Some(&qualified),
                 ambient,
+                ambient,
                 depth,
                 scoped_roots,
                 kinds,
@@ -6778,10 +6789,12 @@ fn collect_vue3_global_types_from_statements_with_budget(
     analysis: &mut Vue3ScriptSetupAnalysis,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
+    let program_is_global_script = vue3_statements_are_ambient_global_scope(statements);
     collect_vue3_global_types_from_statements_with_budget_and_kinds(
         source,
         statements,
         implicitly_ambient,
+        program_is_global_script,
         base_context,
         &Vue3GlobalDeclarationKinds::default(),
         &Vue3GlobalDeclarationKinds::default(),
@@ -6794,6 +6807,7 @@ fn collect_vue3_global_types_from_statements_with_budget_and_kinds(
     source: &str,
     statements: &[Statement<'_>],
     implicitly_ambient: bool,
+    program_is_global_script: bool,
     base_context: &Vue27TypeContext,
     base_kinds: &Vue3GlobalDeclarationKinds,
     kinds: &Vue3GlobalDeclarationKinds,
@@ -6808,6 +6822,7 @@ fn collect_vue3_global_types_from_statements_with_budget_and_kinds(
         source,
         statements,
         implicitly_ambient,
+        program_is_global_script,
         base_context,
         &mut working_analysis,
         namespace_budget,
@@ -6829,6 +6844,7 @@ fn collect_vue3_global_types_from_statements_inner(
     source: &str,
     statements: &[Statement<'_>],
     implicitly_ambient: bool,
+    program_is_global_script: bool,
     base_context: &Vue27TypeContext,
     analysis: &mut Vue3ScriptSetupAnalysis,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
@@ -6836,7 +6852,7 @@ fn collect_vue3_global_types_from_statements_inner(
     let mut names = BTreeSet::new();
     let module_import_names =
         vue3_global_type_file_import_names_with_budget(statements, namespace_budget)?;
-    let is_ambient = vue3_statements_are_ambient_global_scope(statements);
+    let is_ambient = program_is_global_script;
     if is_ambient {
         for statement in statements {
             collect_vue3_predeclared_runtime_type_from_statement(statement, analysis);
@@ -6884,7 +6900,7 @@ fn collect_vue3_global_types_from_statements_inner(
         project_vue3_namespace_groups_from_statement_groups_with_budget(
             source,
             &statement_groups,
-            true,
+            implicitly_ambient,
             0,
             analysis,
             namespace_budget,
@@ -7505,7 +7521,17 @@ fn vue3_statements_are_ambient_global_scope(statements: &[Statement<'_>]) -> boo
                 | Statement::ExportAllDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
                 | Statement::ExportNamedDeclaration(_)
+                | Statement::TSExportAssignment(_)
+                | Statement::TSNamespaceExportDeclaration(_)
         )
+            || matches!(
+                statement,
+                Statement::TSImportEqualsDeclaration(declaration)
+                    if matches!(
+                        &declaration.module_reference,
+                        oxc_ast::ast::TSModuleReference::ExternalModuleReference(_)
+                    )
+            )
     })
 }
 
@@ -7558,8 +7584,14 @@ fn collect_vue3_ambient_global_type_from_statement(
                 namespace_budget,
             )?);
         }
+        Statement::TSModuleDeclaration(declaration) => {
+            names.extend(vue3_namespace_exported_type_names_with_budget(
+                declaration,
+                namespace_budget,
+            )?);
+        }
         _ if vue3_statement_is_declare_type(statement)
-            || (implicitly_ambient && vue3_statement_is_implicit_ambient_type(statement)) =>
+            || vue3_statement_is_implicit_ambient_type(statement) =>
         {
             names.extend(vue3_declared_type_names_from_statement_with_budget(
                 statement,

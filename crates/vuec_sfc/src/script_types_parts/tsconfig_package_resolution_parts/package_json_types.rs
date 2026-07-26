@@ -13,6 +13,7 @@ pub(crate) struct Vue3PackageJsonTypeManifest {
     pub(crate) exports: Option<serde_json::Value>,
     pub(crate) types: Option<serde_json::Value>,
     pub(crate) typings: Option<serde_json::Value>,
+    pub(crate) main: Option<serde_json::Value>,
     pub(crate) types_versions: Vue3PackageTypesVersions,
 }
 
@@ -42,6 +43,7 @@ impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
                         "exports" => manifest.exports = Some(map.next_value()?),
                         "types" => manifest.types = Some(map.next_value()?),
                         "typings" => manifest.typings = Some(map.next_value()?),
+                        "main" => manifest.main = Some(map.next_value()?),
                         "typesVersions" => manifest.types_versions = map.next_value()?,
                         _ => {
                             map.next_value::<IgnoredAny>()?;
@@ -208,6 +210,33 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
+    resolve_vue3_package_json_type_entry_with_exports(
+        package_dir,
+        subpath,
+        type_resolver,
+        true,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_json_type_reference_entry(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageJsonTypeResolution {
+    resolve_vue3_package_json_type_entry_with_exports(
+        package_dir,
+        subpath,
+        type_resolver,
+        false,
+    )
+}
+
+fn resolve_vue3_package_json_type_entry_with_exports(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+    honor_exports: bool,
+) -> Vue3PackageJsonTypeResolution {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
     }
@@ -228,7 +257,11 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
             Vue3PackageJsonTypeResolution::NoPackageJson
         };
     };
-    if let Some(exports) = manifest.exports.as_ref().filter(|exports| !exports.is_null()) {
+    if let Some(exports) = honor_exports
+        .then_some(manifest.exports.as_ref())
+        .flatten()
+        .filter(|exports| !exports.is_null())
+    {
         if let Some(target) =
             vue3_package_exports_type_target(exports, subpath, type_resolver)
         {
@@ -251,6 +284,12 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
             .or_else(|| {
                 manifest
                     .typings
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                manifest
+                    .main
                     .as_ref()
                     .and_then(serde_json::Value::as_str)
             })

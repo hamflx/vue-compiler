@@ -9,6 +9,164 @@ pub(crate) fn resolve_vue3_type_import_path(
     )
 }
 
+pub(crate) fn resolve_vue3_type_reference_path(
+    filename: &str,
+    reference: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    match type_resolver
+        .external_type_session
+        .begin_type_import_resolution(
+            Vue3TypeResolutionKind::ReferencePath,
+            filename,
+            reference,
+            &type_resolver.typescript_version,
+            true,
+        )
+    {
+        Vue3TypeImportResolutionLoad::Ready(resolution) => resolution,
+        Vue3TypeImportResolutionLoad::Failed => None,
+        Vue3TypeImportResolutionLoad::Start {
+            cache_key,
+            failure_epoch,
+        } => {
+            let resolution =
+                resolve_vue3_type_reference_path_uncached(filename, reference, type_resolver);
+            type_resolver
+                .external_type_session
+                .finish_type_import_resolution(cache_key, resolution, failure_epoch, true)
+        }
+    }
+}
+
+fn resolve_vue3_type_reference_path_uncached(
+    filename: &str,
+    reference: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if reference.is_empty() {
+        return None;
+    }
+    let base = Path::new(filename)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let candidate = normalize_path_components(base.join(reference.replace('\\', "/")));
+    let max_path_bytes = type_resolver
+        .external_type_session
+        .limits()
+        .max_generated_path_bytes
+        .min(VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES);
+    if candidate.as_os_str().as_encoded_bytes().len() > max_path_bytes {
+        type_resolver
+            .external_type_session
+            .record_resolution_failure();
+        return None;
+    }
+    if candidate.extension().is_some() {
+        if !vue3_type_reference_path_has_supported_extension(&candidate) {
+            return None;
+        }
+        return candidate.is_file().then_some(candidate);
+    }
+    for extension in ["ts", "tsx", "d.ts"] {
+        let candidate = path_with_extension(&candidate, extension);
+        if candidate.as_os_str().as_encoded_bytes().len() > max_path_bytes {
+            type_resolver
+                .external_type_session
+                .record_resolution_failure();
+            return None;
+        }
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn vue3_type_reference_path_has_supported_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["ts", "tsx", "mts", "cts", "vue"]
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+}
+
+pub(crate) fn resolve_vue3_metadata_type_reference_declaration_file(
+    candidate: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_type_reference_declaration_file_with_probe_mode(
+        candidate,
+        type_resolver,
+        Vue3TypeImportPathProbeMode::Metadata,
+    )
+}
+
+fn resolve_vue3_type_reference_declaration_file_with_probe_mode(
+    candidate: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+    probe_mode: Vue3TypeImportPathProbeMode,
+) -> Option<PathBuf> {
+    if !probe_mode.path_is_within_limit(candidate, type_resolver) {
+        return None;
+    }
+    for candidate in vue3_type_reference_declaration_candidates(candidate) {
+        if !probe_mode.path_is_within_limit(&candidate, type_resolver) {
+            return None;
+        }
+        if probe_mode.exists(&candidate, type_resolver)? {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn vue3_type_reference_declaration_candidates(candidate: &Path) -> Vec<PathBuf> {
+    let file_name = candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|extension| file_name.ends_with(extension))
+    {
+        return vec![candidate.to_path_buf()];
+    }
+    let extension = candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    if extension.is_empty() {
+        return vec![path_with_extension(candidate, "d.ts")];
+    }
+    let declaration_extension = match extension {
+        "mts" | "mjs" => Some("d.mts"),
+        "cts" | "cjs" => Some("d.cts"),
+        "ts" | "tsx" | "js" | "jsx" => Some("d.ts"),
+        _ => None,
+    };
+    let mut candidates = Vec::new();
+    if let Some(declaration_extension) = declaration_extension {
+        let stem = candidate.with_extension("");
+        candidates.push(path_with_extension(&stem, declaration_extension));
+    } else {
+        candidates.push(arbitrary_extension_type_candidate(
+            &candidate.with_extension(""),
+            extension,
+        ));
+    }
+    if !file_name.is_empty() {
+        let mut appended = candidate.to_path_buf();
+        appended.set_file_name(format!("{file_name}.d.ts"));
+        if candidates.first() != Some(&appended) {
+            candidates.push(appended);
+        }
+    }
+    candidates
+}
+
 pub(crate) fn resolve_vue3_metadata_type_import_path(
     candidate: &Path,
     type_resolver: &Vue3TypeResolverContext,
@@ -27,6 +185,28 @@ enum Vue3TypeImportPathProbeMode {
 }
 
 impl Vue3TypeImportPathProbeMode {
+    fn path_is_within_limit(
+        self,
+        path: &Path,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
+        let max_path_bytes = type_resolver
+            .external_type_session
+            .limits()
+            .max_generated_path_bytes
+            .min(VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES);
+        if path.as_os_str().as_encoded_bytes().len() <= max_path_bytes {
+            return true;
+        }
+        match self {
+            Self::Source => type_resolver
+                .external_type_session
+                .record_resolution_failure(),
+            Self::Metadata => type_resolver.external_type_session.block_metadata(),
+        }
+        false
+    }
+
     fn is_dir(self, path: &Path, type_resolver: &Vue3TypeResolverContext) -> Option<bool> {
         match self {
             Self::Source => Some(path.is_dir()),
@@ -51,6 +231,9 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     type_resolver: &Vue3TypeResolverContext,
     probe_mode: Vue3TypeImportPathProbeMode,
 ) -> Option<PathBuf> {
+    if !probe_mode.path_is_within_limit(candidate, type_resolver) {
+        return None;
+    }
     let extension = candidate
         .extension()
         .and_then(|extension| extension.to_str())
@@ -86,6 +269,9 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         candidates.push(candidate.join("index.d.ts"));
     }
     for candidate in candidates {
+        if !probe_mode.path_is_within_limit(&candidate, type_resolver) {
+            return None;
+        }
         if probe_mode.exists(&candidate, type_resolver)? {
             return Some(candidate);
         }
