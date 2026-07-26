@@ -1776,7 +1776,7 @@ fn vue3_tsconfig_discovery_budget_is_shared_across_extends_and_references() {
     });
     assert_eq!(
         vue3_tsconfig_global_type_files(&filename, &accepted),
-        vec![base_file, root_file, package_file]
+        vec![root_file, base_file, package_file]
     );
     let stats = accepted.external_type_session.stats();
     assert_eq!(stats.tsconfig_discovery_entries, 4);

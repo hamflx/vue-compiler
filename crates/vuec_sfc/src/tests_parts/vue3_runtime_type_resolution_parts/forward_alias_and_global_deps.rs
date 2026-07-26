@@ -432,6 +432,159 @@ defineProps<ExplicitProps & KeptProps>()
     }
 
     #[test]
+    fn vue3_tsconfig_file_specs_follow_extends_replacement_and_origins() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let configs = dir.path().join("configs");
+        let project = dir.path().join("project");
+        let globals = dir.path().join("globals");
+        let shared = dir.path().join("shared");
+        let reference = dir.path().join("reference");
+        for directory in [
+            configs.clone(),
+            project.join("direct"),
+            globals.clone(),
+            shared.join("first-excluded"),
+            shared.join("second-excluded"),
+            shared.join("root-excluded"),
+            reference.clone(),
+        ] {
+            std::fs::create_dir_all(directory).expect("create extends file-spec fixture");
+        }
+        std::fs::write(
+            configs.join("first.json"),
+            r#"{
+                "files": ["../globals/first.d.ts"],
+                "include": ["../shared/**/*.d.ts"],
+                "exclude": ["../shared/first-excluded"],
+                "references": [{ "path": "../reference" }]
+            }"#,
+        )
+        .expect("write first base config");
+        std::fs::write(
+            configs.join("second.json"),
+            r#"{
+                "files": ["../globals/second.d.ts"],
+                "exclude": ["../shared/second-excluded"]
+            }"#,
+        )
+        .expect("write second base config");
+        std::fs::write(
+            reference.join("tsconfig.json"),
+            r#"{"files":["./leaked.d.ts"],"compilerOptions":{"types":[]}}"#,
+        )
+        .expect("write non-inherited reference config");
+
+        let first_file = globals.join("first.d.ts");
+        let second_file = globals.join("second.d.ts");
+        let kept = shared.join("kept.d.ts");
+        let first_excluded = shared.join("first-excluded").join("value.d.ts");
+        let second_excluded = shared.join("second-excluded").join("value.d.ts");
+        let root_excluded = shared.join("root-excluded").join("value.d.ts");
+        let direct = project.join("direct").join("value.d.ts");
+        let leaked_reference = reference.join("leaked.d.ts");
+        for path in [
+            &first_file,
+            &second_file,
+            &kept,
+            &first_excluded,
+            &second_excluded,
+            &root_excluded,
+            &direct,
+            &leaked_reference,
+        ] {
+            std::fs::write(path, "declare interface Fixture {}").expect("write file-spec fixture");
+        }
+        let filename = project.join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+        let discover = || {
+            vue3_tsconfig_global_type_files(
+                &filename_text,
+                &vue3_type_resolver_context_for_filename(&filename_text),
+            )
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        };
+
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{
+                "extends": ["../configs/first.json", "../configs/second.json"],
+                "compilerOptions": { "types": [] }
+            }"#,
+        )
+        .expect("write multiple extends config");
+        assert_eq!(
+            discover(),
+            [second_file.clone(), kept.clone(), first_excluded.clone(), root_excluded.clone()]
+                .into_iter()
+                .collect()
+        );
+
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{
+                "extends": ["../configs/first.json", "../configs/second.json"],
+                "files": [],
+                "include": ["./direct/**/*.d.ts"],
+                "exclude": [],
+                "compilerOptions": { "types": [] }
+            }"#,
+        )
+        .expect("write direct override config");
+        assert_eq!(discover(), [direct].into_iter().collect());
+
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{
+                "extends": "../configs/first.json",
+                "exclude": ["../shared/root-excluded"],
+                "compilerOptions": { "types": [] }
+            }"#,
+        )
+        .expect("write inherited include with direct exclude config");
+        assert_eq!(
+            discover(),
+            [first_file, kept, first_excluded, second_excluded]
+                .into_iter()
+                .collect()
+        );
+        assert!(!discover().contains(&leaked_reference));
+    }
+
+    #[test]
+    fn vue3_tsconfig_global_files_use_only_the_nearest_project_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(nested.join("src")).expect("create nested project");
+        let outer = dir.path().join("outer.d.ts");
+        let inner = nested.join("inner.d.ts");
+        std::fs::write(&outer, "declare interface OuterProps {}")
+            .expect("write outer declaration");
+        std::fs::write(&inner, "declare interface InnerProps {}")
+            .expect("write inner declaration");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"files":["./outer.d.ts"],"compilerOptions":{"types":[]}}"#,
+        )
+        .expect("write outer config");
+        std::fs::write(
+            nested.join("tsconfig.json"),
+            r#"{"files":["./inner.d.ts"],"compilerOptions":{"types":[]}}"#,
+        )
+        .expect("write nearest config");
+        let filename = nested.join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+
+        assert_eq!(
+            vue3_tsconfig_global_type_files(
+                &filename_text,
+                &vue3_type_resolver_context_for_filename(&filename_text),
+            ),
+            vec![inner]
+        );
+    }
+
+    #[test]
     fn vue3_tsconfig_filesystem_fields_accept_windows_separators_cross_platform() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src = dir.path().join("src");
