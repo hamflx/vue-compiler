@@ -100,18 +100,22 @@ pub(crate) fn vue3_merge_props_type_members(
     filter_duplicate_unknown: bool,
 ) -> (Vec<Vue27RuntimeProp>, Vec<String>) {
     let mut merged: Vec<Vue27RuntimeProp> = Vec::new();
+    let mut indexes = std::collections::HashMap::<String, usize>::new();
     let mut errors = Vec::new();
     for type_members in members {
         errors.extend(type_members.errors);
         for prop in type_members.members {
-            if let Some(index) = merged.iter().position(|existing| existing.key == prop.key) {
+            if let Some(index) = indexes.get(prop.key.as_str()).copied() {
                 let existing = &mut merged[index];
                 let mut types = Vec::new();
+                let mut seen_types = std::collections::HashSet::new();
                 for runtime_type in existing.types.iter().chain(prop.types.iter()) {
                     if filter_duplicate_unknown && runtime_type == "Unknown" {
                         continue;
                     }
-                    push_unique(&mut types, runtime_type);
+                    if seen_types.insert(runtime_type.as_str()) {
+                        types.push(runtime_type.clone());
+                    }
                 }
                 if types.is_empty() {
                     types.push("Unknown".to_string());
@@ -120,10 +124,120 @@ pub(crate) fn vue3_merge_props_type_members(
                 existing.required &= prop.required;
                 continue;
             }
+            indexes.insert(prop.key.clone(), merged.len());
             merged.push(prop);
         }
     }
     (merged, errors)
+}
+
+#[cfg(test)]
+mod vue3_merge_props_type_members_tests {
+    use super::*;
+
+    fn prop(
+        key: &str,
+        types: &[&str],
+        required: bool,
+        marker: &str,
+    ) -> Vue27RuntimeProp {
+        Vue27RuntimeProp {
+            key: key.to_string(),
+            types: types.iter().map(|value| (*value).to_string()).collect(),
+            required,
+            default: Some(format!("default-{marker}")),
+            is_method: marker == "method",
+            type_annotation_source: Some(format!("type-{marker}")),
+            member_source: Some(format!("member-{marker}")),
+        }
+    }
+
+    fn members(
+        source: &str,
+        members: Vec<Vue27RuntimeProp>,
+        errors: &[&str],
+    ) -> Vue27TypeMembers {
+        Vue27TypeMembers {
+            source: source.to_string(),
+            members,
+            errors: errors.iter().map(|error| (*error).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn indexed_member_merge_preserves_order_and_first_wins_metadata() {
+        let first_b = prop("b", &["Unknown", "String", "String"], true, "first");
+        let first_b_metadata = (
+            first_b.default.clone(),
+            first_b.is_method,
+            first_b.type_annotation_source.clone(),
+            first_b.member_source.clone(),
+        );
+        let inputs = vec![
+            members(
+                "first",
+                vec![
+                    first_b,
+                    prop("a", &["Unknown", "Unknown"], true, "only"),
+                    prop("unknown", &["Unknown"], true, "unknown-first"),
+                ],
+                &["first-error"],
+            ),
+            members(
+                "second",
+                vec![
+                    prop("b", &["Number", "Unknown", "String"], false, "second"),
+                    prop("c", &["Boolean"], true, "only"),
+                    prop("unknown", &["Unknown"], false, "unknown-second"),
+                ],
+                &["second-error"],
+            ),
+        ];
+
+        let (merged, errors) = vue3_merge_props_type_members(inputs, true);
+
+        assert_eq!(
+            merged.iter().map(|prop| prop.key.as_str()).collect::<Vec<_>>(),
+            ["b", "a", "unknown", "c"]
+        );
+        assert_eq!(merged[0].types, ["String", "Number"]);
+        assert!(!merged[0].required);
+        assert_eq!(
+            (
+                merged[0].default.clone(),
+                merged[0].is_method,
+                merged[0].type_annotation_source.clone(),
+                merged[0].member_source.clone(),
+            ),
+            first_b_metadata
+        );
+        assert_eq!(merged[1].types, ["Unknown", "Unknown"]);
+        assert_eq!(merged[2].types, ["Unknown"]);
+        assert!(!merged[2].required);
+        assert_eq!(errors, ["first-error", "second-error"]);
+    }
+
+    #[test]
+    fn indexed_member_merge_retains_unknown_without_filtering() {
+        let inputs = vec![
+            members(
+                "first",
+                vec![prop("value", &["Unknown", "String"], true, "first")],
+                &[],
+            ),
+            members(
+                "second",
+                vec![prop("value", &["Unknown", "Number"], true, "second")],
+                &[],
+            ),
+        ];
+
+        let (merged, errors) = vue3_merge_props_type_members(inputs, false);
+
+        assert!(errors.is_empty());
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].types, ["Unknown", "String", "Number"]);
+    }
 }
 
 pub(crate) fn vue3_resolve_projectable_props_type(
