@@ -414,6 +414,7 @@ pub(crate) fn vue3_package_exports_type_target_with_mode(
 enum Vue3PackageExportVisit {
     Resolved,
     Missing,
+    Rejected,
     Invalid,
     Blocked,
 }
@@ -591,7 +592,7 @@ fn visit_vue3_package_export_target(
         return visitor(&expanded);
     }
     if target.is_null() {
-        return Vue3PackageExportVisit::Missing;
+        return Vue3PackageExportVisit::Rejected;
     }
     if let Some(targets) = target.as_array() {
         for target in targets {

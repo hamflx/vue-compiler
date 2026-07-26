@@ -104,16 +104,16 @@ fn resolve_vue3_dependency_package_self_reference_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageSelfReferenceResolution {
-    let filename = Path::new(filename);
+    let filename = normalize_path_components(PathBuf::from(filename));
     // Local project self-references also need tsconfig output-to-input remapping.
-    if !vue3_path_contains_node_modules(filename) {
+    if !vue3_path_contains_node_modules(&filename) {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     }
     let Some((package_name, subpath)) = vue3_package_import_parts(source) else {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     };
     let (package_dir, manifest) = match vue3_package_scope_for_path(
-        filename,
+        &filename,
         &type_resolver.external_type_session,
     ) {
         Vue3PackageScopeResolution::Found {
@@ -127,7 +127,8 @@ fn resolve_vue3_dependency_package_self_reference_with_mode(
             return Vue3PackageSelfReferenceResolution::MetadataBlocked;
         }
     };
-    if manifest.name.as_deref() != Some(package_name.as_str())
+    if !vue3_path_contains_node_modules(&package_dir)
+        || manifest.name.as_deref() != Some(package_name.as_str())
         || manifest.exports.as_ref().is_none_or(serde_json::Value::is_null)
     {
         return Vue3PackageSelfReferenceResolution::NotApplicable;

@@ -353,6 +353,7 @@ fn vue3_package_scope_for_path(
     path: &Path,
     session: &Vue3ExternalTypeLoadSession,
 ) -> Vue3PackageScopeResolution {
+    let path = normalize_path_components(path.to_path_buf());
     for package_json in
         Vue3AncestorSearchPaths::new(path.parent(), "package.json", session).package_scope()
     {

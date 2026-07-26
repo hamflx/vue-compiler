@@ -408,13 +408,18 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
                 "name":"vuec-self-blocked",
                 "exports":{
                     ".":{"types":"./index.d.ts"},
-                    "./private":null
+                    "./private":{"types":null,"default":"./leak.d.ts"}
                 }
             }"#,
         )
         .expect("write nested self manifest");
         let importer = nested_package.join("index.d.ts");
         std::fs::write(&importer, "export {};").expect("write nested importer");
+        std::fs::write(
+            nested_package.join("leak.d.ts"),
+            "export interface PrivateProps { selfLeak: string }",
+        )
+        .expect("write rejected self fallback target");
         let outside_resolver = Vue3TypeResolverContext::default();
         assert_eq!(
             resolve_vue3_type_import(
@@ -434,6 +439,73 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
         .is_none());
         let stats = resolver.external_type_session.stats();
         assert_eq!(stats.metadata_files_read, 1);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_bare_package_active_null_export_does_not_fall_through() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-null-conditional");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports":{
+                    "./private":{"types":null,"default":"./leak.d.ts"}
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            package.join("leak.d.ts"),
+            "export interface PrivateProps { leaked: string }",
+        )
+        .expect("write rejected fallback target");
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert!(resolve_vue3_type_import(
+            &dir.path().join("outside.ts").to_string_lossy(),
+            "vuec-null-conditional/private",
+            &resolver,
+        )
+        .is_none());
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_normalized_local_path_cannot_enable_dependency_self_reference() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("create source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name":"vuec-local-self",
+                "exports":{"./feature":{"types":"./feature.d.ts"}}
+            }"#,
+        )
+        .expect("write local package manifest");
+        std::fs::write(
+            dir.path().join("feature.d.ts"),
+            "export interface FeatureProps { leaked: string }",
+        )
+        .expect("write local self target");
+        let disguised_importer = dir
+            .path()
+            .join("node_modules")
+            .join("..")
+            .join("src")
+            .join("index.d.ts");
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert!(resolve_vue3_type_import(
+            &disguised_importer.to_string_lossy(),
+            "vuec-local-self/feature",
+            &resolver,
+        )
+        .is_none());
         assert!(!resolver.external_type_session.metadata_is_blocked());
     }
 
