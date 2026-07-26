@@ -429,7 +429,14 @@ enum Vue3PackageTargetVisit {
     Missing,
     Rejected,
     Invalid,
+    InvalidConfiguration,
     Blocked,
+}
+
+#[derive(Clone, Copy)]
+enum Vue3PackageExportsObjectKind {
+    Conditions,
+    Subpaths,
 }
 
 #[derive(Clone, Copy)]
@@ -512,22 +519,11 @@ fn visit_vue3_package_exports_type_targets(
             Vue3PackageTargetVisit::Missing
         };
     };
-    if let Some(target) = object.get(&key) {
-        return visit_vue3_package_target(
-            target,
-            resolution_mode,
-            Vue3PackageTargetExpansion::Exact,
-            Vue3PackageTargetKind::Exports,
-            type_resolver,
-            visitor,
-        );
-    }
-    if key == "." {
-        return if object
-            .keys()
-            .next()
-            .is_none_or(|key| key != "." && !key.starts_with("./"))
-        {
+    let Some(object_kind) = vue3_package_exports_object_kind(object) else {
+        return Vue3PackageTargetVisit::InvalidConfiguration;
+    };
+    if matches!(object_kind, Vue3PackageExportsObjectKind::Conditions) {
+        return if key == "." {
             visit_vue3_package_target(
                 exports,
                 resolution_mode,
@@ -539,6 +535,19 @@ fn visit_vue3_package_exports_type_targets(
         } else {
             Vue3PackageTargetVisit::Missing
         };
+    }
+    if let Some(target) = object.get(&key) {
+        return visit_vue3_package_target(
+            target,
+            resolution_mode,
+            Vue3PackageTargetExpansion::Exact,
+            Vue3PackageTargetKind::Exports,
+            type_resolver,
+            visitor,
+        );
+    }
+    if key == "." {
+        return Vue3PackageTargetVisit::Missing;
     }
 
     let mut selected = None;
@@ -752,16 +761,18 @@ fn visit_vue3_package_target(
     let Some(conditions) = target.as_object() else {
         return Vue3PackageTargetVisit::Invalid;
     };
-    for (condition, target) in conditions {
+    for condition in conditions.keys() {
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
         {
             return Vue3PackageTargetVisit::Blocked;
         }
-        if condition == "." || condition.starts_with("./") {
-            return Vue3PackageTargetVisit::Invalid;
+        if vue3_package_condition_is_array_index(condition) {
+            return Vue3PackageTargetVisit::InvalidConfiguration;
         }
+    }
+    for (condition, target) in conditions {
         if !vue3_package_export_condition_is_active(
             condition,
             resolution_mode,
@@ -782,6 +793,35 @@ fn visit_vue3_package_target(
         }
     }
     Vue3PackageTargetVisit::Missing
+}
+
+fn vue3_package_exports_object_kind(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vue3PackageExportsObjectKind> {
+    let mut keys = object.keys();
+    let Some(first) = keys.next() else {
+        return Some(Vue3PackageExportsObjectKind::Subpaths);
+    };
+    let first_is_subpath = first.starts_with('.');
+    if keys.any(|key| key.starts_with('.') != first_is_subpath) {
+        return None;
+    }
+    Some(if first_is_subpath {
+        Vue3PackageExportsObjectKind::Subpaths
+    } else {
+        Vue3PackageExportsObjectKind::Conditions
+    })
+}
+
+fn vue3_package_condition_is_array_index(condition: &str) -> bool {
+    if condition == "0" {
+        return true;
+    }
+    !condition.starts_with('0')
+        && condition.bytes().all(|byte| byte.is_ascii_digit())
+        && condition
+            .parse::<u32>()
+            .is_ok_and(|index| index < u32::MAX)
 }
 
 fn vue3_package_target_is_safe(

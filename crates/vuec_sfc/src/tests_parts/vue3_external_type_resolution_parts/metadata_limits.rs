@@ -1116,6 +1116,14 @@ fn vue3_non_null_package_exports_block_legacy_root_fallback() {
             "subpath-only",
             r#"{"types":"index.d.ts","exports":{"./feature":"./feature.d.ts"}}"#,
         ),
+        (
+            "mixed-export-keys",
+            r#"{"types":"index.d.ts","exports":{".":"./index.d.ts","types":"./index.d.ts"}}"#,
+        ),
+        (
+            "numeric-export-condition",
+            r#"{"types":"index.d.ts","exports":{"types":"./index.d.ts","0":"./index.d.ts"}}"#,
+        ),
     ] {
         let package_dir = dir.path().join(name);
         write_vue3_test_type_package(&package_dir, manifest);
@@ -2261,6 +2269,46 @@ fn vue3_metadata_fanout_semantic_miss_does_not_block() {
 }
 
 #[test]
+fn vue3_package_condition_validation_is_fanout_bounded() {
+    let conditions = serde_json::json!({
+        "unknown": "./inactive.d.ts",
+        "types": "./valid.d.ts"
+    });
+    let invalid = serde_json::json!({
+        "unknown": "./inactive.d.ts",
+        "types": "./valid.d.ts",
+        "0": "./invalid.d.ts"
+    });
+    for (target, limit, expected, blocked) in [
+        (&conditions, 2, Some("./valid.d.ts"), false),
+        (&conditions, 1, None, true),
+        (&invalid, 3, None, false),
+        (&invalid, 2, None, true),
+    ] {
+        let resolver =
+            vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+                max_metadata_fanout_entries: limit,
+                ..Vue3ExternalTypeLoadLimits::default()
+            });
+        assert_eq!(
+            vue3_package_exports_type_target(target, None, &resolver).as_deref(),
+            expected
+        );
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .metadata_fanout_entries,
+            limit
+        );
+        assert_eq!(
+            resolver.external_type_session.metadata_is_blocked(),
+            blocked
+        );
+    }
+}
+
+#[test]
 fn vue3_package_self_references_honor_metadata_and_source_budgets() {
     let dir = tempfile::tempdir().expect("temp dir");
     let package = dir.path().join("node_modules").join("vuec-budget-self");
@@ -2355,6 +2403,9 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         serde_json::json!({ "imports": { "#alias": [null] } }),
         serde_json::json!({
             "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
+        }),
+        serde_json::json!({
+            "imports": { "#alias": { "types": "./ok.d.mts", "0": "./ok.d.mts" } }
         }),
         serde_json::json!({ "imports": { "#alias": true } }),
         serde_json::json!({ "imports": { "#alias": 1 } }),

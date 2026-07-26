@@ -1508,6 +1508,91 @@ defineProps<OutputProps & DeclarationProps>()
     }
 
     #[test]
+    fn vue3_package_exports_reject_invalid_object_shapes() {
+        let resolver = Vue3TypeResolverContext::default();
+        for mixed_keys in [
+            serde_json::json!({
+                ".": "./root.d.ts",
+                "./feature": "./feature.d.ts",
+                "types": "./conditional.d.ts"
+            }),
+            serde_json::json!({
+                "types": "./conditional.d.ts",
+                ".": "./root.d.ts",
+                "./feature": "./feature.d.ts"
+            }),
+        ] {
+            assert!(vue3_package_exports_type_target(&mixed_keys, None, &resolver).is_none());
+            assert!(vue3_package_exports_type_target(
+                &mixed_keys,
+                Some("feature"),
+                &resolver,
+            )
+            .is_none());
+        }
+
+        let numeric_condition = serde_json::json!({
+            "types": "./valid.d.ts",
+            "0": "./invalid.d.ts"
+        });
+        assert!(
+            vue3_package_exports_type_target(&numeric_condition, None, &resolver).is_none()
+        );
+        let nested_numeric_condition = serde_json::json!({
+            "types": { "0": "./invalid.d.ts" },
+            "default": "./fallback.d.ts"
+        });
+        assert!(vue3_package_exports_type_target(
+            &nested_numeric_condition,
+            None,
+            &resolver,
+        )
+        .is_none());
+        let numeric_condition_in_array = serde_json::json!([
+            { "4294967294": "./invalid.d.ts" },
+            "./fallback.d.ts"
+        ]);
+        assert!(vue3_package_exports_type_target(
+            &numeric_condition_in_array,
+            None,
+            &resolver,
+        )
+        .is_none());
+
+        for condition in ["00", "-0", "4294967295", "1e0"] {
+            let conditions = serde_json::json!({
+                (condition): "./inactive.d.ts",
+                "default": "./valid.d.ts"
+            });
+            assert_eq!(
+                vue3_package_exports_type_target(&conditions, None, &resolver).as_deref(),
+                Some("./valid.d.ts"),
+                "{condition}"
+            );
+        }
+
+        for conditions in [
+            serde_json::json!({
+                ".": {
+                    "./unknown": "../invalid.d.ts",
+                    "types": "./valid.d.ts"
+                }
+            }),
+            serde_json::json!({
+                ".": {
+                    "types": "./valid.d.ts",
+                    "./unknown": "../invalid.d.ts"
+                }
+            }),
+        ] {
+            assert_eq!(
+                vue3_package_exports_type_target(&conditions, None, &resolver).as_deref(),
+                Some("./valid.d.ts")
+            );
+        }
+    }
+
+    #[test]
     fn vue3_package_exports_select_only_the_requested_resolution_mode() {
         let resolver = Vue3TypeResolverContext::default();
         let exports = serde_json::json!({
