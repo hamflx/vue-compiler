@@ -1,6 +1,7 @@
 include!("tsconfig_package_resolution_parts/type_import_entry.rs");
 include!("tsconfig_package_resolution_parts/tsconfig_search_globals.rs");
 include!("tsconfig_package_resolution_parts/tsconfig_jsonc_extends.rs");
+include!("tsconfig_package_resolution_parts/project_package_imports.rs");
 include!("tsconfig_package_resolution_parts/tsconfig_paths_bare_imports.rs");
 include!("tsconfig_package_resolution_parts/package_json_types.rs");
 include!("tsconfig_package_resolution_parts/type_import_paths.rs");

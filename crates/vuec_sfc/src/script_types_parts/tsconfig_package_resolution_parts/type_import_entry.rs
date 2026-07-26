@@ -77,7 +77,7 @@ fn resolve_vue3_type_import_uncached(
     ) {
         return Some(resolved);
     }
-    match resolve_vue3_dependency_package_imports_with_mode(
+    match resolve_vue3_package_imports_with_mode(
         filename,
         source,
         resolution_mode,
@@ -110,7 +110,7 @@ enum Vue3PackageImportsResolution {
     Blocked,
 }
 
-fn resolve_vue3_dependency_package_imports_with_mode(
+fn resolve_vue3_package_imports_with_mode(
     filename: &str,
     source: &str,
     resolution_mode: Vue3TypeResolutionMode,
@@ -120,10 +120,6 @@ fn resolve_vue3_dependency_package_imports_with_mode(
         return Vue3PackageImportsResolution::NotApplicable;
     }
     let filename = normalize_path_components(PathBuf::from(filename));
-    // Local project imports need tsconfig output-to-input remapping.
-    if !vue3_path_contains_node_modules(&filename) {
-        return Vue3PackageImportsResolution::NotApplicable;
-    }
     if type_resolver.typescript_version < (4, 7, 0).into() {
         return Vue3PackageImportsResolution::Rejected;
     }
@@ -149,12 +145,18 @@ fn resolve_vue3_dependency_package_imports_with_mode(
             return Vue3PackageImportsResolution::Blocked;
         }
     };
-    if !vue3_path_contains_node_modules(&package_dir) {
-        return Vue3PackageImportsResolution::NotApplicable;
-    }
     let Some(imports) = manifest.imports.as_ref().filter(|imports| !imports.is_null()) else {
         return Vue3PackageImportsResolution::Rejected;
     };
+    let is_project_package = !vue3_path_contains_node_modules(&package_dir);
+    let emit_path_options = if is_project_package {
+        vue3_tsconfig_emit_path_options(&filename.to_string_lossy(), &package_dir, type_resolver)
+    } else {
+        None
+    };
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageImportsResolution::Blocked;
+    }
     let _resolution_guard = match type_resolver
         .external_type_session
         .begin_package_import_resolution(
@@ -182,12 +184,27 @@ fn resolve_vue3_dependency_package_imports_with_mode(
         &mut |target| {
             let failure_epoch = type_resolver.external_type_session.failure_epoch();
             let candidate = if target.starts_with("./") {
-                vue3_package_export_type_path_with_mode(
-                    &package_dir,
-                    target,
-                    resolution_mode,
-                    type_resolver,
-                )
+                let input = emit_path_options.as_ref().and_then(|(config_path, options)| {
+                    resolve_vue3_project_package_input_target_with_mode(
+                        &filename,
+                        &package_dir,
+                        target,
+                        config_path,
+                        options,
+                        resolution_mode,
+                        type_resolver,
+                    )
+                });
+                if input.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+                    input
+                } else {
+                    vue3_package_export_type_path_with_mode(
+                        &package_dir,
+                        target,
+                        resolution_mode,
+                        type_resolver,
+                    )
+                }
             } else {
                 resolve_vue3_type_import_with_mode(
                     &package_filename.to_string_lossy(),

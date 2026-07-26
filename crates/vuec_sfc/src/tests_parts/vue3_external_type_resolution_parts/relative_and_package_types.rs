@@ -711,6 +711,347 @@ defineProps<ModuleProps & CommonJsProps>()
     }
 
     #[test]
+    fn vue3_project_package_imports_resolve_direct_source_targets_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{
+                "imports": {
+                    "#project-props": "./src/project-props.ts",
+                    "#external-props": "vuec-project-import-external"
+                }
+            }"##,
+        )
+        .expect("write project imports manifest");
+        let project_props = source_dir.join("project-props.ts");
+        std::fs::write(
+            &project_props,
+            "export interface ProjectProps { projectValue: string }",
+        )
+        .expect("write project imports target");
+        let external_package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-project-import-external");
+        let external_decoy = source_dir
+            .join("node_modules")
+            .join("vuec-project-import-external");
+        for package in [&external_package, &external_decoy] {
+            std::fs::create_dir_all(package).expect("create external imports target");
+            std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+                .expect("write external imports manifest");
+        }
+        let external_props = external_package.join("index.d.ts");
+        std::fs::write(
+            &external_props,
+            "export interface ExternalProps { externalValue: number }",
+        )
+        .expect("write external imports target");
+        std::fs::write(
+            external_decoy.join("index.d.ts"),
+            "export interface ExternalProps { wrongExternalRoot: never }",
+        )
+        .expect("write external imports decoy");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ProjectProps } from '#project-props'
+import type { ExternalProps } from '#external-props'
+defineProps<ProjectProps & ExternalProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("projectValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("externalValue: { type: Number, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongExternalRoot"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [project_props, external_props]
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn vue3_project_tsconfig_paths_precede_package_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{"imports":{"#choice":"./src/imports-choice.ts"}}"##,
+        )
+        .expect("write project imports manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r##"{"compilerOptions":{"paths":{"#choice":["./src/paths-choice.ts"]}}}"##,
+        )
+        .expect("write project config");
+        let paths_choice = source_dir.join("paths-choice.ts");
+        std::fs::write(
+            &paths_choice,
+            "export interface ChoiceProps { pathsValue: string }",
+        )
+        .expect("write paths target");
+        std::fs::write(
+            source_dir.join("imports-choice.ts"),
+            "export interface ChoiceProps { wrongImportsPriority: never }",
+        )
+        .expect("write imports decoy");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ChoiceProps } from '#choice'
+defineProps<ChoiceProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("pathsValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongImportsPriority"));
+        assert_eq!(script.deps, vec![normalize_path_string(&paths_choice)]);
+    }
+
+    #[test]
+    fn vue3_project_package_imports_map_emitted_targets_back_to_sources() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{
+                "imports": {
+                    "#javascript": "./dist/javascript.js",
+                    "#declaration": "./declarations/declaration.d.ts",
+                    "#module": "./dist/module.mjs",
+                    "#commonjs": "./dist/commonjs.cjs"
+                }
+            }"##,
+        )
+        .expect("write project imports manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "rootDir": "./src",
+                    "outDir": "./dist",
+                    "declarationDir": "./declarations"
+                }
+            }"#,
+        )
+        .expect("write project config");
+        std::fs::write(
+            source_dir.join("javascript.ts"),
+            "export interface JavaScriptProps { wrongTsPriority: never }",
+        )
+        .expect("write lower-priority project source target");
+        let targets = [
+            (
+                source_dir.join("javascript.tsx"),
+                "export interface JavaScriptProps { javascriptValue: string }",
+            ),
+            (
+                source_dir.join("declaration.ts"),
+                "export interface DeclarationProps { declarationValue: number }",
+            ),
+            (
+                source_dir.join("module.mts"),
+                "export interface ModuleProps { moduleValue: boolean }",
+            ),
+            (
+                source_dir.join("commonjs.cts"),
+                "export interface CommonJsProps { commonJsValue: string }",
+            ),
+        ];
+        for (path, source) in &targets {
+            std::fs::write(path, source).expect("write project source target");
+        }
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { JavaScriptProps } from '#javascript'
+import type { DeclarationProps } from '#declaration'
+import type { ModuleProps } from '#module'
+import type { CommonJsProps } from '#commonjs'
+defineProps<JavaScriptProps & DeclarationProps & ModuleProps & CommonJsProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "javascriptValue: { type: String, required: true }",
+            "declarationValue: { type: Number, required: true }",
+            "moduleValue: { type: Boolean, required: true }",
+            "commonJsValue: { type: String, required: true }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = targets
+            .iter()
+            .map(|(path, _)| normalize_path_string(path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.content.contains("wrongTsPriority"), "{}", script.content);
+    }
+
+    #[test]
+    fn vue3_project_package_imports_inherit_emit_paths_from_their_declaring_configs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("configs");
+        let source_dir = dir.path().join("sources");
+        std::fs::create_dir_all(&config_dir).expect("create config directory");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{
+                "imports": {
+                    "#output": "./dist/output.js",
+                    "#declaration": "./declarations/declaration.d.ts"
+                }
+            }"##,
+        )
+        .expect("write project imports manifest");
+        std::fs::write(
+            config_dir.join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "rootDir": "../sources",
+                    "outDir": "../base-dist"
+                }
+            }"#,
+        )
+        .expect("write base config");
+        std::fs::write(
+            config_dir.join("declarations.json"),
+            r#"{
+                "compilerOptions": {
+                    "declarationDir": "../declarations"
+                }
+            }"#,
+        )
+        .expect("write declaration config");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "extends": [
+                    "./configs/base.json",
+                    "./configs/declarations.json"
+                ],
+                "compilerOptions": {
+                    "outDir": "./dist"
+                }
+            }"#,
+        )
+        .expect("write project config");
+        let output = source_dir.join("output.ts");
+        let declaration = source_dir.join("declaration.ts");
+        std::fs::write(
+            &output,
+            "export interface OutputProps { outputValue: string }",
+        )
+        .expect("write inherited output source");
+        std::fs::write(
+            &declaration,
+            "export interface DeclarationProps { declarationValue: number }",
+        )
+        .expect("write inherited declaration source");
+
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { OutputProps } from '#output'
+import type { DeclarationProps } from '#declaration'
+defineProps<OutputProps & DeclarationProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("outputValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("declarationValue: { type: Number, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [output, declaration]
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn vue3_project_package_input_candidates_match_typescript_emit_extensions() {
+        let path = Path::new("project/dist/entry.d.ts");
+        assert_eq!(
+            vue3_possible_project_input_paths(path),
+            [
+                "project/dist/entry.tsx",
+                "project/dist/entry.ts",
+                "project/dist/entry.jsx",
+                "project/dist/entry.js",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vue3_possible_project_input_paths(Path::new("project/dist/entry.d.mts")),
+            ["project/dist/entry.mts", "project/dist/entry.mjs"]
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vue3_possible_project_input_paths(Path::new("project/dist/entry.d.cts")),
+            ["project/dist/entry.cts", "project/dist/entry.cjs"]
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        );
+        assert!(vue3_possible_project_input_paths(Path::new("project/dist/entry.ts")).is_empty());
+    }
+
+    #[test]
     fn vue3_package_exports_selects_the_most_specific_pattern() {
         let resolver = Vue3TypeResolverContext::default();
         let invalid_array_fallback = serde_json::json!([
