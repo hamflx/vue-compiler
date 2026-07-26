@@ -1600,12 +1600,18 @@ mod vue3_type_reference_directive_tests {
         let dotted_decoy = node_modules.join("dotted.d.ts");
         let dotted_appended = node_modules.join("dotted.package.d.ts");
         let dotted_arbitrary = node_modules.join("dotted.d.package.ts");
+        let hidden_appended = project_dir.join(".hidden.d.ts");
+        let hidden_arbitrary = project_dir.join(".d.hidden.ts");
         std::fs::write(&dotted_decoy, "interface DottedDecoy {}")
             .expect("write dotted package decoy");
         std::fs::write(&dotted_appended, "interface DottedAppended {}")
             .expect("write appended dotted package declaration");
         std::fs::write(&dotted_arbitrary, "interface DottedArbitrary {}")
             .expect("write arbitrary-extension dotted package declaration");
+        std::fs::write(&hidden_appended, "interface HiddenAppended {}")
+            .expect("write appended hidden declaration");
+        std::fs::write(&hidden_arbitrary, "interface HiddenArbitrary {}")
+            .expect("write arbitrary-extension hidden declaration");
         let filename = project_dir.join("Comp.vue");
         let resolver = Vue3TypeResolverContext::default();
 
@@ -1671,6 +1677,15 @@ mod vue3_type_reference_directive_tests {
                 &resolver,
             ),
             Some(dotted_arbitrary)
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_directive(
+                &filename.to_string_lossy(),
+                &filename.to_string_lossy(),
+                "./.hidden",
+                &resolver,
+            ),
+            Some(hidden_arbitrary)
         );
     }
 

@@ -1378,10 +1378,7 @@ fn vue3_global_type_projection_from_source(
     })
     .parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return Some(Vue3GlobalTypeFileProjection {
-            context: Vue27TypeContext::default(),
-            kinds: Vue3GlobalDeclarationKinds::default(),
-        });
+        return None;
     }
     let program_is_global_script = (source_type.is_typescript_definition()
         || parsed.program.source_type.is_script())

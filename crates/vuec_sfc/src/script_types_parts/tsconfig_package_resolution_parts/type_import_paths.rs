@@ -62,7 +62,7 @@ fn resolve_vue3_type_reference_path_uncached(
             .record_resolution_failure();
         return None;
     }
-    if candidate.extension().is_some() {
+    if vue3_typescript_path_extension(&candidate).is_some() {
         if !vue3_type_reference_path_has_supported_extension(&candidate) {
             return None;
         }
@@ -84,13 +84,11 @@ fn resolve_vue3_type_reference_path_uncached(
 }
 
 fn vue3_type_reference_path_has_supported_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["ts", "tsx", "mts", "cts", "vue"]
-                .iter()
-                .any(|supported| extension.eq_ignore_ascii_case(supported))
-        })
+    vue3_typescript_path_extension(path).is_some_and(|extension| {
+        ["ts", "tsx", "mts", "cts", "vue"]
+            .iter()
+            .any(|supported| extension.eq_ignore_ascii_case(supported))
+    })
 }
 
 pub(crate) fn resolve_vue3_metadata_type_reference_declaration_file(
@@ -134,13 +132,9 @@ fn vue3_type_reference_declaration_candidates(candidate: &Path) -> Vec<PathBuf> 
     {
         return vec![candidate.to_path_buf()];
     }
-    let extension = candidate
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    if extension.is_empty() {
+    let Some(extension) = vue3_typescript_path_extension(candidate) else {
         return vec![path_with_extension(candidate, "d.ts")];
-    }
+    };
     let declaration_extension = match extension {
         "mts" | "mjs" => Some("d.mts"),
         "cts" | "cjs" => Some("d.cts"),
@@ -149,13 +143,12 @@ fn vue3_type_reference_declaration_candidates(candidate: &Path) -> Vec<PathBuf> 
     };
     let mut candidates = Vec::new();
     if let Some(declaration_extension) = declaration_extension {
-        let stem = candidate.with_extension("");
-        candidates.push(path_with_extension(&stem, declaration_extension));
-    } else {
-        candidates.push(arbitrary_extension_type_candidate(
-            &candidate.with_extension(""),
-            extension,
+        candidates.push(vue3_path_with_typescript_extension(
+            candidate,
+            declaration_extension,
         ));
+    } else {
+        candidates.push(arbitrary_extension_type_candidate(candidate, extension));
     }
     if !file_name.is_empty() {
         let mut appended = candidate.to_path_buf();
@@ -234,21 +227,17 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     if !probe_mode.path_is_within_limit(candidate, type_resolver) {
         return None;
     }
-    let extension = candidate
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    let stem = candidate.with_extension("");
+    let extension = vue3_typescript_path_extension(candidate);
     let mut candidates = Vec::new();
-    if !extension.is_empty() {
+    if let Some(extension) = extension {
         if !matches!(
             extension,
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
         ) {
-            candidates.push(arbitrary_extension_type_candidate(&stem, extension));
+            candidates.push(arbitrary_extension_type_candidate(candidate, extension));
         }
         if matches!(extension, "js" | "jsx" | "mjs" | "cjs") {
-            candidates.extend(vue3_ts_resolution_candidates(&stem, extension));
+            candidates.extend(vue3_ts_resolution_candidates(candidate, Some(extension)));
         }
         candidates.push(candidate.to_path_buf());
     } else {
@@ -263,7 +252,7 @@ fn resolve_vue3_type_import_path_with_probe_mode(
                 return None;
             }
         }
-        candidates.extend(vue3_ts_resolution_candidates(candidate, extension));
+        candidates.extend(vue3_ts_resolution_candidates(candidate, None));
         candidates.push(candidate.join("index.ts"));
         candidates.push(candidate.join("index.tsx"));
         candidates.push(candidate.join("index.d.ts"));
@@ -279,34 +268,50 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     None
 }
 
-pub(crate) fn arbitrary_extension_type_candidate(stem: &Path, extension: &str) -> PathBuf {
-    let Some(file_name) = stem.file_name().and_then(|name| name.to_str()) else {
-        return stem.with_extension(format!("d.{extension}.ts"));
-    };
-    let mut candidate = stem.to_path_buf();
-    candidate.set_file_name(format!("{file_name}.d.{extension}.ts"));
-    candidate
+pub(crate) fn arbitrary_extension_type_candidate(candidate: &Path, extension: &str) -> PathBuf {
+    vue3_path_with_typescript_extension(candidate, &format!("d.{extension}.ts"))
 }
 
-pub(crate) fn vue3_ts_resolution_candidates(base: &Path, extension: &str) -> Vec<PathBuf> {
+pub(crate) fn vue3_ts_resolution_candidates(
+    candidate: &Path,
+    extension: Option<&str>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if extension == "mjs" {
-        candidates.push(path_with_extension(base, "mts"));
-        candidates.push(path_with_extension(base, "d.mts"));
-    } else if extension == "cjs" {
-        candidates.push(path_with_extension(base, "cts"));
-        candidates.push(path_with_extension(base, "d.cts"));
+    if extension == Some("mjs") {
+        candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
+        candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
+    } else if extension == Some("cjs") {
+        candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
+        candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
     }
-    candidates.push(path_with_extension(base, "ts"));
-    candidates.push(path_with_extension(base, "tsx"));
-    candidates.push(path_with_extension(base, "d.ts"));
-    if extension.is_empty() {
-        candidates.push(path_with_extension(base, "mts"));
-        candidates.push(path_with_extension(base, "d.mts"));
-        candidates.push(path_with_extension(base, "cts"));
-        candidates.push(path_with_extension(base, "d.cts"));
+    candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
+    candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
+    candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
+    if extension.is_none() {
+        candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
+        candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
+        candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
+        candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
     }
     candidates
+}
+
+fn vue3_typescript_path_extension(path: &Path) -> Option<&str> {
+    let file_name = path.file_name()?.to_str()?;
+    let dot = file_name.rfind('.')?;
+    Some(&file_name[dot + 1..])
+}
+
+fn vue3_path_with_typescript_extension(path: &Path, extension: &str) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path_with_extension(path, extension);
+    };
+    let stem = file_name
+        .rfind('.')
+        .map_or(file_name, |dot| &file_name[..dot]);
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(format!("{stem}.{extension}"));
+    candidate
 }
 
 pub(crate) fn path_with_extension(path: &Path, extension: &str) -> PathBuf {

@@ -3618,6 +3618,57 @@ defineProps<RuntimeOnlyProps>()
 }
 
 #[test]
+fn vue3_triple_slash_vue_references_preserve_component_module_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let referenced = dir.path().join("Referenced.vue");
+    std::fs::write(
+        &referenced,
+        r#"<script setup lang="ts">
+interface ReferencedVuePrivate { leaked: string }
+</script>"#,
+    )
+    .expect("write referenced component");
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+/// <reference path="./Referenced.vue" />
+defineProps<ReferencedVuePrivate>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(!script.errors.is_empty());
+    assert!(!script.content.contains("leaked:"), "{}", script.content);
+}
+
+#[test]
+fn vue3_malformed_triple_slash_program_references_fail_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("valid.d.ts"),
+        "interface ValidReferenceProps { safe: string }",
+    )
+    .expect("write valid reference");
+    std::fs::write(
+        dir.path().join("malformed.d.ts"),
+        "interface MalformedReference { value:",
+    )
+    .expect("write malformed reference");
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+/// <reference path="./valid.d.ts" />
+/// <reference path="./malformed.d.ts" />
+defineProps<ValidReferenceProps>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(!script.errors.is_empty());
+    assert!(!script.content.contains("safe:"), "{}", script.content);
+}
+
+#[test]
 fn vue3_incompatible_global_interface_and_enum_members_block_dependents() {
     let dir = tempfile::tempdir().expect("temp dir");
     let string_interface = dir.path().join("string-interface.d.ts");

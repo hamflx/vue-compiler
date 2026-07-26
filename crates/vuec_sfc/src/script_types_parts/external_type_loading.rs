@@ -529,13 +529,13 @@ pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3Ex
     )
     .descriptor;
     let mut blocks = Vec::new();
-    let mut source_type = oxc_span::SourceType::ts();
+    let mut source_type = oxc_span::SourceType::ts().with_module(true);
     for block in [descriptor.script.as_ref(), descriptor.script_setup.as_ref()]
         .into_iter()
         .flatten()
     {
         if block.attrs.lang.as_deref() == Some("tsx") {
-            source_type = oxc_span::SourceType::tsx();
+            source_type = oxc_span::SourceType::tsx().with_module(true);
         }
         blocks.push(block.content.as_str());
     }

@@ -112,9 +112,9 @@ fn vue3_triple_slash_reference(comment: &str) -> Option<Vue3TripleSlashReference
         let value_end = input.find(quote)?;
         let value = &input[..value_end];
         input = &input[value_end + quote.len_utf8()..];
-        if name.eq_ignore_ascii_case("path") {
+        if name.eq_ignore_ascii_case("path") && path.is_none() {
             path = Some(value);
-        } else if name.eq_ignore_ascii_case("types") {
+        } else if name.eq_ignore_ascii_case("types") && types.is_none() {
             types = Some(value);
         } else if name.eq_ignore_ascii_case("lib") {
             has_lib = true;
@@ -155,7 +155,7 @@ fn vue3_module_dependencies_from_source(
         })
         .parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return Some((false, BTreeSet::new()));
+        return None;
     }
     if !namespace_budget.reserve(parsed.program.body.len()) {
         return None;
@@ -207,11 +207,13 @@ fn vue3_module_dependencies_from_source(
             .iter()
             .rposition(|byte| matches!(byte, b'\r' | b'\n'))
             .map_or(0, |index| index + 1);
-        if !source
-            .get(line_start..comment_start)?
-            .chars()
-            .all(char::is_whitespace)
-        {
+        let line_prefix = source.get(line_start..comment_start)?;
+        let line_prefix = if line_start == 0 {
+            line_prefix.strip_prefix('\u{feff}').unwrap_or(line_prefix)
+        } else {
+            line_prefix
+        };
+        if !line_prefix.chars().all(char::is_whitespace) {
             continue;
         }
         let span = comment.content_span();
@@ -3180,6 +3182,35 @@ export {}
     }
 
     #[test]
+    fn triple_slash_references_accept_bom_and_keep_first_duplicate_attribute() {
+        assert!(matches!(
+            vue3_triple_slash_reference(
+                r#"/ <reference path="./first" path="./second" />"#,
+            ),
+            Some(Vue3TripleSlashReference::Path("./first"))
+        ));
+        assert!(matches!(
+            vue3_triple_slash_reference(
+                r#"/ <reference types="first" types="second" />"#,
+            ),
+            Some(Vue3TripleSlashReference::Types("first"))
+        ));
+
+        let source = "\u{feff}/// <reference path=\"./bom\" />\ninterface Global {}";
+        let mut namespace_budget = budget(usize::MAX);
+        let (_, dependencies) = vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::ts(),
+            &mut namespace_budget,
+        )
+        .expect("scan BOM-prefixed directive");
+        assert_eq!(
+            dependencies,
+            BTreeSet::from([Vue3ModuleDependency::ReferencePath("./bom".to_string())]),
+        );
+    }
+
+    #[test]
     fn unsupported_triple_slash_resolution_modes_fail_closed() {
         let source = r#"/// <reference types="mode-specific" resolution-mode="require" />
 export {}"#;
@@ -3252,6 +3283,7 @@ import './referenced.d.ts'"#,
         let dir = tempfile::tempdir().expect("temp dir");
         let referenced = dir.path().join("referenced.ts");
         let javascript = dir.path().join("referenced.js");
+        let hidden = dir.path().join(".hidden.ts");
         let modern = dir.path().join("modern.mts");
         let index_dir = dir.path().join("directory");
         std::fs::create_dir_all(&index_dir).expect("create reference directory");
@@ -3259,6 +3291,8 @@ import './referenced.d.ts'"#,
             .expect("write extensionless reference target");
         std::fs::write(&javascript, "export const value = 1")
             .expect("write disallowed JavaScript reference target");
+        std::fs::write(&hidden, "interface HiddenReference {}")
+            .expect("write hidden TypeScript target");
         std::fs::write(&modern, "export interface Modern {}")
             .expect("write modern reference target");
         std::fs::write(index_dir.join("index.d.ts"), "interface IndexFallback {}")
@@ -3276,6 +3310,10 @@ import './referenced.d.ts'"#,
         );
         assert_eq!(
             resolve_vue3_type_reference_path(&filename, "./referenced.js", &resolver),
+            None,
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./.hidden", &resolver),
             None,
         );
         assert_eq!(
