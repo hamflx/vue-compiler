@@ -214,20 +214,23 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
         package_dir,
         subpath,
         type_resolver,
-        true,
+        Some(Vue3TypeResolutionMode::Import),
+        false,
     )
 }
 
 pub(crate) fn resolve_vue3_package_json_type_reference_entry(
     package_dir: &Path,
     subpath: Option<&str>,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
     resolve_vue3_package_json_type_entry_with_exports(
         package_dir,
         subpath,
         type_resolver,
-        false,
+        resolution_mode,
+        true,
     )
 }
 
@@ -235,7 +238,8 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     package_dir: &Path,
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
-    honor_exports: bool,
+    exports_mode: Option<Vue3TypeResolutionMode>,
+    declaration_only_exports: bool,
 ) -> Vue3PackageJsonTypeResolution {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
@@ -257,24 +261,20 @@ fn resolve_vue3_package_json_type_entry_with_exports(
             Vue3PackageJsonTypeResolution::NoPackageJson
         };
     };
-    if let Some(exports) = honor_exports
-        .then_some(manifest.exports.as_ref())
-        .flatten()
-        .filter(|exports| !exports.is_null())
+    if let Some((exports, resolution_mode)) = manifest
+        .exports
+        .as_ref()
+        .zip(exports_mode)
+        .filter(|(exports, _)| !exports.is_null())
     {
-        if let Some(target) =
-            vue3_package_exports_type_target(exports, subpath, type_resolver)
-        {
-            let resolved = vue3_package_export_type_path(package_dir, &target, type_resolver);
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return Vue3PackageJsonTypeResolution::Blocked;
-            }
-            if let Some(resolved) = resolved {
-                return Vue3PackageJsonTypeResolution::Resolved(resolved);
-            }
-            return Vue3PackageJsonTypeResolution::Blocked;
-        }
-        return Vue3PackageJsonTypeResolution::Blocked;
+        return resolve_vue3_package_exports_type_path(
+            package_dir,
+            exports,
+            subpath,
+            resolution_mode,
+            declaration_only_exports,
+            type_resolver,
+        );
     }
     let root_type_target = if subpath.is_none() {
         manifest
@@ -330,92 +330,292 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_package_exports_type_target(
     exports: &serde_json::Value,
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
+    vue3_package_exports_type_target_with_mode(
+        exports,
+        subpath,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn vue3_package_exports_type_target_with_mode(
+    exports: &serde_json::Value,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    let mut selected = None;
+    let result = visit_vue3_package_exports_type_targets(
+        exports,
+        subpath,
+        resolution_mode,
+        type_resolver,
+        &mut |target| {
+            selected = Some(target.to_string());
+            Vue3PackageExportVisit::Resolved
+        },
+    );
+    (result == Vue3PackageExportVisit::Resolved)
+        .then_some(selected)
+        .flatten()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3PackageExportVisit {
+    Resolved,
+    Missing,
+    Invalid,
+    Blocked,
+}
+
+fn resolve_vue3_package_exports_type_path(
+    package_dir: &Path,
+    exports: &serde_json::Value,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    declaration_only: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageJsonTypeResolution {
+    let mut resolved = None;
+    let result = visit_vue3_package_exports_type_targets(
+        exports,
+        subpath,
+        resolution_mode,
+        type_resolver,
+        &mut |target| {
+            let candidate = if declaration_only {
+                vue3_package_export_type_reference_path(package_dir, target, type_resolver)
+            } else {
+                vue3_package_export_type_path(package_dir, target, type_resolver)
+            };
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                Vue3PackageExportVisit::Blocked
+            } else if let Some(candidate) = candidate {
+                resolved = Some(candidate);
+                Vue3PackageExportVisit::Resolved
+            } else {
+                Vue3PackageExportVisit::Missing
+            }
+        },
+    );
+    match (result, resolved) {
+        (Vue3PackageExportVisit::Resolved, Some(path)) => {
+            Vue3PackageJsonTypeResolution::Resolved(path)
+        }
+        _ => Vue3PackageJsonTypeResolution::Blocked,
+    }
+}
+
+fn visit_vue3_package_exports_type_targets(
+    exports: &serde_json::Value,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+    visitor: &mut impl FnMut(&str) -> Vue3PackageExportVisit,
+) -> Vue3PackageExportVisit {
     let key = subpath
         .map(|subpath| format!("./{}", subpath.trim_start_matches("./")))
         .unwrap_or_else(|| ".".into());
-    let target = if key == "." {
-        exports
-            .get(".")
-            .or_else(|| vue3_package_exports_is_condition_map(exports).then_some(exports))
-            .and_then(vue3_package_export_target_value)
-            .filter(|target| vue3_package_export_target_is_safe(target))
-    } else if let Some(target) = exports.get(&key) {
-        vue3_package_export_target_value(target)
-            .filter(|target| vue3_package_export_target_is_safe(target))
-    } else {
-        vue3_package_exports_pattern_target(exports, &key, type_resolver)
-    }?;
-    type_resolver
-        .external_type_session
-        .metadata_path_is_within_limit(&target)
-        .then_some(target)
-}
+    let Some(object) = exports.as_object() else {
+        return if key == "." {
+            visit_vue3_package_export_target(
+                exports,
+                resolution_mode,
+                None,
+                type_resolver,
+                visitor,
+            )
+        } else {
+            Vue3PackageExportVisit::Missing
+        };
+    };
+    if let Some(target) = object.get(&key) {
+        return visit_vue3_package_export_target(
+            target,
+            resolution_mode,
+            None,
+            type_resolver,
+            visitor,
+        );
+    }
+    if key == "." {
+        return if object
+            .keys()
+            .next()
+            .is_none_or(|key| key != "." && !key.starts_with("./"))
+        {
+            visit_vue3_package_export_target(
+                exports,
+                resolution_mode,
+                None,
+                type_resolver,
+                visitor,
+            )
+        } else {
+            Vue3PackageExportVisit::Missing
+        };
+    }
 
-pub(crate) fn vue3_package_exports_is_condition_map(exports: &serde_json::Value) -> bool {
-    exports
-        .as_object()
-        .is_none_or(|object| !object.keys().any(|key| key == "." || key.starts_with("./")))
-}
-
-pub(crate) fn vue3_package_exports_pattern_target(
-    exports: &serde_json::Value,
-    key: &str,
-    type_resolver: &Vue3TypeResolverContext,
-) -> Option<String> {
-    let object = exports.as_object()?;
-    let (_, target, capture) = object
-        .iter()
-        .filter_map(|(pattern, target)| {
-            let star = pattern.find('*')?;
-            let capture = vue3_package_export_pattern_capture(pattern, key)?;
-            Some(((star + 1, pattern.len()), target, capture))
-        })
-        .max_by_key(|(specificity, _, _)| *specificity)?;
-    let target = vue3_package_export_target_value(target)?;
-    if (target.contains('*')
-        && !type_resolver
+    let mut selected = None;
+    for (pattern, target) in object {
+        if !type_resolver
             .external_type_session
-            .metadata_path_is_within_limit(capture))
-        || !vue3_package_export_target_is_safe(&target)
-        || !vue3_package_export_pattern_capture_is_safe(capture)
-    {
-        return None;
+            .claim_metadata_fanout_entry()
+        {
+            return Vue3PackageExportVisit::Blocked;
+        }
+        let Some(star) = pattern.find('*') else {
+            continue;
+        };
+        let Some(capture) = vue3_package_export_pattern_capture(pattern, &key) else {
+            continue;
+        };
+        let specificity = (star + 1, pattern.len());
+        if selected
+            .as_ref()
+            .is_none_or(|(current, _, _)| specificity > *current)
+        {
+            selected = Some((specificity, target, capture));
+        }
     }
-    let expanded = type_resolver
-        .external_type_session
-        .replace_metadata_path_pattern(&target, "*", capture)?;
-    (!vue3_package_export_contains_encoded_separator(&expanded)
-        && vue3_package_type_target_is_safe(&expanded))
-    .then_some(expanded)
+    let Some((_, target, capture)) = selected else {
+        return Vue3PackageExportVisit::Missing;
+    };
+    visit_vue3_package_export_target(
+        target,
+        resolution_mode,
+        Some(capture),
+        type_resolver,
+        visitor,
+    )
 }
 
-pub(crate) fn vue3_package_export_target_value(value: &serde_json::Value) -> Option<String> {
-    if let Some(value) = value.as_str() {
-        return Some(value.to_string());
-    }
-    let object = value.as_object()?;
-    for condition in ["types", "typings"] {
-        if let Some(target) = object
-            .get(condition)
-            .and_then(vue3_package_export_target_value)
+fn visit_vue3_package_export_target(
+    target: &serde_json::Value,
+    resolution_mode: Vue3TypeResolutionMode,
+    pattern_capture: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+    visitor: &mut impl FnMut(&str) -> Vue3PackageExportVisit,
+) -> Vue3PackageExportVisit {
+    if let Some(target) = target.as_str() {
+        if !vue3_package_export_target_is_safe(target) {
+            return Vue3PackageExportVisit::Invalid;
+        }
+        let expanded = if target.contains('*') {
+            let Some(capture) = pattern_capture else {
+                return Vue3PackageExportVisit::Invalid;
+            };
+            if !vue3_package_export_pattern_capture_is_safe(capture)
+                || !type_resolver
+                    .external_type_session
+                    .metadata_path_is_within_limit(capture)
+            {
+                return Vue3PackageExportVisit::Invalid;
+            }
+            let Some(expanded) = type_resolver
+                .external_type_session
+                .replace_metadata_path_pattern(target, "*", capture)
+            else {
+                return Vue3PackageExportVisit::Blocked;
+            };
+            expanded
+        } else {
+            target.to_string()
+        };
+        if vue3_package_export_contains_encoded_separator(&expanded)
+            || !vue3_package_export_target_is_safe(&expanded)
         {
-            return Some(target);
+            return Vue3PackageExportVisit::Invalid;
+        }
+        if !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(&expanded)
+        {
+            return Vue3PackageExportVisit::Blocked;
+        }
+        return visitor(&expanded);
+    }
+    if target.is_null() {
+        return Vue3PackageExportVisit::Missing;
+    }
+    if let Some(targets) = target.as_array() {
+        for target in targets {
+            if !type_resolver
+                .external_type_session
+                .claim_metadata_fanout_entry()
+            {
+                return Vue3PackageExportVisit::Blocked;
+            }
+            match visit_vue3_package_export_target(
+                target,
+                resolution_mode,
+                pattern_capture,
+                type_resolver,
+                visitor,
+            ) {
+                Vue3PackageExportVisit::Missing => {}
+                result => return result,
+            }
+        }
+        return Vue3PackageExportVisit::Missing;
+    }
+    let Some(conditions) = target.as_object() else {
+        return Vue3PackageExportVisit::Invalid;
+    };
+    for (condition, target) in conditions {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return Vue3PackageExportVisit::Blocked;
+        }
+        if condition == "." || condition.starts_with("./") {
+            return Vue3PackageExportVisit::Invalid;
+        }
+        if !vue3_package_export_condition_is_active(
+            condition,
+            resolution_mode,
+            &type_resolver.typescript_version,
+        ) {
+            continue;
+        }
+        match visit_vue3_package_export_target(
+            target,
+            resolution_mode,
+            pattern_capture,
+            type_resolver,
+            visitor,
+        ) {
+            Vue3PackageExportVisit::Missing => {}
+            result => return result,
         }
     }
-    for condition in ["import", "require", "node", "default"] {
-        if let Some(target) = object
-            .get(condition)
-            .and_then(vue3_package_export_target_value)
-        {
-            return Some(target);
-        }
-    }
-    None
+    Vue3PackageExportVisit::Missing
+}
+
+fn vue3_package_export_condition_is_active(
+    condition: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    typescript_version: &nodejs_semver::Version,
+) -> bool {
+    condition == "types"
+        || condition == "node"
+        || condition == "default"
+        || matches!(
+            (condition, resolution_mode),
+            ("import", Vue3TypeResolutionMode::Import)
+                | ("require", Vue3TypeResolutionMode::Require)
+        )
+        || condition.strip_prefix("types@").is_some_and(|selector| {
+            vue3_package_types_version_selector_matches_version(selector, typescript_version)
+        })
 }
 
 pub(crate) fn vue3_package_export_pattern_capture<'a>(
@@ -519,6 +719,18 @@ pub(crate) fn vue3_package_export_type_path(
         return None;
     }
     vue3_package_type_target_path(package_dir, target, type_resolver)
+}
+
+fn vue3_package_export_type_reference_path(
+    package_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if !target.starts_with("./") || !vue3_package_type_target_is_safe(target) {
+        return None;
+    }
+    let candidate = normalize_path_components(package_dir.join(target));
+    resolve_vue3_metadata_type_reference_declaration_file(&candidate, type_resolver)
 }
 
 pub(crate) fn vue3_package_types_versions_type_path(

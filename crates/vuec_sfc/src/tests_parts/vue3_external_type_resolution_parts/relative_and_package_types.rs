@@ -275,6 +275,62 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
     }
 
     #[test]
+    fn vue3_package_exports_select_only_the_requested_resolution_mode() {
+        let resolver = Vue3TypeResolverContext::default();
+        let exports = serde_json::json!({
+            ".": {
+                "types": {
+                    "import": "./import.d.mts",
+                    "require": "./require.d.cts"
+                }
+            },
+            "./feature/*": {
+                "types": {
+                    "import": "./import/*.d.mts",
+                    "require": "./require/*.d.cts"
+                }
+            }
+        });
+
+        for (mode, root, pattern) in [
+            (
+                Vue3TypeResolutionMode::Import,
+                "./import.d.mts",
+                "./import/item.d.mts",
+            ),
+            (
+                Vue3TypeResolutionMode::Require,
+                "./require.d.cts",
+                "./require/item.d.cts",
+            ),
+        ] {
+            assert_eq!(
+                vue3_package_exports_type_target_with_mode(&exports, None, mode, &resolver)
+                    .as_deref(),
+                Some(root),
+            );
+            assert_eq!(
+                vue3_package_exports_type_target_with_mode(
+                    &exports,
+                    Some("feature/item"),
+                    mode,
+                    &resolver,
+                )
+                .as_deref(),
+                Some(pattern),
+            );
+        }
+
+        let require_only = serde_json::json!({ ".": { "require": "./require.d.cts" } });
+        assert!(vue3_package_exports_type_target(
+            &require_only,
+            None,
+            &resolver,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn vue3_package_types_version_selector_supports_node_semver_ranges() {
         for selector in [
             "*",

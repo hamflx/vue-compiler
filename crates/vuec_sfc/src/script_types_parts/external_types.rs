@@ -8,15 +8,17 @@ struct Vue3InlineModuleSource<'a> {
 enum Vue3ModuleDependency {
     Module(String),
     ReferencePath(String),
-    ReferenceTypes(String),
+    ReferenceTypes {
+        source: String,
+        resolution_mode: Option<Vue3TypeResolutionMode>,
+    },
 }
 
 impl Vue3ModuleDependency {
     fn source(&self) -> &str {
         match self {
-            Self::Module(source) | Self::ReferencePath(source) | Self::ReferenceTypes(source) => {
-                source
-            }
+            Self::Module(source) | Self::ReferencePath(source) => source,
+            Self::ReferenceTypes { source, .. } => source,
         }
     }
 
@@ -74,7 +76,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
 
 enum Vue3TripleSlashReference<'a> {
     Path(&'a str),
-    Types(&'a str),
+    Types(&'a str, Option<Vue3TypeResolutionMode>),
     Unsupported,
 }
 
@@ -93,7 +95,7 @@ fn vue3_triple_slash_reference(comment: &str) -> Option<Vue3TripleSlashReference
     let mut types = None;
     let mut has_lib = false;
     let mut no_default_lib = false;
-    let mut has_resolution_mode = false;
+    let mut resolution_mode = None;
     while !input.trim_start().is_empty() {
         input = input.trim_start();
         let name_end = input
@@ -122,20 +124,28 @@ fn vue3_triple_slash_reference(comment: &str) -> Option<Vue3TripleSlashReference
             && value.eq_ignore_ascii_case("true")
         {
             no_default_lib = true;
-        } else if name.eq_ignore_ascii_case("resolution-mode") {
-            has_resolution_mode = true;
+        } else if name.eq_ignore_ascii_case("resolution-mode") && resolution_mode.is_none() {
+            resolution_mode = Some(value);
         }
     }
-    if has_resolution_mode {
-        Some(Vue3TripleSlashReference::Unsupported)
-    } else if no_default_lib {
+    if no_default_lib {
         None
     } else if let Some(types) = types {
-        Some(Vue3TripleSlashReference::Types(types))
+        let resolution_mode = match resolution_mode {
+            Some("import") => Some(Vue3TypeResolutionMode::Import),
+            Some("require") => Some(Vue3TypeResolutionMode::Require),
+            Some("") | None => None,
+            Some(_) => return Some(Vue3TripleSlashReference::Unsupported),
+        };
+        Some(Vue3TripleSlashReference::Types(types, resolution_mode))
     } else if has_lib {
         None
+    } else if let Some(path) = path {
+        Some(Vue3TripleSlashReference::Path(path))
+    } else if resolution_mode.is_some() {
+        Some(Vue3TripleSlashReference::Unsupported)
     } else {
-        path.map(Vue3TripleSlashReference::Path)
+        None
     }
 }
 
@@ -222,8 +232,11 @@ fn vue3_module_dependencies_from_source(
             Some(Vue3TripleSlashReference::Path(path)) => {
                 collector.insert(Vue3ModuleDependency::ReferencePath(path.to_string()));
             }
-            Some(Vue3TripleSlashReference::Types(types)) => {
-                collector.insert(Vue3ModuleDependency::ReferenceTypes(types.to_string()));
+            Some(Vue3TripleSlashReference::Types(types, resolution_mode)) => {
+                collector.insert(Vue3ModuleDependency::ReferenceTypes {
+                    source: types.to_string(),
+                    resolution_mode,
+                });
             }
             Some(Vue3TripleSlashReference::Unsupported) => return None,
             None => {}
@@ -368,14 +381,24 @@ fn vue3_reachable_global_augmentation_files(
             Vue3ModuleDependency::ReferencePath(reference) => {
                 resolve_vue3_type_reference_path(&importer, reference, &type_resolver)
             }
-            Vue3ModuleDependency::ReferenceTypes(reference) => {
-                resolve_vue3_type_reference_directive(
+            Vue3ModuleDependency::ReferenceTypes {
+                source: reference,
+                resolution_mode,
+            } => match resolution_mode {
+                Some(resolution_mode) => resolve_vue3_type_reference_directive_with_mode(
+                    project_filename,
+                    &importer,
+                    reference,
+                    Some(*resolution_mode),
+                    &type_resolver,
+                ),
+                None => resolve_vue3_type_reference_directive(
                     project_filename,
                     &importer,
                     reference,
                     &type_resolver,
-                )
-            }
+                ),
+            },
         };
         let Some(resolved) = resolved else {
             if is_global_program_reference
@@ -3112,7 +3135,10 @@ declare global { interface Augmented { value: string } }
             Vue3ModuleDependency::Module("./named".to_string()),
             Vue3ModuleDependency::Module("./side-effect".to_string()),
             Vue3ModuleDependency::ReferencePath("./reference-path".to_string()),
-            Vue3ModuleDependency::ReferenceTypes("./reference-types".to_string()),
+            Vue3ModuleDependency::ReferenceTypes {
+                source: "./reference-types".to_string(),
+                resolution_mode: None,
+            },
         ]);
         let mut measured = budget(usize::MAX);
         let (has_augmentation, dependencies) = vue3_module_dependencies_from_source(
@@ -3193,7 +3219,7 @@ export {}
             vue3_triple_slash_reference(
                 r#"/ <reference types="first" types="second" />"#,
             ),
-            Some(Vue3TripleSlashReference::Types("first"))
+            Some(Vue3TripleSlashReference::Types("first", None))
         ));
 
         let source = "\u{feff}/// <reference path=\"./bom\" />\ninterface Global {}";
@@ -3211,18 +3237,95 @@ export {}
     }
 
     #[test]
-    fn unsupported_triple_slash_resolution_modes_fail_closed() {
-        let source = r#"/// <reference types="mode-specific" resolution-mode="require" />
+    fn triple_slash_resolution_modes_are_typed_and_invalid_values_fail_closed() {
+        let source = r#"/// <reference types="mode-specific" resolution-mode="require" resolution-mode="import" />
+/// <reference types="legacy" resolution-mode="" />
+/// <reference path="./path" resolution-mode="invalid" />
 export {}"#;
         let mut namespace_budget = budget(usize::MAX);
 
-        assert!(vue3_module_dependencies_from_source(
-            source,
-            oxc_span::SourceType::ts(),
-            &mut namespace_budget,
-        )
-        .is_none());
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut namespace_budget,
+            )
+            .map(|(_, dependencies)| dependencies),
+            Some(BTreeSet::from([
+                Vue3ModuleDependency::ReferencePath("./path".to_string()),
+                Vue3ModuleDependency::ReferenceTypes {
+                    source: "legacy".to_string(),
+                    resolution_mode: None,
+                },
+                Vue3ModuleDependency::ReferenceTypes {
+                    source: "mode-specific".to_string(),
+                    resolution_mode: Some(Vue3TypeResolutionMode::Require),
+                },
+            ])),
+        );
         assert!(!namespace_budget.exhausted);
+
+        for source in [
+            r#"/// <reference types="mode-specific" resolution-mode="Require" />"#,
+            r#"/// <reference resolution-mode="require" />"#,
+        ] {
+            assert!(vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::ts(),
+                &mut budget(usize::MAX),
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn triple_slash_resolution_modes_reach_both_conditional_type_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("conditional-types");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            "declare global { interface ImportGlobal {} } export {}",
+        )
+        .expect("write import declaration");
+        std::fs::write(
+            &require_entry,
+            "declare global { interface RequireGlobal {} } export {}",
+        )
+        .expect("write require declaration");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: r#"/// <reference types="conditional-types" resolution-mode="import" />
+/// <reference types="conditional-types" resolution-mode="require" />"#,
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &roots,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(vec![import_entry, require_entry]),
+        );
     }
 
     #[test]

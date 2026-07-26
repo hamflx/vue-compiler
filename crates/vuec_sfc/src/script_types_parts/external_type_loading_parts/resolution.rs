@@ -1,8 +1,14 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Vue3TypeResolutionMode {
+    Import,
+    Require,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3TypeResolutionKind {
     Import,
     ReferencePath,
-    ReferenceTypes,
+    ReferenceTypes(Option<Vue3TypeResolutionMode>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

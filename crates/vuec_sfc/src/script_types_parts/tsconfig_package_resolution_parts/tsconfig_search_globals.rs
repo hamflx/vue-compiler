@@ -137,6 +137,22 @@ pub(crate) fn resolve_vue3_type_reference_directive(
     type_name: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    resolve_vue3_type_reference_directive_with_mode(
+        project_filename,
+        containing_filename,
+        type_name,
+        None,
+        type_resolver,
+    )
+}
+
+fn resolve_vue3_type_reference_directive_with_mode(
+    project_filename: &str,
+    containing_filename: &str,
+    type_name: &str,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     if type_name.is_empty() {
         return None;
     }
@@ -147,7 +163,7 @@ pub(crate) fn resolve_vue3_type_reference_directive(
     match type_resolver
         .external_type_session
         .begin_type_import_resolution(
-            Vue3TypeResolutionKind::ReferenceTypes,
+            Vue3TypeResolutionKind::ReferenceTypes(resolution_mode),
             project_filename,
             &cache_source,
             &type_resolver.typescript_version,
@@ -163,6 +179,7 @@ pub(crate) fn resolve_vue3_type_reference_directive(
                 project_filename,
                 containing_filename,
                 type_name,
+                resolution_mode,
                 type_resolver,
             );
             type_resolver
@@ -176,6 +193,7 @@ fn resolve_vue3_type_reference_directive_uncached(
     project_filename: &str,
     containing_filename: &str,
     type_name: &str,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -199,9 +217,14 @@ fn resolve_vue3_type_reference_directive_uncached(
             .parent()
             .unwrap_or_else(|| Path::new(""));
         let candidate = normalize_path_components(base.join(normalized_type_name));
-        resolve_vue3_type_reference_package_candidate(&candidate, None, true, type_resolver)
+        resolve_vue3_type_reference_package_candidate(&candidate, None, true, None, type_resolver)
     } else {
-        resolve_vue3_bare_type_reference(containing_filename, type_name, type_resolver)
+        resolve_vue3_bare_type_reference(
+            containing_filename,
+            type_name,
+            resolution_mode,
+            type_resolver,
+        )
     };
     if type_resolver.external_type_session.metadata_is_blocked() {
         None
@@ -378,6 +401,7 @@ fn resolve_vue3_tsconfig_named_type_global_type_file(
             &package_dir,
             None,
             type_roots.is_explicit,
+            None,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -418,6 +442,7 @@ fn vue3_mangle_scoped_package_name(type_name: &str) -> Option<String> {
 fn resolve_vue3_bare_type_reference(
     containing_filename: &str,
     type_name: &str,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(type_name)?;
@@ -427,6 +452,7 @@ fn resolve_vue3_bare_type_reference(
             &package_dir,
             subpath.as_deref(),
             true,
+            resolution_mode,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -440,6 +466,7 @@ fn resolve_vue3_bare_type_reference(
             &types_package_dir,
             subpath.as_deref(),
             true,
+            resolution_mode,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -456,6 +483,7 @@ fn resolve_vue3_type_reference_package_candidate(
     package_dir: &Path,
     subpath: Option<&str>,
     allow_direct_file: bool,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let candidate = subpath
@@ -474,7 +502,12 @@ fn resolve_vue3_type_reference_package_candidate(
     {
         return None;
     }
-    match resolve_vue3_package_json_type_reference_entry(package_dir, subpath, type_resolver) {
+    match resolve_vue3_package_json_type_reference_entry(
+        package_dir,
+        subpath,
+        resolution_mode,
+        type_resolver,
+    ) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
         Vue3PackageJsonTypeResolution::Blocked => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
@@ -1262,6 +1295,26 @@ mod vue3_type_reference_directive_tests {
         entry
     }
 
+    fn write_conditional_type_package(
+        node_modules: &Path,
+        name: &str,
+        manifest: &str,
+        entries: &[&str],
+    ) -> PathBuf {
+        let package_dir = node_modules.join(name);
+        std::fs::create_dir_all(&package_dir).expect("create conditional type package");
+        std::fs::write(package_dir.join("package.json"), manifest)
+            .expect("write conditional package manifest");
+        for entry in entries {
+            std::fs::write(
+                package_dir.join(entry),
+                format!("interface {} {{}}", entry.replace('.', "_")),
+            )
+            .expect("write conditional package entry");
+        }
+        package_dir
+    }
+
     fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
         Vue3TypeResolverContext {
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
@@ -2032,6 +2085,299 @@ mod vue3_type_reference_directive_tests {
             resolver.external_type_session.stats().resolution_cache_hits,
             1
         );
+    }
+
+    #[test]
+    fn reference_types_resolution_modes_select_secondary_exports_and_isolate_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let package_dir = project_dir
+            .join("node_modules")
+            .join("conditional-reference");
+        std::fs::create_dir_all(&package_dir).expect("create package directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let import_entry = package_dir.join("import.d.mts");
+        let require_entry = package_dir.join("require.d.cts");
+        std::fs::write(&import_entry, "interface ImportReference {}")
+            .expect("write import declaration");
+        std::fs::write(&require_entry, "interface RequireReference {}")
+            .expect("write require declaration");
+        let filename = project_dir.join("Comp.vue");
+        let filename = filename.to_string_lossy();
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_reference_directive_with_mode(
+                &filename,
+                &filename,
+                "conditional-reference",
+                Some(Vue3TypeResolutionMode::Import),
+                &resolver,
+            ),
+            Some(import_entry.clone()),
+        );
+        assert_eq!(
+            resolve_vue3_type_reference_directive_with_mode(
+                &filename,
+                &filename,
+                "conditional-reference",
+                Some(Vue3TypeResolutionMode::Require),
+                &resolver,
+            ),
+            Some(require_entry.clone()),
+        );
+        assert_eq!(resolver.external_type_session.stats().resolution_cache_hits, 0);
+
+        for (mode, expected) in [
+            (Vue3TypeResolutionMode::Import, import_entry),
+            (Vue3TypeResolutionMode::Require, require_entry),
+        ] {
+            assert_eq!(
+                resolve_vue3_type_reference_directive_with_mode(
+                    &filename,
+                    &filename,
+                    "conditional-reference",
+                    Some(mode),
+                    &resolver,
+                ),
+                Some(expected),
+            );
+        }
+        assert_eq!(resolver.external_type_session.stats().resolution_cache_hits, 2);
+        assert_eq!(
+            resolve_vue3_type_reference_directive(
+                &filename,
+                &filename,
+                "conditional-reference",
+                &resolver,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn reference_types_resolution_modes_do_not_override_primary_type_roots() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let package_dir = project_dir.join("types").join("primary-reference");
+        std::fs::create_dir_all(&package_dir).expect("create package directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+        )
+        .expect("write project config");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{
+                "types": "./legacy.d.ts",
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let legacy_entry = package_dir.join("legacy.d.ts");
+        std::fs::write(&legacy_entry, "interface LegacyPrimaryReference {}")
+            .expect("write legacy declaration");
+        std::fs::write(package_dir.join("import.d.mts"), "interface ImportDecoy {}")
+            .expect("write import decoy");
+        std::fs::write(package_dir.join("require.d.cts"), "interface RequireDecoy {}")
+            .expect("write require decoy");
+        let filename = project_dir.join("Comp.vue");
+        let filename = filename.to_string_lossy();
+        let resolver = Vue3TypeResolverContext::default();
+
+        for mode in [
+            Vue3TypeResolutionMode::Import,
+            Vue3TypeResolutionMode::Require,
+        ] {
+            assert_eq!(
+                resolve_vue3_type_reference_directive_with_mode(
+                    &filename,
+                    &filename,
+                    "primary-reference",
+                    Some(mode),
+                    &resolver,
+                ),
+                Some(legacy_entry.clone()),
+            );
+        }
+    }
+
+    #[test]
+    fn reference_types_conditional_exports_preserve_order_and_declaration_space() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let ordered = write_conditional_type_package(
+            &node_modules,
+            "ordered",
+            r#"{
+                "exports": {
+                    ".": {
+                        "default": "./default.d.ts",
+                        "types": "./types.d.ts"
+                    }
+                }
+            }"#,
+            &["default.d.ts", "types.d.ts"],
+        );
+        let fallback = write_conditional_type_package(
+            &node_modules,
+            "fallback",
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": "./missing.d.ts",
+                        "import": "./import.d.mts",
+                        "require": "./require.d.cts",
+                        "default": "./default.d.ts"
+                    }
+                }
+            }"#,
+            &["import.d.mts", "require.d.cts", "default.d.ts"],
+        );
+        let declaration_only = write_conditional_type_package(
+            &node_modules,
+            "declaration-only",
+            r#"{
+                "exports": {
+                    ".": {
+                        "import": "./runtime.ts",
+                        "default": "./fallback.d.ts"
+                    }
+                }
+            }"#,
+            &["runtime.ts", "fallback.d.ts"],
+        );
+        let require_only = write_conditional_type_package(
+            &node_modules,
+            "require-only",
+            r#"{"exports":{".":{"require":"./require.d.cts"}}}"#,
+            &["require.d.cts"],
+        );
+        let resolver = Vue3TypeResolverContext::default();
+
+        for mode in [
+            Vue3TypeResolutionMode::Import,
+            Vue3TypeResolutionMode::Require,
+        ] {
+            assert_eq!(
+                resolve_vue3_package_json_type_reference_entry(
+                    &ordered,
+                    None,
+                    Some(mode),
+                    &resolver,
+                ),
+                Vue3PackageJsonTypeResolution::Resolved(ordered.join("default.d.ts")),
+            );
+        }
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &fallback,
+                None,
+                Some(Vue3TypeResolutionMode::Import),
+                &resolver,
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(fallback.join("import.d.mts")),
+        );
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &fallback,
+                None,
+                Some(Vue3TypeResolutionMode::Require),
+                &resolver,
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(fallback.join("require.d.cts")),
+        );
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &declaration_only,
+                None,
+                Some(Vue3TypeResolutionMode::Import),
+                &resolver,
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(declaration_only.join("fallback.d.ts")),
+        );
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &require_only,
+                None,
+                Some(Vue3TypeResolutionMode::Import),
+                &resolver,
+            ),
+            Vue3PackageJsonTypeResolution::Blocked,
+        );
+    }
+
+    #[test]
+    fn reference_types_conditional_export_fanout_is_bounded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = write_conditional_type_package(
+            dir.path(),
+            "bounded",
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": "./missing.d.ts",
+                        "import": "./hit.d.mts"
+                    }
+                }
+            }"#,
+            &["hit.d.mts"],
+        );
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &package,
+                None,
+                Some(Vue3TypeResolutionMode::Import),
+                &exact,
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(package.join("hit.d.mts")),
+        );
+        assert_eq!(exact.external_type_session.stats().metadata_fanout_entries, 2);
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_package_json_type_reference_entry(
+                &package,
+                None,
+                Some(Vue3TypeResolutionMode::Import),
+                &short,
+            ),
+            Vue3PackageJsonTypeResolution::Blocked,
+        );
+        assert_eq!(short.external_type_session.stats().metadata_fanout_entries, 1);
+        assert!(short.external_type_session.metadata_is_blocked());
     }
 
     #[test]

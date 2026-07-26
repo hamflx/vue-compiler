@@ -14,7 +14,7 @@ categories.workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 nodejs-semver.workspace = true
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
