@@ -215,16 +215,15 @@ pub(crate) fn vue3_tsconfig_target_path(
     capture: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let target = type_resolver.external_type_session.replace_metadata_path_pattern(
+    let target = vue3_tsconfig_expand_config_dir_template(
         target,
-        "*",
-        capture,
+        template_config_dir,
+        type_resolver,
     )?;
-    let template_config_dir = normalize_path_string(template_config_dir);
     let target = type_resolver.external_type_session.replace_metadata_path_pattern(
         &target,
-        "${configDir}",
-        &template_config_dir,
+        "*",
+        capture,
     )?;
     let path = Path::new(&target);
     if path.is_absolute() {
@@ -232,6 +231,24 @@ pub(crate) fn vue3_tsconfig_target_path(
     } else {
         Some(normalize_path_components(target_base_dir.join(target)))
     }
+}
+
+pub(crate) fn vue3_tsconfig_expand_config_dir_template(
+    target: &str,
+    template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    const CONFIG_DIR_TEMPLATE: &str = "${configDir}";
+
+    let Some(suffix) = target.strip_prefix(CONFIG_DIR_TEMPLATE) else {
+        return type_resolver
+            .external_type_session
+            .concat_metadata_path("", target);
+    };
+    let template_config_dir = normalize_path_string(template_config_dir);
+    type_resolver
+        .external_type_session
+        .concat_metadata_path(&template_config_dir, suffix)
 }
 
 #[cfg(test)]

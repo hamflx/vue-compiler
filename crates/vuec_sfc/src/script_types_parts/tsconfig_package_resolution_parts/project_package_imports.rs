@@ -169,10 +169,8 @@ fn vue3_tsconfig_compiler_option_path(
     if target.is_empty() {
         return None;
     }
-    let template_config_dir = normalize_path_string(template_config_dir);
-    let target = type_resolver
-        .external_type_session
-        .replace_metadata_path_pattern(target, "${configDir}", &template_config_dir)?;
+    let target =
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
     let path = Path::new(&target);
     let path = if path.is_absolute() {
         normalize_path_components(PathBuf::from(&target))

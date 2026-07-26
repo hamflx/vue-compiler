@@ -69,6 +69,69 @@ fn vue3_generated_metadata_paths_are_bounded_before_expansion() {
 }
 
 #[test]
+fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
+    let template_config_dir = Path::new("expanded-config-directory");
+    let resolver = Vue3TypeResolverContext::default();
+
+    assert_eq!(
+        vue3_tsconfig_expand_config_dir_template(
+            "literal/${configDir}/types",
+            template_config_dir,
+            &resolver,
+        )
+        .as_deref(),
+        Some("literal/${configDir}/types")
+    );
+
+    let target = "${configDir}/types/${configDir}/leaf";
+    let expanded = "expanded-config-directory/types/${configDir}/leaf";
+    assert_eq!(
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, &resolver).as_deref(),
+        Some(expanded)
+    );
+    assert_eq!(
+        vue3_tsconfig_target_path(
+            Path::new("mapping-base"),
+            template_config_dir,
+            "*",
+            "${configDir}/captured",
+            &resolver,
+        ),
+        Some(
+            Path::new("mapping-base")
+                .join("${configDir}")
+                .join("captured")
+        )
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: expanded.len(),
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, &accepted).as_deref(),
+        Some(expanded)
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: expanded.len() - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, &rejected).is_none()
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+    assert!(vue3_tsconfig_expand_config_dir_template(
+        "${configDir}/ok",
+        Path::new("safe"),
+        &rejected,
+    )
+    .is_none());
+}
+
+#[test]
 fn vue3_generated_package_paths_are_bounded_before_expansion() {
     let dir = tempfile::tempdir().expect("temp dir");
     let exports_package = dir.path().join("exports-package");

@@ -1161,10 +1161,8 @@ pub(crate) fn vue3_tsconfig_include_pattern(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
-    let template_config_dir = normalize_path_string(template_config_dir);
-    let target = type_resolver
-        .external_type_session
-        .replace_metadata_path_pattern(target, "${configDir}", &template_config_dir)?;
+    let target =
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
     let path = Path::new(&target);
     if path.is_absolute() {
         Some(normalize_path_string(&normalize_path_components(
