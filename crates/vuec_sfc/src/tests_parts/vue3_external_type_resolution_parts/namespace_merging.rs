@@ -2108,6 +2108,142 @@ type OptionalMethodConflictConsumer = OptionalMethodConflict
 }
 
 #[test]
+fn vue3_duplicate_global_index_signatures_fail_closed_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let same_file = dir.path().join("same-file-index.d.ts");
+    std::fs::write(
+        &same_file,
+        r#"
+interface SameFileIndex { [key: string]: string }
+interface SameFileIndex { readonly [other: string]: string }
+type SameFileIndexConsumer = SameFileIndex
+"#,
+    )
+    .expect("write same-file duplicate index signatures");
+    let filename = dir.path().join("Comp.vue");
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &[same_file.to_string_lossy().to_string()],
+        &Vue3TypeResolverContext::default(),
+    );
+    for name in ["SameFileIndex", "SameFileIndexConsumer"] {
+        assert!(context.silent_unresolved_type_names.contains(name));
+        assert!(!vue3_type_context_has_name(&context, name));
+    }
+
+    let first = dir.path().join("first-index.d.ts");
+    let second = dir.path().join("second-index.d.ts");
+    let class = dir.path().join("class-index.d.ts");
+    let interface = dir.path().join("class-index-interface.d.ts");
+    let consumer = dir.path().join("index-consumer.d.ts");
+    std::fs::write(&first, "interface CrossFileIndex { [key: string]: string }")
+        .expect("write first cross-file index signature");
+    std::fs::write(
+        &second,
+        "interface CrossFileIndex { [other: string]: string }",
+    )
+    .expect("write second cross-file index signature");
+    std::fs::write(&class, "declare class ClassIndex { [key: string]: string }")
+        .expect("write class index signature");
+    std::fs::write(
+        &interface,
+        "interface ClassIndex { [other: string]: string }",
+    )
+    .expect("write interface index signature");
+    std::fs::write(
+        &consumer,
+        "type CrossFileIndexConsumer = CrossFileIndex\ntype ClassIndexConsumer = ClassIndex",
+    )
+    .expect("write index signature consumers");
+    for files in [
+        vec![
+            first.clone(),
+            second.clone(),
+            class.clone(),
+            interface.clone(),
+            consumer.clone(),
+        ],
+        vec![
+            consumer.clone(),
+            interface.clone(),
+            class.clone(),
+            second.clone(),
+            first.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in [
+            "CrossFileIndex",
+            "CrossFileIndexConsumer",
+            "ClassIndex",
+            "ClassIndexConsumer",
+        ] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_distinct_global_index_domains_remain_mergeable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let string = dir.path().join("string-index.d.ts");
+    let number = dir.path().join("number-index.d.ts");
+    let symbol = dir.path().join("symbol-index.d.ts");
+    let consumer = dir.path().join("distinct-index-consumer.d.ts");
+    std::fs::write(
+        &string,
+        "interface DistinctIndexDomains { [key: string]: string | number }",
+    )
+    .expect("write string index signature");
+    std::fs::write(
+        &number,
+        "interface DistinctIndexDomains { [key: number]: number }",
+    )
+    .expect("write number index signature");
+    std::fs::write(
+        &symbol,
+        "interface DistinctIndexDomains { [key: symbol]: Date; visible: boolean }",
+    )
+    .expect("write symbol index signature");
+    std::fs::write(
+        &consumer,
+        "type DistinctIndexDomainsConsumer = DistinctIndexDomains",
+    )
+    .expect("write distinct index domain consumer");
+    let filename = dir.path().join("Comp.vue");
+    for files in [
+        vec![
+            string.clone(),
+            number.clone(),
+            symbol.clone(),
+            consumer.clone(),
+        ],
+        vec![consumer.clone(), symbol.clone(), number.clone(), string.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["DistinctIndexDomains", "DistinctIndexDomainsConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
 fn vue3_global_files_merge_enums_and_refresh_runtime_types_in_any_order() {
     let dir = tempfile::tempdir().expect("temp dir");
     let text = dir.path().join("text-enum-global.d.ts");

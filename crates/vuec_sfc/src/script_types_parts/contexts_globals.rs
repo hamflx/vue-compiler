@@ -197,6 +197,7 @@ enum Vue3GlobalClassMemberKind {
     Method,
     Getter,
     Setter,
+    Index,
 }
 
 struct Vue3GlobalClassMemberSignature {
@@ -3273,50 +3274,17 @@ fn insert_vue3_global_interface_property_signatures(
     let mut conflicting = kinds.conflicting_type_names.contains(&name);
     for member in &declaration.body.body {
         if let TSSignature::TSIndexSignature(index) = member {
-            let Some(parameter) = index.parameters.first() else {
+            let Some((property_name, signature)) = vue3_global_index_signature(
+                source,
+                index,
+                &parameter_names,
+                prefix,
+                scoped_roots,
+                namespace_budget,
+            )?
+            else {
                 conflicting = true;
                 continue;
-            };
-            let key_type = &parameter.type_annotation.type_annotation;
-            let key_span = key_type.span();
-            let key_source = source.get(key_span.start as usize..key_span.end as usize)?;
-            if !namespace_budget.reserve(
-                key_source
-                    .len()
-                    .saturating_add(std::mem::size_of::<Vue3GlobalInterfaceMemberKey>())
-                    .saturating_add(1),
-            ) {
-                return None;
-            }
-            let property_name = Vue3GlobalInterfaceMemberKey::Index(key_source.to_string());
-            let ty = &index.type_annotation.type_annotation;
-            let span = ty.span();
-            let type_source = source.get(span.start as usize..span.end as usize)?;
-            let scope_key = vue3_type_scope_key(
-                ty,
-                &parameter_names,
-                scoped_roots,
-                prefix,
-                namespace_budget,
-            )?;
-            let signature_work = type_source
-                .len()
-                .saturating_add(scope_key.as_ref().map_or(0, String::len))
-                .saturating_add(std::mem::size_of::<Vue3GlobalInterfacePropertySignature>());
-            if !namespace_budget.reserve(
-                property_name
-                    .work()
-                    .saturating_add(signature_work)
-                    .saturating_add(1),
-            ) {
-                return None;
-            }
-            let signature = Vue3GlobalInterfacePropertySignature {
-                source: Some(type_source.to_string()),
-                optional: false,
-                readonly: index.readonly,
-                method: false,
-                scope_key,
             };
             merge_vue3_global_member_signature(
                 property_name,
@@ -3438,6 +3406,60 @@ fn insert_vue3_global_interface_property_signatures(
     Some(())
 }
 
+fn vue3_global_index_signature(
+    source: &str,
+    index: &oxc_ast::ast::TSIndexSignature<'_>,
+    parameter_names: &BTreeSet<String>,
+    prefix: Option<&str>,
+    scoped_roots: &Vue3GlobalScopedRoots,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<Option<(
+    Vue3GlobalInterfaceMemberKey,
+    Vue3GlobalInterfacePropertySignature,
+)>> {
+    let Some(parameter) = index.parameters.first() else {
+        return Some(None);
+    };
+    let key_type = &parameter.type_annotation.type_annotation;
+    let key_span = key_type.span();
+    let key_source = source.get(key_span.start as usize..key_span.end as usize)?;
+    if !namespace_budget.reserve(
+        key_source
+            .len()
+            .saturating_add(std::mem::size_of::<Vue3GlobalInterfaceMemberKey>())
+            .saturating_add(1),
+    ) {
+        return None;
+    }
+    let property_name = Vue3GlobalInterfaceMemberKey::Index(key_source.to_string());
+    let ty = &index.type_annotation.type_annotation;
+    let span = ty.span();
+    let type_source = source.get(span.start as usize..span.end as usize)?;
+    let scope_key = vue3_type_scope_key(
+        ty,
+        parameter_names,
+        scoped_roots,
+        prefix,
+        namespace_budget,
+    )?;
+    let signature = Vue3GlobalInterfacePropertySignature {
+        source: Some(type_source.to_string()),
+        optional: false,
+        readonly: index.readonly,
+        method: false,
+        scope_key,
+    };
+    if !namespace_budget.reserve(
+        property_name
+            .work()
+            .saturating_add(signature.work())
+            .saturating_add(1),
+    ) {
+        return None;
+    }
+    Some(Some((property_name, signature)))
+}
+
 fn merge_vue3_global_member_signature(
     property_name: Vue3GlobalInterfaceMemberKey,
     signature: Vue3GlobalInterfacePropertySignature,
@@ -3460,7 +3482,9 @@ fn merge_vue3_global_member_signature(
         ) {
             return None;
         }
-        if !vue3_global_interface_property_signatures_are_compatible(existing, &signature) {
+        if matches!(property_name, Vue3GlobalInterfaceMemberKey::Index(_))
+            || !vue3_global_interface_property_signatures_are_compatible(existing, &signature)
+        {
             *conflicting = true;
         }
     } else {
@@ -3679,6 +3703,34 @@ fn insert_vue3_global_class_member_signatures(
         Vue3GlobalClassMemberSignature,
     >::new();
     for member in &declaration.body.body {
+        if let ClassElement::TSIndexSignature(index) = member {
+            if index.r#static {
+                continue;
+            }
+            let Some((property_name, signature)) = vue3_global_index_signature(
+                source,
+                index,
+                &parameter_names,
+                prefix,
+                scoped_roots,
+                namespace_budget,
+            )?
+            else {
+                conflicting = true;
+                continue;
+            };
+            insert_vue3_global_class_member_signature(
+                property_name,
+                Vue3GlobalClassMemberSignature {
+                    kind: Vue3GlobalClassMemberKind::Index,
+                    signature,
+                },
+                &mut class_members,
+                &mut conflicting,
+                namespace_budget,
+            )?;
+            continue;
+        }
         let (key, computed, optional, readonly, member_kind, ty) = match member {
             ClassElement::PropertyDefinition(property)
                 if !property.r#static
@@ -3825,37 +3877,13 @@ fn insert_vue3_global_class_member_signatures(
             kind: member_kind,
             signature,
         };
-        match class_members.entry(property_name) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(member);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                match (entry.get().kind, member_kind) {
-                    (Vue3GlobalClassMemberKind::Method, Vue3GlobalClassMemberKind::Method) => {
-                        if !namespace_budget.reserve(
-                            entry
-                                .key()
-                                .work()
-                                .saturating_add(entry.get().signature.work())
-                                .saturating_add(member.signature.work()),
-                        ) {
-                            return None;
-                        }
-                        if !vue3_global_interface_property_signatures_are_compatible(
-                            &entry.get().signature,
-                            &member.signature,
-                        ) {
-                            conflicting = true;
-                        }
-                    }
-                    (Vue3GlobalClassMemberKind::Getter, Vue3GlobalClassMemberKind::Setter) => {}
-                    (Vue3GlobalClassMemberKind::Setter, Vue3GlobalClassMemberKind::Getter) => {
-                        entry.insert(member);
-                    }
-                    _ => conflicting = true,
-                }
-            }
-        }
+        insert_vue3_global_class_member_signature(
+            property_name,
+            member,
+            &mut class_members,
+            &mut conflicting,
+            namespace_budget,
+        )?;
     }
     for (property_name, member) in class_members {
         if !namespace_budget.reserve(
@@ -3879,6 +3907,51 @@ fn insert_vue3_global_class_member_signatures(
     }
     if !properties.is_empty() {
         kinds.interface_property_signatures.insert(name, properties);
+    }
+    Some(())
+}
+
+fn insert_vue3_global_class_member_signature(
+    property_name: Vue3GlobalInterfaceMemberKey,
+    member: Vue3GlobalClassMemberSignature,
+    class_members: &mut BTreeMap<
+        Vue3GlobalInterfaceMemberKey,
+        Vue3GlobalClassMemberSignature,
+    >,
+    conflicting: &mut bool,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    let member_kind = member.kind;
+    match class_members.entry(property_name) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(member);
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            match (entry.get().kind, member_kind) {
+                (Vue3GlobalClassMemberKind::Method, Vue3GlobalClassMemberKind::Method) => {
+                    if !namespace_budget.reserve(
+                        entry
+                            .key()
+                            .work()
+                            .saturating_add(entry.get().signature.work())
+                            .saturating_add(member.signature.work()),
+                    ) {
+                        return None;
+                    }
+                    if !vue3_global_interface_property_signatures_are_compatible(
+                        &entry.get().signature,
+                        &member.signature,
+                    ) {
+                        *conflicting = true;
+                    }
+                }
+                (Vue3GlobalClassMemberKind::Getter, Vue3GlobalClassMemberKind::Setter) => {}
+                (Vue3GlobalClassMemberKind::Setter, Vue3GlobalClassMemberKind::Getter) => {
+                    entry.insert(member);
+                }
+                _ => *conflicting = true,
+            }
+        }
     }
     Some(())
 }
@@ -4898,7 +4971,8 @@ fn vue3_global_interface_properties_are_compatible(
     };
     left.iter().all(|(property, signature)| {
         right.get(property).is_none_or(|other| {
-            vue3_global_interface_property_signatures_are_compatible(signature, other)
+            !matches!(property, Vue3GlobalInterfaceMemberKey::Index(_))
+                && vue3_global_interface_property_signatures_are_compatible(signature, other)
         })
     })
 }
