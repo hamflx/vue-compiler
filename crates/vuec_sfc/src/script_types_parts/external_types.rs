@@ -6,7 +6,10 @@ struct Vue3InlineModuleSource<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3ModuleDependency {
-    Module(String),
+    Module {
+        source: String,
+        resolution_mode: Vue3TypeResolutionMode,
+    },
     ReferencePath(String),
     ReferenceTypes {
         source: String,
@@ -15,20 +18,29 @@ enum Vue3ModuleDependency {
 }
 
 impl Vue3ModuleDependency {
+    fn module(source: &str, resolution_mode: Vue3TypeResolutionMode) -> Self {
+        Self::Module {
+            source: source.to_string(),
+            resolution_mode,
+        }
+    }
+
     fn source(&self) -> &str {
         match self {
-            Self::Module(source) | Self::ReferencePath(source) => source,
+            Self::Module { source, .. } | Self::ReferencePath(source) => source,
             Self::ReferenceTypes { source, .. } => source,
         }
     }
 
     fn is_global_program_reference(&self) -> bool {
-        !matches!(self, Self::Module(_))
+        !matches!(self, Self::Module { .. })
     }
 }
 
 struct Vue3ModuleDependencyCollector<'budget> {
     dependencies: BTreeSet<Vue3ModuleDependency>,
+    collect_commonjs_requires: bool,
+    static_resolution_mode: Vue3TypeResolutionMode,
     namespace_budget: &'budget mut Vue3NamespaceProjectionBudget,
 }
 
@@ -48,29 +60,224 @@ impl Vue3ModuleDependencyCollector<'_> {
         }
     }
 
-    fn insert_module(&mut self, source: &str) {
-        self.insert(Vue3ModuleDependency::Module(source.to_string()));
+    fn insert_module(&mut self, source: &str, resolution_mode: Vue3TypeResolutionMode) {
+        self.insert(Vue3ModuleDependency::module(source, resolution_mode));
     }
+
+    fn insert_static_module(&mut self, source: &str) {
+        self.insert_module(source, self.static_resolution_mode);
+    }
+}
+
+fn vue3_is_commonjs_require_call(call: &CallExpression<'_>) -> bool {
+    matches!(
+        &call.callee,
+        Expression::Identifier(identifier)
+            if identifier.name == "require" && identifier.span.start == call.span.start
+    ) && call.arguments.len() == 1
+}
+
+fn vue3_static_commonjs_require_source<'a>(call: &'a CallExpression<'_>) -> Option<&'a str> {
+    if !vue3_is_commonjs_require_call(call) {
+        return None;
+    }
+    match call.arguments.first()? {
+        Argument::StringLiteral(literal) => Some(literal.value.as_str()),
+        Argument::TemplateLiteral(literal)
+            if literal.expressions.is_empty() && literal.quasis.len() == 1 =>
+        {
+            literal
+                .quasis
+                .first()?
+                .value
+                .cooked
+                .as_ref()
+                .map(|value| value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn vue3_expression_is_commonjs_exports_root(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Identifier(identifier) => identifier.name == "exports",
+        Expression::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && member.property.name == "exports"
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && vue3_expression_is_exports_property_name(&member.expression)
+        }
+        _ => false,
+    }
+}
+
+fn vue3_expression_is_static_property_name(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression,
+        Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+    ) || expression.is_no_substitution_template()
+}
+
+fn vue3_expression_is_exports_property_name(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::StringLiteral(property) => property.value == "exports",
+        Expression::TemplateLiteral(property) => property
+            .single_quasi()
+            .is_some_and(|property| property == "exports"),
+        _ => false,
+    }
+}
+
+fn vue3_expression_is_commonjs_exports_chain(expression: &Expression<'_>) -> bool {
+    if vue3_expression_is_commonjs_exports_root(expression) {
+        return true;
+    }
+    match expression {
+        Expression::StaticMemberExpression(member) => {
+            vue3_expression_is_commonjs_exports_chain(&member.object)
+        }
+        Expression::ComputedMemberExpression(member)
+            if vue3_expression_is_static_property_name(&member.expression) =>
+        {
+            vue3_expression_is_commonjs_exports_chain(&member.object)
+        }
+        _ => false,
+    }
+}
+
+fn vue3_rightmost_assigned_expression<'a>(mut expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    while let Expression::AssignmentExpression(assignment) = expression {
+        if !assignment.operator.is_assign() {
+            break;
+        }
+        expression = &assignment.right;
+    }
+    expression
+}
+
+fn vue3_assignment_is_commonjs_export(assignment: &AssignmentExpression<'_>) -> bool {
+    if !assignment.operator.is_assign()
+        || vue3_rightmost_assigned_expression(&assignment.right).is_void_0()
+    {
+        return false;
+    }
+    match &assignment.left {
+        AssignmentTarget::StaticMemberExpression(member) => {
+            vue3_expression_is_commonjs_exports_chain(&member.object)
+                || matches!(
+                    &member.object,
+                    Expression::Identifier(identifier)
+                        if identifier.name == "module" && member.property.name == "exports"
+                )
+        }
+        AssignmentTarget::ComputedMemberExpression(member) => {
+            vue3_expression_is_static_property_name(&member.expression)
+                && (vue3_expression_is_commonjs_exports_chain(&member.object)
+                    || matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                        && vue3_expression_is_exports_property_name(&member.expression))
+        }
+        _ => false,
+    }
+}
+
+fn vue3_is_commonjs_define_property_call(call: &CallExpression<'_>) -> bool {
+    if call.arguments.len() != 3 {
+        return false;
+    }
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return false;
+    };
+    if !matches!(&callee.object, Expression::Identifier(identifier) if identifier.name == "Object")
+        || callee.property.name != "defineProperty"
+    {
+        return false;
+    }
+    let Some(target) = call
+        .arguments
+        .first()
+        .and_then(Argument::as_expression)
+    else {
+        return false;
+    };
+    let Some(property) = call.arguments.get(1).and_then(Argument::as_expression) else {
+        return false;
+    };
+    vue3_expression_is_commonjs_exports_root(target)
+        && vue3_expression_is_static_property_name(property)
+}
+
+#[derive(Default)]
+struct Vue3CommonJsModuleDetector {
+    found: bool,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for Vue3CommonJsModuleDetector {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if vue3_is_commonjs_require_call(call) || vue3_is_commonjs_define_property_call(call) {
+            self.found = true;
+            return;
+        }
+        oxc_ast_visit::walk::walk_call_expression(self, call);
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if vue3_assignment_is_commonjs_export(assignment) {
+            self.found = true;
+            return;
+        }
+        oxc_ast_visit::walk::walk_assignment_expression(self, assignment);
+    }
+}
+
+fn vue3_javascript_statements_have_commonjs_module_indicator(
+    statements: &[Statement<'_>],
+    source_type: oxc_span::SourceType,
+) -> bool {
+    if !source_type.is_javascript() {
+        return false;
+    }
+    let mut detector = Vue3CommonJsModuleDetector::default();
+    for statement in statements {
+        oxc_ast_visit::Visit::visit_statement(&mut detector, statement);
+        if detector.found {
+            break;
+        }
+    }
+    detector.found
 }
 
 impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(source) = &expression.source {
-            self.insert_module(source.value.as_str());
+            self.insert_module(source.value.as_str(), Vue3TypeResolutionMode::Import);
         }
         oxc_ast_visit::walk::walk_import_expression(self, expression);
     }
 
     fn visit_ts_import_type(&mut self, import: &TSImportType<'a>) {
-        self.insert_module(import.source.value.as_str());
+        self.insert_static_module(import.source.value.as_str());
         oxc_ast_visit::walk::walk_ts_import_type(self, import);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if self.collect_commonjs_requires {
+            if let Some(source) = vue3_static_commonjs_require_source(call) {
+                self.insert_module(source, Vue3TypeResolutionMode::Require);
+            }
+        }
+        oxc_ast_visit::walk::walk_call_expression(self, call);
     }
 
     fn visit_ts_external_module_reference(
         &mut self,
         reference: &TSExternalModuleReference<'a>,
     ) {
-        self.insert_module(reference.expression.value.as_str());
+        self.insert_module(
+            reference.expression.value.as_str(),
+            Vue3TypeResolutionMode::Require,
+        );
     }
 }
 
@@ -189,6 +396,12 @@ fn vue3_module_dependencies_from_source(
     });
     let mut collector = Vue3ModuleDependencyCollector {
         dependencies: BTreeSet::new(),
+        collect_commonjs_requires: source_type.is_javascript(),
+        static_resolution_mode: if source_type.is_commonjs() {
+            Vue3TypeResolutionMode::Require
+        } else {
+            Vue3TypeResolutionMode::Import
+        },
         namespace_budget,
     };
     let first_syntax_start = parsed
@@ -245,15 +458,15 @@ fn vue3_module_dependencies_from_source(
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
-                collector.insert_module(import.source.value.as_str());
+                collector.insert_static_module(import.source.value.as_str());
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
-                    collector.insert_module(source.value.as_str());
+                    collector.insert_static_module(source.value.as_str());
                 }
             }
             Statement::ExportAllDeclaration(export) => {
-                collector.insert_module(export.source.value.as_str());
+                collector.insert_static_module(export.source.value.as_str());
             }
             _ => {}
         }
@@ -375,9 +588,15 @@ fn vue3_reachable_global_augmentation_files(
         let is_global_program_reference = dependency.is_global_program_reference();
         let failure_epoch = type_resolver.external_type_session.failure_epoch();
         let resolved = match &dependency {
-            Vue3ModuleDependency::Module(source) => {
-                resolve_vue3_type_import(&importer, source, &type_resolver)
-            }
+            Vue3ModuleDependency::Module {
+                source,
+                resolution_mode,
+            } => resolve_vue3_type_import_with_mode(
+                &importer,
+                source,
+                *resolution_mode,
+                &type_resolver,
+            ),
             Vue3ModuleDependency::ReferencePath(reference) => {
                 resolve_vue3_type_reference_path(&importer, reference, &type_resolver)
             }
@@ -3113,6 +3332,18 @@ mod namespace_projection_budget_tests {
         }
     }
 
+    fn javascript_has_commonjs_module_indicator(source: &str) -> bool {
+        let allocator = oxc_allocator::Allocator::default();
+        let source_type = oxc_span::SourceType::unambiguous();
+        let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+        assert!(!parsed.panicked, "parser panicked for {source:?}");
+        assert!(parsed.errors.is_empty(), "parse failed for {source:?}");
+        vue3_javascript_statements_have_commonjs_module_indicator(
+            &parsed.program.body,
+            source_type,
+        )
+    }
+
     #[test]
     fn module_dependency_scan_covers_typescript_module_edges_and_exact_budget() {
         let source = r#"
@@ -3128,12 +3359,12 @@ import Required = require('./import-equals')
 declare global { interface Augmented { value: string } }
 "#;
         let expected = BTreeSet::from([
-            Vue3ModuleDependency::Module("./all".to_string()),
-            Vue3ModuleDependency::Module("./dynamic".to_string()),
-            Vue3ModuleDependency::Module("./import-equals".to_string()),
-            Vue3ModuleDependency::Module("./import-type".to_string()),
-            Vue3ModuleDependency::Module("./named".to_string()),
-            Vue3ModuleDependency::Module("./side-effect".to_string()),
+            Vue3ModuleDependency::module("./all", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./import-equals", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./import-type", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./named", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./side-effect", Vue3TypeResolutionMode::Import),
             Vue3ModuleDependency::ReferencePath("./reference-path".to_string()),
             Vue3ModuleDependency::ReferenceTypes {
                 source: "./reference-types".to_string(),
@@ -3175,6 +3406,280 @@ declare global { interface Augmented { value: string } }
         );
         assert_eq!(short.remaining_work, 0);
         assert!(short.exhausted);
+    }
+
+    #[test]
+    fn javascript_require_scan_is_static_javascript_only_and_exactly_bounded() {
+        let source = r#"
+import './shared'
+require('./shared')
+require('./root')
+function nested(require) { require(`./shadowed`) }
+require.resolve('./resolve')
+object.require('./member')
+require('./' + name)
+require(`./${name}`)
+require()
+require('./two', options)
+require(...sources)
+(require)('./parenthesized')
+"#;
+        let expected = BTreeSet::from([
+            Vue3ModuleDependency::module("./root", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./shadowed", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module("./shared", Vue3TypeResolutionMode::Import),
+            Vue3ModuleDependency::module("./shared", Vue3TypeResolutionMode::Require),
+        ]);
+        let mut measured = budget(usize::MAX);
+        let dependencies = vue3_module_dependencies_from_source(
+            source,
+            oxc_span::SourceType::unambiguous(),
+            &mut measured,
+        )
+        .expect("measure JavaScript dependency scan")
+        .1;
+        assert_eq!(dependencies, expected);
+        let required = usize::MAX - measured.remaining_work;
+
+        let mut exact = budget(required);
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::unambiguous(),
+                &mut exact,
+            ),
+            Some((false, expected)),
+        );
+        assert_eq!(exact.remaining_work, 0);
+        assert!(!exact.exhausted);
+
+        let mut short = budget(required - 1);
+        assert!(
+            vue3_module_dependencies_from_source(
+                source,
+                oxc_span::SourceType::unambiguous(),
+                &mut short,
+            )
+            .is_none()
+        );
+        assert_eq!(short.remaining_work, 0);
+        assert!(short.exhausted);
+
+        let typescript = r#"
+require('./ignored')
+function nested() { require('./also-ignored') }
+import Required = require('./required')
+"#;
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                typescript,
+                oxc_span::SourceType::ts(),
+                &mut budget(usize::MAX),
+            )
+            .map(|(_, dependencies)| dependencies),
+            Some(BTreeSet::from([Vue3ModuleDependency::module(
+                "./required",
+                Vue3TypeResolutionMode::Require,
+            )])),
+        );
+
+        let commonjs = r#"
+import './static'
+export * from './exported'
+type Imported = import('./import-type').Value
+const load = () => import('./dynamic')
+"#;
+        assert_eq!(
+            vue3_module_dependencies_from_source(
+                commonjs,
+                oxc_span::SourceType::from_path("types.cts").expect("CommonJS source type"),
+                &mut budget(usize::MAX),
+            )
+            .map(|(_, dependencies)| dependencies),
+            Some(BTreeSet::from([
+                Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module("./exported", Vue3TypeResolutionMode::Require),
+                Vue3ModuleDependency::module("./import-type", Vue3TypeResolutionMode::Require),
+                Vue3ModuleDependency::module("./static", Vue3TypeResolutionMode::Require),
+            ])),
+        );
+    }
+
+    #[test]
+    fn commonjs_module_indicator_matches_static_export_assignment_rules() {
+        for source in [
+            "exports.api.value = 1",
+            "module.exports.api.value = 1",
+            "module[`exports`].api[0] = 1",
+            "Object.defineProperty(exports, 'value', {})",
+            "Object.defineProperty(module['exports'], 0, {})",
+            "Object.defineProperty(exports, `value`, {})",
+        ] {
+            assert!(
+                javascript_has_commonjs_module_indicator(source),
+                "expected CommonJS indicator for {source:?}"
+            );
+        }
+
+        for source in [
+            "module.exports.value += 1",
+            "module.exports ??= value",
+            "exports[key] = value",
+            "exports.api[key].value = value",
+            "module.exports.value = void 0",
+            "module.exports.value = alias = void 0",
+            "Object.defineProperty(exports)",
+            "Object.defineProperty(exports, key, {})",
+            "Object.defineProperty(exports.api, 'value', {})",
+            "Object['defineProperty'](exports, 'value', {})",
+            "Object.defineProperty(exports, 'value')",
+            "Object.defineProperty(exports, 'value', {}, extra)",
+        ] {
+            assert!(
+                !javascript_has_commonjs_module_indicator(source),
+                "unexpected CommonJS indicator for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_source_types_accept_case_insensitive_javascript_extensions() {
+        let javascript = vue3_type_source_type("TYPES.JS");
+        assert!(javascript.is_javascript());
+        assert!(javascript.is_unambiguous());
+
+        let commonjs = vue3_type_source_type("TYPES.CJS");
+        assert!(commonjs.is_javascript());
+        assert!(commonjs.is_commonjs());
+
+        let declaration = vue3_type_source_type("TYPES.D.CTS");
+        assert!(declaration.is_typescript_definition());
+        assert!(declaration.is_commonjs());
+    }
+
+    #[test]
+    fn module_resolution_modes_select_require_and_keep_same_source_edges() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("conditional-module");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            "declare global { interface ImportCondition {} } export {}",
+        )
+        .expect("write import entry");
+        std::fs::write(
+            &require_entry,
+            "declare global { interface RequireCondition {} } export {}",
+        )
+        .expect("write require entry");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+
+        let require_root = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import Required = require('conditional-module')",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &require_root,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(vec![require_entry.clone()]),
+        );
+
+        let dual_root = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import 'conditional-module'\nrequire('conditional-module')",
+            source_type: oxc_span::SourceType::unambiguous(),
+        }];
+        let exact = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &dual_root, &exact),
+            Some(vec![import_entry, require_entry]),
+        );
+
+        let short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &dual_root, &short).is_none()
+        );
+    }
+
+    #[test]
+    fn commonjs_entries_derive_require_mode_for_internal_static_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let outer = node_modules.join("conditional-outer");
+        let child = node_modules.join("conditional-child");
+        std::fs::create_dir_all(&outer).expect("create outer package");
+        std::fs::create_dir_all(&child).expect("create child package");
+        std::fs::write(
+            outer.join("package.json"),
+            r#"{"exports":{".":{"types":{"import":"./import.d.mts","require":"./require.d.cts"}}}}"#,
+        )
+        .expect("write outer package manifest");
+        std::fs::write(outer.join("import.d.mts"), "export {}")
+            .expect("write outer import entry");
+        std::fs::write(
+            outer.join("require.d.cts"),
+            "import 'conditional-child'",
+        )
+        .expect("write outer require entry");
+        std::fs::write(
+            child.join("package.json"),
+            r#"{"exports":{".":{"types":{"import":"./import.d.mts","require":"./require.d.cts"}}}}"#,
+        )
+        .expect("write child package manifest");
+        std::fs::write(
+            child.join("import.d.mts"),
+            "declare global { interface WrongChildCondition {} } export {}",
+        )
+        .expect("write child import entry");
+        let child_require = child.join("require.d.cts");
+        std::fs::write(
+            &child_require,
+            "declare global { interface RequiredChildCondition {} } export {}",
+        )
+        .expect("write child require entry");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let roots = [Vue3InlineModuleSource {
+            filename: &filename,
+            source: "import Required = require('conditional-outer')",
+            source_type: oxc_span::SourceType::ts(),
+        }];
+
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &roots,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(vec![child_require]),
+        );
     }
 
     #[test]

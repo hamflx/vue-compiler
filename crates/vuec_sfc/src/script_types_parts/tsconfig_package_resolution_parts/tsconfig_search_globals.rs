@@ -73,9 +73,24 @@ fn vue3_tsconfig_graph_enter(
     Some(identity)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_tsconfig_type_import(
     filename: &str,
     source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_tsconfig_type_import_with_mode(
+        filename,
+        source,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -97,7 +112,12 @@ pub(crate) fn resolve_vue3_tsconfig_type_import(
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }
-        let resolved = resolve_vue3_tsconfig_path_mappings(&mappings, source, type_resolver);
+        let resolved = resolve_vue3_tsconfig_path_mappings_with_mode(
+            &mappings,
+            source,
+            resolution_mode,
+            type_resolver,
+        );
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }

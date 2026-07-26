@@ -1380,8 +1380,12 @@ fn vue3_global_type_projection_from_source(
     if parsed.panicked || !parsed.errors.is_empty() {
         return None;
     }
-    let program_is_global_script = (source_type.is_typescript_definition()
-        || parsed.program.source_type.is_script())
+    let program_is_global_script = !source_type.is_commonjs()
+        && !vue3_javascript_statements_have_commonjs_module_indicator(
+            &parsed.program.body,
+            source_type,
+        )
+        && (source_type.is_typescript_definition() || parsed.program.source_type.is_script())
         && vue3_statements_are_ambient_global_scope(&parsed.program.body);
 
     let dependency = normalize_path_string(Path::new(filename));

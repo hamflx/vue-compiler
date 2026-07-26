@@ -403,6 +403,94 @@ defineProps<Types.Secret>()
 }
 
 #[test]
+fn vue3_require_only_javascript_global_files_keep_module_members_private() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let script = dir.path().join("script.js");
+    let bridge = dir.path().join("bridge.js");
+    let dynamic_require = dir.path().join("dynamic-require.js");
+    let commonjs_exports = dir.path().join("commonjs-exports.js");
+    let define_property = dir.path().join("define-property.js");
+    let parenthesized = dir.path().join("parenthesized.js");
+    let explicit_commonjs = dir.path().join("explicit.cjs");
+    let augmentation = dir.path().join("augmentation.ts");
+    std::fs::write(&script, "class ScriptGlobal {}")
+        .expect("write ordinary JavaScript global file");
+    std::fs::write(
+        &bridge,
+        "class RequirePrivate {}\nrequire('./augmentation')",
+    )
+    .expect("write require-only JavaScript module");
+    std::fs::write(
+        &dynamic_require,
+        "class DynamicRequirePrivate {}\nrequire(moduleName)",
+    )
+    .expect("write dynamic require JavaScript module");
+    std::fs::write(
+        &commonjs_exports,
+        "class CommonJsExportsPrivate {}\nmodule.exports.value = true",
+    )
+    .expect("write CommonJS export assignment module");
+    std::fs::write(
+        &define_property,
+        "class DefinePropertyPrivate {}\nObject.defineProperty(exports, 'value', {})",
+    )
+    .expect("write CommonJS defineProperty module");
+    std::fs::write(
+        &parenthesized,
+        "class ParenthesizedRequireGlobal {}\n(require)('./missing')",
+    )
+    .expect("write parenthesized require JavaScript global file");
+    std::fs::write(&explicit_commonjs, "class ExplicitCommonJsPrivate {}")
+        .expect("write explicit CommonJS module");
+    std::fs::write(
+        &augmentation,
+        "export {}; declare global { interface CommonJsAugmented { visible: string } }",
+    )
+    .expect("write CommonJS augmentation dependency");
+    let context = vue3_global_type_context(
+        &dir.path().join("Comp.vue").to_string_lossy(),
+        &[
+            script.to_string_lossy().to_string(),
+            bridge.to_string_lossy().to_string(),
+            dynamic_require.to_string_lossy().to_string(),
+            commonjs_exports.to_string_lossy().to_string(),
+            define_property.to_string_lossy().to_string(),
+            parenthesized.to_string_lossy().to_string(),
+            explicit_commonjs.to_string_lossy().to_string(),
+        ],
+        &Vue3TypeResolverContext::default(),
+    );
+
+    assert!(vue3_type_context_has_name(&context, "ScriptGlobal"));
+    assert!(vue3_type_context_has_name(
+        &context,
+        "ParenthesizedRequireGlobal"
+    ));
+    assert!(!vue3_type_context_has_name(&context, "RequirePrivate"));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "DynamicRequirePrivate"
+    ));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "CommonJsExportsPrivate"
+    ));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "DefinePropertyPrivate"
+    ));
+    assert!(!vue3_type_context_has_name(
+        &context,
+        "ExplicitCommonJsPrivate"
+    ));
+    assert!(vue3_type_context_has_name(&context, "CommonJsAugmented"));
+    assert_eq!(
+        context.type_sources.get("CommonJsAugmented"),
+        Some(&normalize_path_string(&augmentation)),
+    );
+}
+
+#[test]
 fn vue3_split_namespaces_merge_interface_declarations() {
     let dir = tempfile::tempdir().expect("temp dir");
     let types = dir.path().join("types.ts");

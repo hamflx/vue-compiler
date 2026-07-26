@@ -1,9 +1,11 @@
-pub(crate) fn resolve_vue3_type_import_path(
+pub(crate) fn resolve_vue3_type_import_path_with_mode(
     candidate: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     resolve_vue3_type_import_path_with_probe_mode(
         candidate,
+        resolution_mode,
         type_resolver,
         Vue3TypeImportPathProbeMode::Source,
     )
@@ -160,12 +162,14 @@ fn vue3_type_reference_declaration_candidates(candidate: &Path) -> Vec<PathBuf> 
     candidates
 }
 
-pub(crate) fn resolve_vue3_metadata_type_import_path(
+pub(crate) fn resolve_vue3_metadata_type_import_path_with_mode(
     candidate: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     resolve_vue3_type_import_path_with_probe_mode(
         candidate,
+        resolution_mode,
         type_resolver,
         Vue3TypeImportPathProbeMode::Metadata,
     )
@@ -221,6 +225,7 @@ impl Vue3TypeImportPathProbeMode {
 
 fn resolve_vue3_type_import_path_with_probe_mode(
     candidate: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
     probe_mode: Vue3TypeImportPathProbeMode,
 ) -> Option<PathBuf> {
@@ -242,7 +247,12 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         candidates.push(candidate.to_path_buf());
     } else {
         if probe_mode.is_dir(candidate, type_resolver)? {
-            match resolve_vue3_package_json_type_entry(candidate, None, type_resolver) {
+            match resolve_vue3_package_json_type_entry_with_mode(
+                candidate,
+                None,
+                resolution_mode,
+                type_resolver,
+            ) {
                 Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
                 Vue3PackageJsonTypeResolution::Blocked => return None,
                 Vue3PackageJsonTypeResolution::NoPackageJson

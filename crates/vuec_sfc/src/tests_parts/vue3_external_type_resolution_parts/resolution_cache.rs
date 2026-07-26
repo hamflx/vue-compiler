@@ -26,6 +26,145 @@
     }
 
     #[test]
+    fn vue3_type_import_resolution_cache_isolates_import_and_require_modes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-mode-cache");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(&import_entry, "export interface Imported {}")
+            .expect("write import entry");
+        std::fs::write(&require_entry, "export interface Required {}")
+            .expect("write require entry");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "vuec-mode-cache",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(import_entry.clone()),
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "vuec-mode-cache",
+                Vue3TypeResolutionMode::Require,
+                &resolver,
+            ),
+            Some(require_entry.clone()),
+        );
+        let first_pass = resolver.external_type_session.stats();
+        assert_eq!(first_pass.resolution_lookups, 2);
+        assert_eq!(first_pass.resolution_cache_hits, 0);
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "vuec-mode-cache",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(import_entry.clone()),
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "vuec-mode-cache",
+                Vue3TypeResolutionMode::Require,
+                &resolver,
+            ),
+            Some(require_entry),
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "vuec-mode-cache", &resolver),
+            Some(import_entry),
+        );
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.resolution_lookups, 5);
+        assert_eq!(stats.resolution_cache_hits, 3);
+    }
+
+    #[test]
+    fn vue3_type_import_resolution_mode_reaches_tsconfig_directory_targets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("vuec-mode-alias");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "mode-alias": ["node_modules/vuec-mode-alias"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write tsconfig paths");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(&import_entry, "export interface Imported {}")
+            .expect("write import entry");
+        std::fs::write(&require_entry, "export interface Required {}")
+            .expect("write require entry");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "mode-alias",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(import_entry),
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "mode-alias",
+                Vue3TypeResolutionMode::Require,
+                &resolver,
+            ),
+            Some(require_entry),
+        );
+    }
+
+    #[test]
     fn vue3_type_import_resolution_cache_is_a_session_snapshot() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();

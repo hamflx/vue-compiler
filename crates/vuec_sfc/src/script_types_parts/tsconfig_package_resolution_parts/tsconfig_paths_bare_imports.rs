@@ -59,9 +59,24 @@ pub(crate) fn vue3_tsconfig_path_target_values(value: &serde_json::Value) -> Vec
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_tsconfig_path_mappings(
     mappings: &[Vue3TsconfigPathMapping],
     source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_tsconfig_path_mappings_with_mode(
+        mappings,
+        source,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
+    mappings: &[Vue3TsconfigPathMapping],
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let mut matches = mappings
@@ -99,7 +114,11 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings(
                 &matched.capture,
                 type_resolver,
             )?;
-            let resolved = resolve_vue3_metadata_type_import_path(&candidate, type_resolver);
+            let resolved = resolve_vue3_metadata_type_import_path_with_mode(
+                &candidate,
+                resolution_mode,
+                type_resolver,
+            );
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return None;
             }
@@ -161,9 +180,24 @@ pub(crate) fn vue3_tsconfig_target_path(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_bare_type_import(
     filename: &str,
     source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_bare_type_import_with_mode(
+        filename,
+        source,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_bare_type_import_with_mode(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -176,8 +210,12 @@ pub(crate) fn resolve_vue3_bare_type_import(
             .external_type_session
             .metadata_path_is_dir(&package_dir)?;
         if is_package_dir {
-            let resolved =
-                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref(), type_resolver);
+            let resolved = resolve_vue3_package_type_entry_with_mode(
+                &package_dir,
+                subpath.as_deref(),
+                resolution_mode,
+                type_resolver,
+            );
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return None;
             }
@@ -190,9 +228,10 @@ pub(crate) fn resolve_vue3_bare_type_import(
             .external_type_session
             .metadata_path_is_dir(&types_package_dir)?;
         if is_types_package_dir {
-            let resolved = resolve_vue3_package_type_entry(
+            let resolved = resolve_vue3_package_type_entry_with_mode(
                 &types_package_dir,
                 subpath.as_deref(),
+                resolution_mode,
                 type_resolver,
             );
             if type_resolver.external_type_session.metadata_is_blocked() {
@@ -356,7 +395,26 @@ pub(crate) fn resolve_vue3_package_type_entry(
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    match resolve_vue3_package_json_type_entry(package_dir, subpath, type_resolver) {
+    resolve_vue3_package_type_entry_with_mode(
+        package_dir,
+        subpath,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_type_entry_with_mode(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    match resolve_vue3_package_json_type_entry_with_mode(
+        package_dir,
+        subpath,
+        resolution_mode,
+        type_resolver,
+    ) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
         Vue3PackageJsonTypeResolution::Blocked => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
@@ -365,5 +423,5 @@ pub(crate) fn resolve_vue3_package_type_entry(
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
-    resolve_vue3_metadata_type_import_path(&candidate, type_resolver)
+    resolve_vue3_metadata_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
 }

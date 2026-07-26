@@ -546,5 +546,15 @@ pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3Ex
 }
 
 pub(crate) fn vue3_type_source_type(filename: &str) -> oxc_span::SourceType {
-    oxc_span::SourceType::from_path(filename).unwrap_or_else(|_| oxc_span::SourceType::ts())
+    if let Ok(source_type) = oxc_span::SourceType::from_path(filename) {
+        return source_type;
+    }
+    let lowercase_filename = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase);
+    lowercase_filename
+        .as_deref()
+        .and_then(|filename| oxc_span::SourceType::from_path(filename).ok())
+        .unwrap_or_else(oxc_span::SourceType::ts)
 }

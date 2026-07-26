@@ -205,16 +205,31 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_package_json_type_entry(
     package_dir: &Path,
     subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageJsonTypeResolution {
+    resolve_vue3_package_json_type_entry_with_mode(
+        package_dir,
+        subpath,
+        Vue3TypeResolutionMode::Import,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_json_type_entry_with_mode(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
     resolve_vue3_package_json_type_entry_with_exports(
         package_dir,
         subpath,
         type_resolver,
-        Some(Vue3TypeResolutionMode::Import),
+        Some(resolution_mode),
         false,
     )
 }
@@ -296,11 +311,13 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     } else {
         None
     };
+    let path_resolution_mode = exports_mode.unwrap_or(Vue3TypeResolutionMode::Import);
     let types_versions_resolution = vue3_package_types_versions_type_path(
         package_dir,
         &manifest.types_versions,
         subpath,
         root_type_target,
+        path_resolution_mode,
         type_resolver,
     );
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -314,7 +331,12 @@ fn resolve_vue3_package_json_type_entry_with_exports(
             if !vue3_package_type_target_is_safe(target) {
                 return Vue3PackageJsonTypeResolution::Blocked;
             }
-            let resolved = vue3_package_type_field_path(package_dir, target, type_resolver);
+            let resolved = vue3_package_type_field_path_with_mode(
+                package_dir,
+                target,
+                path_resolution_mode,
+                type_resolver,
+            );
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return Vue3PackageJsonTypeResolution::Blocked;
             }
@@ -393,7 +415,12 @@ fn resolve_vue3_package_exports_type_path(
             let candidate = if declaration_only {
                 vue3_package_export_type_reference_path(package_dir, target, type_resolver)
             } else {
-                vue3_package_export_type_path(package_dir, target, type_resolver)
+                vue3_package_export_type_path_with_mode(
+                    package_dir,
+                    target,
+                    resolution_mode,
+                    type_resolver,
+                )
             };
             if type_resolver.external_type_session.metadata_is_blocked() {
                 Vue3PackageExportVisit::Blocked
@@ -710,15 +737,21 @@ fn vue3_package_export_hex_value(value: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn vue3_package_export_type_path(
+fn vue3_package_export_type_path_with_mode(
     package_dir: &Path,
     target: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if !target.starts_with("./") {
         return None;
     }
-    vue3_package_type_target_path(package_dir, target, type_resolver)
+    vue3_package_type_target_path_with_mode(
+        package_dir,
+        target,
+        resolution_mode,
+        type_resolver,
+    )
 }
 
 fn vue3_package_export_type_reference_path(
@@ -738,6 +771,7 @@ pub(crate) fn vue3_package_types_versions_type_path(
     types_versions: &Vue3PackageTypesVersions,
     subpath: Option<&str>,
     root_type_target: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let mappings = vue3_package_types_versions_mapping(types_versions, type_resolver)?;
@@ -774,7 +808,12 @@ pub(crate) fn vue3_package_types_versions_type_path(
                 type_resolver.external_type_session.block_metadata();
                 return None;
             }
-            let resolved = vue3_package_type_field_path(package_dir, &target, type_resolver);
+            let resolved = vue3_package_type_field_path_with_mode(
+                package_dir,
+                &target,
+                resolution_mode,
+                type_resolver,
+            );
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return None;
             }
@@ -826,15 +865,21 @@ pub(crate) fn vue3_package_typescript_baseline_version() -> nodejs_semver::Versi
     (5, 0, 0).into()
 }
 
-pub(crate) fn vue3_package_type_field_path(
+fn vue3_package_type_field_path_with_mode(
     package_dir: &Path,
     target: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if !vue3_package_type_target_is_safe(target) {
         return None;
     }
-    vue3_package_type_target_path(package_dir, target.trim_start_matches("./"), type_resolver)
+    vue3_package_type_target_path_with_mode(
+        package_dir,
+        target.trim_start_matches("./"),
+        resolution_mode,
+        type_resolver,
+    )
 }
 
 pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
@@ -852,9 +897,10 @@ pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
     has_normal
 }
 
-pub(crate) fn vue3_package_type_target_path(
+fn vue3_package_type_target_path_with_mode(
     package_dir: &Path,
     target: &str,
+    resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -870,5 +916,5 @@ pub(crate) fn vue3_package_type_target_path(
         return None;
     }
     let candidate = normalize_path_components(package_dir.join(target));
-    resolve_vue3_metadata_type_import_path(&candidate, type_resolver)
+    resolve_vue3_metadata_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
 }
