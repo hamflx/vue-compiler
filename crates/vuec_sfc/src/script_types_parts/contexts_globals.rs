@@ -3831,8 +3831,24 @@ fn insert_vue3_global_class_member_signatures(
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 match (entry.get().kind, member_kind) {
-                    (Vue3GlobalClassMemberKind::Method, Vue3GlobalClassMemberKind::Method)
-                    | (Vue3GlobalClassMemberKind::Getter, Vue3GlobalClassMemberKind::Setter) => {}
+                    (Vue3GlobalClassMemberKind::Method, Vue3GlobalClassMemberKind::Method) => {
+                        if !namespace_budget.reserve(
+                            entry
+                                .key()
+                                .work()
+                                .saturating_add(entry.get().signature.work())
+                                .saturating_add(member.signature.work()),
+                        ) {
+                            return None;
+                        }
+                        if !vue3_global_interface_property_signatures_are_compatible(
+                            &entry.get().signature,
+                            &member.signature,
+                        ) {
+                            conflicting = true;
+                        }
+                    }
+                    (Vue3GlobalClassMemberKind::Getter, Vue3GlobalClassMemberKind::Setter) => {}
                     (Vue3GlobalClassMemberKind::Setter, Vue3GlobalClassMemberKind::Getter) => {
                         entry.insert(member);
                     }

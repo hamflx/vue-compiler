@@ -2052,6 +2052,7 @@ declare class SetterConflict { set value(value: string) }
 declare class AutomaticConflict { accessor value: string }
 declare class AccessorMethodConflict { get value(): string }
 declare class GetterReadonlyConflict { get value(): string }
+declare class OptionalMethodConflict { value?(): void; value(): void }
 "#,
     )
     .expect("write incompatible accessor classes");
@@ -2068,6 +2069,7 @@ type SetterConflictConsumer = SetterConflict
 type AutomaticConflictConsumer = AutomaticConflict
 type AccessorMethodConflictConsumer = AccessorMethodConflict
 type GetterReadonlyConflictConsumer = GetterReadonlyConflict
+type OptionalMethodConflictConsumer = OptionalMethodConflict
 "#,
     )
     .expect("write incompatible accessor interfaces");
@@ -2091,11 +2093,13 @@ type GetterReadonlyConflictConsumer = GetterReadonlyConflict
             "AutomaticConflict",
             "AccessorMethodConflict",
             "GetterReadonlyConflict",
+            "OptionalMethodConflict",
             "GetterConflictConsumer",
             "SetterConflictConsumer",
             "AutomaticConflictConsumer",
             "AccessorMethodConflictConsumer",
             "GetterReadonlyConflictConsumer",
+            "OptionalMethodConflictConsumer",
         ] {
             assert!(context.silent_unresolved_type_names.contains(name));
             assert!(!vue3_type_context_has_name(&context, name));
