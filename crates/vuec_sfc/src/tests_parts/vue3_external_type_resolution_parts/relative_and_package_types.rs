@@ -385,6 +385,10 @@ defineProps<AliasedProps>()
         let arbitrary = dir.path().join("theme.d.css.native.ts");
         let esm = dir.path().join("module.native.mts");
         let cjs = dir.path().join("legacy.native.cts");
+        let appended_mjs = dir.path().join("fallback.mjs.native.ts");
+        let appended_js = dir.path().join("script.js.native.ts");
+        let appended_arbitrary = dir.path().join("raw.css.native.ts");
+        let jsx = dir.path().join("view.native.tsx");
         std::fs::write(
             &tsx,
             "export interface TsxProps { extensionOrder: string }",
@@ -410,6 +414,36 @@ defineProps<AliasedProps>()
             "export interface CjsProps { cjsExtension?: string }",
         )
         .expect("write cjs overlay source");
+        std::fs::write(
+            &appended_mjs,
+            "export interface AppendedMjsProps { appendedMjs: string }",
+        )
+        .expect("write appended mjs declaration");
+        std::fs::write(
+            dir.path().join("fallback.native.ts"),
+            "export interface AppendedMjsProps { wrongMjsStem: never }",
+        )
+        .expect("write wrong mjs stem decoy");
+        std::fs::write(
+            &appended_js,
+            "export interface AppendedJsProps { appendedJs: number }",
+        )
+        .expect("write appended js declaration");
+        std::fs::write(
+            &appended_arbitrary,
+            "export interface AppendedCssProps { appendedCss: boolean }",
+        )
+        .expect("write appended arbitrary declaration");
+        std::fs::write(
+            &jsx,
+            "export interface JsxProps { jsxPrefersTsx: string }",
+        )
+        .expect("write jsx tsx replacement");
+        std::fs::write(
+            dir.path().join("view.native.ts"),
+            "export interface JsxProps { wrongJsxTsOrder: never }",
+        )
+        .expect("write jsx ts replacement decoy");
 
         let filename = dir.path().join("Comp.vue");
         let source = r#"<script setup lang="ts">
@@ -417,7 +451,11 @@ import type { TsxProps } from './ordered'
 import type { CssProps } from './theme.css'
 import type { EsmProps } from './module.mjs'
 import type { CjsProps } from './legacy.cjs'
-defineProps<TsxProps & CssProps & EsmProps & CjsProps>()
+import type { AppendedMjsProps } from './fallback.mjs'
+import type { AppendedJsProps } from './script.js'
+import type { AppendedCssProps } from './raw.css'
+import type { JsxProps } from './view.jsx'
+defineProps<TsxProps & CssProps & EsmProps & CjsProps & AppendedMjsProps & AppendedJsProps & AppendedCssProps & JsxProps>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(filename.to_string_lossy(), source);
@@ -436,9 +474,32 @@ defineProps<TsxProps & CssProps & EsmProps & CjsProps>()
         assert!(script
             .content
             .contains("cjsExtension: { type: String, required: false }"));
+        assert!(script
+            .content
+            .contains("appendedMjs: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("appendedJs: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("appendedCss: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("jsxPrefersTsx: { type: String, required: true }"));
         assert!(!script.content.contains("wrongSuffixMajorOrder"));
+        assert!(!script.content.contains("wrongMjsStem"));
+        assert!(!script.content.contains("wrongJsxTsOrder"));
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
-        let expected = [tsx, arbitrary, esm, cjs]
+        let expected = [
+            tsx,
+            arbitrary,
+            esm,
+            cjs,
+            appended_mjs,
+            appended_js,
+            appended_arbitrary,
+            jsx,
+        ]
             .iter()
             .map(|path| normalize_path_string(path))
             .collect::<BTreeSet<_>>();

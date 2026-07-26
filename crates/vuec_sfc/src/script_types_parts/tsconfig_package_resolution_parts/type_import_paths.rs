@@ -264,6 +264,7 @@ fn resolve_vue3_type_import_path_with_probe_mode(
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
         ) {
             candidates.push(arbitrary_extension_type_candidate(candidate, extension));
+            candidates.extend(vue3_ts_appended_resolution_candidates(candidate));
         }
         if matches!(extension, "js" | "jsx" | "mjs" | "cjs") {
             candidates.extend(vue3_ts_resolution_candidates(candidate, Some(extension)));
@@ -370,23 +371,62 @@ pub(crate) fn vue3_ts_resolution_candidates(
     extension: Option<&str>,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if extension == Some("mjs") {
-        candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
-        candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
-    } else if extension == Some("cjs") {
-        candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
-        candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
+    match extension {
+        Some("mjs") => {
+            candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
+        }
+        Some("cjs") => {
+            candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
+        }
+        Some("jsx") => {
+            candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
+        }
+        Some("js") => {
+            candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
+        }
+        None => {
+            candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
+            candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
+        }
+        Some(_) => {}
     }
-    candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
-    candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
-    candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
-    if extension.is_none() {
-        candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
-        candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
-        candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
-        candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
+    if extension.is_some() {
+        candidates.extend(vue3_ts_appended_resolution_candidates(candidate));
     }
     candidates
+}
+
+fn vue3_ts_appended_resolution_candidates(candidate: &Path) -> [PathBuf; 3] {
+    [
+        vue3_path_with_appended_typescript_extension(candidate, "ts"),
+        vue3_path_with_appended_typescript_extension(candidate, "tsx"),
+        vue3_path_with_appended_typescript_extension(candidate, "d.ts"),
+    ]
+}
+
+fn vue3_path_with_appended_typescript_extension(path: &Path, extension: &str) -> PathBuf {
+    let appended_extension = format!(".{extension}");
+    let Some(file_name) = path.file_name() else {
+        let mut appended = path.as_os_str().to_os_string();
+        appended.push(appended_extension);
+        return PathBuf::from(appended);
+    };
+    let mut file_name = file_name.to_os_string();
+    file_name.push(appended_extension);
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(file_name);
+    candidate
 }
 
 fn vue3_typescript_path_extension(path: &Path) -> Option<&str> {
@@ -439,6 +479,193 @@ pub(crate) fn vue3_bounded_replace(
     output.push_str(remainder);
     debug_assert_eq!(output.len(), output_len);
     Some(output)
+}
+
+#[cfg(test)]
+mod vue3_type_import_candidate_tests {
+    use super::*;
+
+    fn file_names(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+        candidates
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("candidate file name")
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    #[test]
+    fn explicit_javascript_extensions_use_replacement_then_appended_candidates() {
+        assert_eq!(
+            file_names(vue3_ts_resolution_candidates(
+                Path::new("entry.js"),
+                Some("js")
+            )),
+            [
+                "entry.ts",
+                "entry.tsx",
+                "entry.d.ts",
+                "entry.js.ts",
+                "entry.js.tsx",
+                "entry.js.d.ts",
+            ]
+        );
+        assert_eq!(
+            file_names(vue3_ts_resolution_candidates(
+                Path::new("entry.jsx"),
+                Some("jsx")
+            )),
+            [
+                "entry.tsx",
+                "entry.ts",
+                "entry.d.ts",
+                "entry.jsx.ts",
+                "entry.jsx.tsx",
+                "entry.jsx.d.ts",
+            ]
+        );
+        assert_eq!(
+            file_names(vue3_ts_resolution_candidates(
+                Path::new("entry.mjs"),
+                Some("mjs")
+            )),
+            [
+                "entry.mts",
+                "entry.d.mts",
+                "entry.mjs.ts",
+                "entry.mjs.tsx",
+                "entry.mjs.d.ts",
+            ]
+        );
+        assert_eq!(
+            file_names(vue3_ts_resolution_candidates(
+                Path::new("entry.cjs"),
+                Some("cjs")
+            )),
+            [
+                "entry.cts",
+                "entry.d.cts",
+                "entry.cjs.ts",
+                "entry.cjs.tsx",
+                "entry.cjs.d.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn appended_javascript_candidates_consume_exact_metadata_probe_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let candidate = dir.path().join("entry.js");
+        let target = dir.path().join("entry.js.d.ts");
+        std::fs::write(&target, "export interface Props {}").expect("write appended target");
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: 6,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_metadata_type_import_path_with_mode(
+                &candidate,
+                Vue3TypeResolutionMode::Import,
+                &exact,
+            ),
+            Some(target)
+        );
+        assert_eq!(
+            exact
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            6
+        );
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: 5,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_vue3_metadata_type_import_path_with_mode(
+            &candidate,
+            Vue3TypeResolutionMode::Import,
+            &short,
+        )
+        .is_none());
+        assert_eq!(
+            short
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            5
+        );
+        assert!(short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn combined_module_suffix_paths_are_bounded_before_filesystem_probes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let candidate = dir.path().join("entry.ts");
+        let target = dir.path().join("entry.native.ts");
+        std::fs::write(&target, "export interface Props {}").expect("write suffixed target");
+        let target_bytes = target.as_os_str().as_encoded_bytes().len();
+        let exact = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".native".to_string()]),
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_generated_path_bytes: target_bytes,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_metadata_type_import_path_with_mode(
+                &candidate,
+                Vue3TypeResolutionMode::Import,
+                &exact,
+            ),
+            Some(target)
+        );
+        assert_eq!(
+            exact
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            1
+        );
+
+        let short = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".native".to_string()]),
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_generated_path_bytes: target_bytes - 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert!(resolve_vue3_metadata_type_import_path_with_mode(
+            &candidate,
+            Vue3TypeResolutionMode::Import,
+            &short,
+        )
+        .is_none());
+        assert_eq!(
+            short
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            0
+        );
+        assert!(short.external_type_session.metadata_is_blocked());
+    }
 }
 
 pub(crate) fn vue3_bounded_replace_first(
