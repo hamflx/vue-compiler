@@ -17,6 +17,108 @@ fn write_vue3_test_type_package(package_dir: &Path, manifest: &str) {
     .expect("write package types");
 }
 
+struct Vue3PackageTargetFixture {
+    target: &'static str,
+    permissive_path: Option<PathBuf>,
+    explicit_path: Option<PathBuf>,
+}
+
+fn write_vue3_package_target_fixture(
+    package_dir: &Path,
+    target_kind: &str,
+) -> Vue3PackageTargetFixture {
+    let mapped = package_dir.join("mapped");
+    std::fs::create_dir_all(&mapped).expect("create mapped target directory");
+    match target_kind {
+        "extensionless" => {
+            let path = mapped.join("extensionless.d.ts");
+            std::fs::write(&path, "export interface ExtensionlessProps {}")
+                .expect("write extensionless target");
+            Vue3PackageTargetFixture {
+                target: "./mapped/extensionless",
+                permissive_path: Some(path),
+                explicit_path: None,
+            }
+        }
+        "directory" => {
+            let directory = mapped.join("directory");
+            std::fs::create_dir_all(&directory).expect("create mapped target directory");
+            std::fs::write(
+                directory.join("package.json"),
+                r#"{"types":"nested.d.ts"}"#,
+            )
+            .expect("write nested target manifest decoy");
+            std::fs::write(
+                directory.join("nested.d.ts"),
+                "export interface WrongNestedManifestProps {}",
+            )
+            .expect("write nested target manifest entry");
+            let path = directory.join("index.d.ts");
+            std::fs::write(&path, "export interface DirectoryIndexProps {}")
+                .expect("write mapped directory index");
+            Vue3PackageTargetFixture {
+                target: "./mapped/directory",
+                permissive_path: Some(path),
+                explicit_path: None,
+            }
+        }
+        "explicit" => {
+            let path = mapped.join("explicit.d.ts");
+            std::fs::write(&path, "export interface ExplicitProps {}")
+                .expect("write explicit target");
+            Vue3PackageTargetFixture {
+                target: "./mapped/explicit.js",
+                permissive_path: Some(path.clone()),
+                explicit_path: Some(path),
+            }
+        }
+        "appended" => {
+            let path = mapped.join("appended.js.d.ts");
+            std::fs::write(&path, "export interface AppendedProps {}")
+                .expect("write appended target");
+            Vue3PackageTargetFixture {
+                target: "./mapped/appended.js",
+                permissive_path: Some(path),
+                explicit_path: None,
+            }
+        }
+        "arbitrary-declaration" => {
+            let path = mapped.join("styles.d.css.ts");
+            std::fs::write(&path, "export interface StyleProps {}")
+                .expect("write arbitrary declaration target");
+            Vue3PackageTargetFixture {
+                target: "./mapped/styles.css",
+                permissive_path: Some(path.clone()),
+                explicit_path: Some(path),
+            }
+        }
+        "raw-javascript" => {
+            let path = mapped.join("raw.js");
+            std::fs::write(&path, "export const implementationTarget = true;")
+                .expect("write raw JavaScript target");
+            Vue3PackageTargetFixture {
+                target: "./mapped/raw.js",
+                permissive_path: Some(path.clone()),
+                explicit_path: Some(path),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn vue3_package_resolution_path(
+    resolution: Vue3PackageJsonTypeResolution,
+) -> Option<PathBuf> {
+    match resolution {
+        Vue3PackageJsonTypeResolution::Resolved(path) => Some(path),
+        Vue3PackageJsonTypeResolution::Blocked => panic!("package metadata was blocked"),
+        Vue3PackageJsonTypeResolution::NoPackageJson
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => None,
+    }
+}
+
 fn vue3_node_next_type_resolver() -> Vue3TypeResolverContext {
     Vue3TypeResolverContext {
         module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
@@ -1607,6 +1709,263 @@ fn vue3_package_root_fields_follow_package_format_path_rules() {
             }
         }
     }
+}
+
+#[test]
+fn vue3_types_versions_targets_follow_root_and_subpath_path_rules() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (scope, subpath, mapping_source) in [
+        ("root", None, "source.d.ts"),
+        ("subpath", Some("feature"), "feature"),
+    ] {
+        for (package_type_name, package_type) in [
+            ("unspecified", None),
+            ("commonjs", Some("commonjs")),
+            ("module", Some("module")),
+        ] {
+            for target_kind in [
+                "extensionless",
+                "directory",
+                "explicit",
+                "appended",
+                "arbitrary-declaration",
+                "raw-javascript",
+            ] {
+                let package_dir = dir
+                    .path()
+                    .join(format!("{scope}-{package_type_name}-{target_kind}"));
+                let fixture = write_vue3_package_target_fixture(&package_dir, target_kind);
+                let mut mappings = serde_json::Map::new();
+                mappings.insert(
+                    mapping_source.to_string(),
+                    serde_json::json!([fixture.target]),
+                );
+                let mut manifest = serde_json::Map::new();
+                manifest.insert("types".to_string(), serde_json::json!("source.d.ts"));
+                manifest.insert(
+                    "typesVersions".to_string(),
+                    serde_json::json!({"*": serde_json::Value::Object(mappings)}),
+                );
+                if let Some(package_type) = package_type {
+                    manifest.insert("type".to_string(), serde_json::json!(package_type));
+                }
+                std::fs::write(
+                    package_dir.join("package.json"),
+                    serde_json::Value::Object(manifest).to_string(),
+                )
+                .expect("write typesVersions package manifest");
+
+                for module_resolution in [
+                    Vue3TypeModuleResolutionKind::Node10,
+                    Vue3TypeModuleResolutionKind::Node16,
+                    Vue3TypeModuleResolutionKind::NodeNext,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                ] {
+                    for resolution_mode in [
+                        Vue3TypeResolutionMode::Import,
+                        Vue3TypeResolutionMode::Require,
+                    ] {
+                        let resolver = Vue3TypeResolverContext {
+                            typescript_version: (6, 0, 3).into(),
+                            module_resolution,
+                            ..Vue3TypeResolverContext::default()
+                        };
+                        let strict = resolution_mode == Vue3TypeResolutionMode::Import
+                            && matches!(
+                                module_resolution,
+                                Vue3TypeModuleResolutionKind::Node16
+                                    | Vue3TypeModuleResolutionKind::NodeNext
+                            )
+                            && (subpath.is_some() || package_type == Some("module"));
+                        let expected = if strict {
+                            fixture.explicit_path.clone()
+                        } else {
+                            fixture.permissive_path.clone()
+                        };
+                        let actual = vue3_package_resolution_path(
+                            resolve_vue3_package_json_type_entry_with_mode(
+                                &package_dir,
+                                subpath,
+                                resolution_mode,
+                                &resolver,
+                            ),
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "{scope} {package_type_name} {target_kind} {module_resolution:?} {resolution_mode:?}",
+                        );
+                        assert!(!resolver.external_type_session.metadata_is_blocked());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vue3_node_esm_subpath_index_fallback_stops_at_typescript_5_8() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (exports_name, exports) in [
+        ("absent", None),
+        ("null", Some(serde_json::Value::Null)),
+        ("false", Some(serde_json::json!(false))),
+        ("zero", Some(serde_json::json!(0))),
+        ("empty-string", Some(serde_json::json!(""))),
+    ] {
+        let package_dir = dir.path().join(exports_name);
+        let mapped = package_dir.join("mapped.dir");
+        let plain = package_dir.join("plain.dir");
+        for directory in [&mapped, &plain] {
+            std::fs::create_dir_all(directory).expect("create historical fallback directory");
+            std::fs::write(
+                directory.join("package.json"),
+                r#"{"types":"wrong.d.ts"}"#,
+            )
+            .expect("write historical nested manifest decoy");
+            std::fs::write(
+                directory.join("wrong.d.ts"),
+                "export interface WrongNestedManifestProps {}",
+            )
+            .expect("write historical nested manifest target");
+            std::fs::write(
+                directory.join("index.d.ts"),
+                "export interface HistoricalIndexProps {}",
+            )
+            .expect("write historical index target");
+        }
+        let mut manifest = serde_json::Map::new();
+        manifest.insert(
+            "typesVersions".to_string(),
+            serde_json::json!({"*": {"mapped": ["mapped.dir"]}}),
+        );
+        if let Some(exports) = exports {
+            manifest.insert("exports".to_string(), exports);
+        }
+        std::fs::write(
+            package_dir.join("package.json"),
+            serde_json::Value::Object(manifest).to_string(),
+        )
+        .expect("write historical fallback package manifest");
+
+        for (typescript_version, before_5_8) in [((5, 7, 3), true), ((5, 8, 3), false)] {
+            for module_resolution in [
+                Vue3TypeModuleResolutionKind::Node16,
+                Vue3TypeModuleResolutionKind::NodeNext,
+            ] {
+                let resolver = Vue3TypeResolverContext {
+                    typescript_version: typescript_version.into(),
+                    module_resolution,
+                    ..Vue3TypeResolverContext::default()
+                };
+                let allows_fallback = before_5_8 && matches!(exports_name, "absent" | "null");
+                for (subpath, expected_path) in [
+                    ("mapped", mapped.join("index.d.ts")),
+                    ("plain.dir", plain.join("index.d.ts")),
+                ] {
+                    let actual = vue3_package_resolution_path(
+                        resolve_vue3_package_json_type_entry_with_mode(
+                            &package_dir,
+                            Some(subpath),
+                            Vue3TypeResolutionMode::Import,
+                            &resolver,
+                        ),
+                    );
+                    assert_eq!(
+                        actual,
+                        allows_fallback.then_some(expected_path),
+                        "{exports_name} {typescript_version:?} {module_resolution:?} {subpath}",
+                    );
+                }
+                assert_eq!(
+                    resolver.external_type_session.stats().metadata_files_read,
+                    1,
+                    "nested manifests must remain unread for {exports_name} {typescript_version:?} {module_resolution:?}",
+                );
+                assert!(!resolver.external_type_session.metadata_is_blocked());
+            }
+        }
+    }
+}
+
+#[test]
+fn vue3_types_versions_legacy_index_fallback_obeys_probe_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    let mapped = package_dir.join("mapped");
+    std::fs::create_dir_all(&mapped).expect("create mapped fallback directory");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"typesVersions":{"*":{"feature":["mapped"]}}}"#,
+    )
+    .expect("write fallback budget package manifest");
+    let target = mapped.join("index.d.ts");
+    std::fs::write(&target, "export interface BudgetedFallbackProps {}")
+        .expect("write fallback budget target");
+
+    let accepted = Vue3TypeResolverContext {
+        typescript_version: (5, 7, 3).into(),
+        module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_resolution_path_probes: 3,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+    assert_eq!(
+        resolve_vue3_package_json_type_entry_with_mode(
+            &package_dir,
+            Some("feature"),
+            Vue3TypeResolutionMode::Import,
+            &accepted,
+        ),
+        Vue3PackageJsonTypeResolution::Resolved(target)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        3
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        1
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let rejected = Vue3TypeResolverContext {
+        typescript_version: (5, 7, 3).into(),
+        module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_resolution_path_probes: 2,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+    assert_eq!(
+        resolve_vue3_package_json_type_entry_with_mode(
+            &package_dir,
+            Some("feature"),
+            Vue3TypeResolutionMode::Import,
+            &rejected,
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        2
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
 }
 
 #[test]
