@@ -2394,6 +2394,149 @@ defineProps<OutputProps & DeclarationProps>()
     }
 
     #[test]
+    fn vue3_package_null_targets_follow_typescript_version_fallback_semantics() {
+        let legacy = Vue3TypeResolverContext {
+            typescript_version: (5, 9, 3).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let current = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        for (target, legacy_target) in [
+            (
+                serde_json::json!([null, "./array.d.ts"]),
+                "./array.d.ts",
+            ),
+            (
+                serde_json::json!({ "types": null, "default": "./condition.d.ts" }),
+                "./condition.d.ts",
+            ),
+            (
+                serde_json::json!({
+                    "types": [null, "./nested-array.d.ts"],
+                    "default": "./outer.d.ts"
+                }),
+                "./nested-array.d.ts",
+            ),
+            (
+                serde_json::json!({
+                    "types": { "import": null, "default": "./inner.d.ts" },
+                    "default": "./outer.d.ts"
+                }),
+                "./inner.d.ts",
+            ),
+        ] {
+            assert_eq!(
+                vue3_package_exports_type_target(&target, None, &legacy).as_deref(),
+                Some(legacy_target),
+                "legacy target: {target}"
+            );
+            assert!(
+                vue3_package_exports_type_target(&target, None, &current).is_none(),
+                "TypeScript 6 target: {target}"
+            );
+        }
+
+        for target in [
+            serde_json::json!({ "types": [], "default": "./fallback.d.ts" }),
+            serde_json::json!({ "types": true, "default": "./fallback.d.ts" }),
+            serde_json::json!(["../invalid.d.ts", "./fallback.d.ts"]),
+        ] {
+            assert_eq!(
+                vue3_package_exports_type_target(&target, None, &current).as_deref(),
+                Some("./fallback.d.ts"),
+                "TypeScript 6 non-null fallback: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn vue3_package_null_target_resolution_changes_in_typescript_6() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-versioned-null-targets");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(
+            package.join("package.json"),
+            r##"{
+                "name": "vuec-versioned-null-targets",
+                "exports": {
+                    "./condition-null": { "types": null, "default": "./ok.d.mts" },
+                    "./array-null": { "types": [null, "./ok.d.mts"] },
+                    "./empty-array": { "types": [], "default": "./ok.d.mts" },
+                    "./invalid-target": { "types": true, "default": "./ok.d.mts" }
+                },
+                "imports": {
+                    "#condition-null": { "types": null, "default": "./ok.d.mts" },
+                    "#array-null": { "types": [null, "./ok.d.mts"] },
+                    "#empty-array": { "types": [], "default": "./ok.d.mts" },
+                    "#invalid-target": { "types": true, "default": "./ok.d.mts" }
+                }
+            }"##,
+        )
+        .expect("write package manifest");
+        let target = package.join("ok.d.mts");
+        let importer = package.join("index.d.mts");
+        let outside = dir.path().join("outside.d.mts");
+        std::fs::write(&target, "export interface Ok { value: string }")
+            .expect("write target");
+        std::fs::write(&importer, "export {};").expect("write package importer");
+
+        for (version, null_target_resolves) in [((5, 9, 3), true), ((6, 0, 0), false)] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+                ..Vue3TypeResolverContext::default()
+            };
+            let expected_null_target = null_target_resolves.then_some(target.clone());
+            for subpath in ["condition-null", "array-null"] {
+                assert_eq!(
+                    resolve_vue3_type_import(
+                        &outside.to_string_lossy(),
+                        &format!("vuec-versioned-null-targets/{subpath}"),
+                        &resolver,
+                    ),
+                    expected_null_target,
+                    "exports target with TypeScript {version:?}: {subpath}"
+                );
+                assert_eq!(
+                    resolve_vue3_type_import(
+                        &importer.to_string_lossy(),
+                        &format!("#{subpath}"),
+                        &resolver,
+                    ),
+                    expected_null_target,
+                    "imports target with TypeScript {version:?}: {subpath}"
+                );
+            }
+            for subpath in ["empty-array", "invalid-target"] {
+                assert_eq!(
+                    resolve_vue3_type_import(
+                        &outside.to_string_lossy(),
+                        &format!("vuec-versioned-null-targets/{subpath}"),
+                        &resolver,
+                    ),
+                    Some(target.clone()),
+                    "exports fallback with TypeScript {version:?}: {subpath}"
+                );
+                assert_eq!(
+                    resolve_vue3_type_import(
+                        &importer.to_string_lossy(),
+                        &format!("#{subpath}"),
+                        &resolver,
+                    ),
+                    Some(target.clone()),
+                    "imports fallback with TypeScript {version:?}: {subpath}"
+                );
+            }
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
     fn vue3_package_exports_reject_invalid_object_shapes() {
         let resolver = Vue3TypeResolverContext::default();
         for mixed_keys in [

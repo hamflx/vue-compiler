@@ -777,7 +777,7 @@ fn visit_vue3_package_target(
     }
     if let Some(targets) = target.as_array() {
         let mut fallback = if targets.is_empty() {
-            Vue3PackageTargetVisit::Rejected
+            Vue3PackageTargetVisit::Invalid
         } else {
             Vue3PackageTargetVisit::Missing
         };
@@ -797,6 +797,11 @@ fn visit_vue3_package_target(
                 visitor,
             ) {
                 Vue3PackageTargetVisit::Missing => {}
+                Vue3PackageTargetVisit::Rejected
+                    if vue3_package_null_target_stops_fallback(type_resolver) =>
+                {
+                    return Vue3PackageTargetVisit::Rejected;
+                }
                 result @ (Vue3PackageTargetVisit::Rejected
                 | Vue3PackageTargetVisit::Invalid) => fallback = result,
                 result => return result,
@@ -834,13 +839,20 @@ fn visit_vue3_package_target(
             type_resolver,
             visitor,
         ) {
-            Vue3PackageTargetVisit::Missing
-            | Vue3PackageTargetVisit::Rejected
-            | Vue3PackageTargetVisit::Invalid => {}
+            Vue3PackageTargetVisit::Missing | Vue3PackageTargetVisit::Invalid => {}
+            Vue3PackageTargetVisit::Rejected
+                if !vue3_package_null_target_stops_fallback(type_resolver) => {}
             result => return result,
         }
     }
     Vue3PackageTargetVisit::Missing
+}
+
+fn vue3_package_null_target_stops_fallback(
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    // TypeScript 6 made null a terminal empty SearchResult; older releases try the next target.
+    type_resolver.typescript_version >= (6, 0, 0).into()
 }
 
 fn vue3_package_exports_object_kind(
