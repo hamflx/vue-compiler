@@ -212,6 +212,7 @@ pub(crate) fn resolve_vue3_metadata_package_map_target_path_with_mode(
 pub(crate) fn resolve_vue3_metadata_legacy_package_field_path_with_mode(
     candidate: &Path,
     resolution_mode: Vue3TypeResolutionMode,
+    policy: Vue3LegacyPackageTargetPolicy,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     resolve_vue3_type_import_path_with_probe_mode(
@@ -219,8 +220,14 @@ pub(crate) fn resolve_vue3_metadata_legacy_package_field_path_with_mode(
         resolution_mode,
         type_resolver,
         Vue3TypeImportPathProbeMode::Metadata,
-        Vue3TypeImportPathSemantics::LegacyPackageField,
+        Vue3TypeImportPathSemantics::LegacyPackageField(policy),
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Vue3LegacyPackageTargetPolicy {
+    AllowImplicit,
+    RequireExplicitFileName,
 }
 
 pub(crate) fn resolve_vue3_metadata_bare_package_fallback_path_with_mode(
@@ -252,7 +259,7 @@ enum Vue3TypeImportPathProbeMode {
 enum Vue3TypeImportPathSemantics {
     ModuleSpecifier,
     PackageMapTarget,
-    LegacyPackageField,
+    LegacyPackageField(Vue3LegacyPackageTargetPolicy),
     BarePackageFallback,
     BarePackageFallbackWithoutManifest,
 }
@@ -337,13 +344,22 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     if !probe_mode.path_is_within_limit(candidate, type_resolver) {
         return None;
     }
-    let uses_node_esm_specifier_rules = semantics
-        != Vue3TypeImportPathSemantics::LegacyPackageField
+    let uses_node_esm_specifier_rules = !matches!(
+        semantics,
+        Vue3TypeImportPathSemantics::LegacyPackageField(_)
+    )
         && type_resolver
             .module_resolution
             .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
-    let allows_appended_extensions = semantics != Vue3TypeImportPathSemantics::PackageMapTarget
-        && !uses_node_esm_specifier_rules;
+    let requires_explicit_package_target = matches!(
+        semantics,
+        Vue3TypeImportPathSemantics::PackageMapTarget
+            | Vue3TypeImportPathSemantics::LegacyPackageField(
+                Vue3LegacyPackageTargetPolicy::RequireExplicitFileName
+            )
+    );
+    let allows_appended_extensions =
+        !requires_explicit_package_target && !uses_node_esm_specifier_rules;
     let uses_classic_specifier_rules = semantics
         == Vue3TypeImportPathSemantics::ModuleSpecifier
         && type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Classic;
@@ -367,14 +383,18 @@ fn resolve_vue3_type_import_path_with_probe_mode(
                 allows_appended_extensions,
             ));
         }
-        if semantics != Vue3TypeImportPathSemantics::PackageMapTarget
+        if !matches!(
+            semantics,
+            Vue3TypeImportPathSemantics::PackageMapTarget
+                | Vue3TypeImportPathSemantics::LegacyPackageField(_)
+        )
             || has_supported_source_extension
         {
             candidates.push(candidate.to_path_buf());
         }
         return resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
     }
-    if semantics == Vue3TypeImportPathSemantics::PackageMapTarget {
+    if requires_explicit_package_target {
         return None;
     }
     if uses_node_esm_specifier_rules
@@ -398,7 +418,12 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     {
         return resolved;
     }
-    if semantics != Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest
+    let allows_directory_manifest = !matches!(
+        semantics,
+        Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest
+            | Vue3TypeImportPathSemantics::LegacyPackageField(_)
+    );
+    if allows_directory_manifest
         && probe_mode.is_dir(candidate, type_resolver)?
     {
         match resolve_vue3_package_json_directory_type_entry_with_mode(
@@ -846,6 +871,7 @@ mod vue3_type_import_candidate_tests {
             resolve_vue3_metadata_legacy_package_field_path_with_mode(
                 &dir.path().join("package-target"),
                 Vue3TypeResolutionMode::Import,
+                Vue3LegacyPackageTargetPolicy::AllowImplicit,
                 &node_next,
             ),
             Some(legacy_package_target)
@@ -967,6 +993,7 @@ mod vue3_type_import_candidate_tests {
             resolve_vue3_metadata_legacy_package_field_path_with_mode(
                 &dir.path().join("extensionless"),
                 Vue3TypeResolutionMode::Import,
+                Vue3LegacyPackageTargetPolicy::AllowImplicit,
                 &legacy,
             ),
             Some(extensionless),
@@ -975,9 +1002,10 @@ mod vue3_type_import_candidate_tests {
             resolve_vue3_metadata_legacy_package_field_path_with_mode(
                 &directory,
                 Vue3TypeResolutionMode::Import,
+                Vue3LegacyPackageTargetPolicy::AllowImplicit,
                 &legacy,
             ),
-            Some(directory.join("manifest.d.ts")),
+            Some(directory.join("index.ts")),
         );
     }
 

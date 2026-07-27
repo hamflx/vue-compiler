@@ -1047,7 +1047,7 @@ fn vue3_tsconfig_metadata_cache_is_shared_between_paths_and_globals() {
 }
 
 #[test]
-fn vue3_metadata_block_propagates_from_candidate_resolution() {
+fn vue3_metadata_blocks_only_for_reachable_candidate_manifests() {
     let dir = tempfile::tempdir().expect("temp dir");
     let package_dir = dir.path().join("package");
     write_vue3_test_type_package(&package_dir, r#"{"types":"bad"}"#);
@@ -1063,9 +1063,22 @@ fn vue3_metadata_block_propagates_from_candidate_resolution() {
         });
     assert_eq!(
         resolve_vue3_package_json_type_entry(&package_dir, None, &package_resolver),
-        Vue3PackageJsonTypeResolution::Blocked
+        Vue3PackageJsonTypeResolution::Resolved(bad_package.join("index.d.ts"))
     );
-    assert!(resolve_vue3_package_type_entry(&package_dir, None, &package_resolver).is_none());
+    assert_eq!(
+        resolve_vue3_package_type_entry(&package_dir, None, &package_resolver),
+        Some(bad_package.join("index.d.ts"))
+    );
+    assert!(!package_resolver
+        .external_type_session
+        .metadata_is_blocked());
+    assert_eq!(
+        package_resolver
+            .external_type_session
+            .stats()
+            .metadata_files_read,
+        1
+    );
 
     let project = dir.path().join("project");
     let bad_target = project.join("bad");
@@ -1463,6 +1476,140 @@ fn vue3_package_type_fields_follow_typescript_precedence() {
 }
 
 #[test]
+fn vue3_package_root_fields_follow_package_format_path_rules() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for field in ["typings", "types", "main"] {
+        for (package_type_name, package_type) in [
+            ("unspecified", None),
+            ("commonjs", Some("commonjs")),
+            ("module", Some("module")),
+        ] {
+            for target_kind in [
+                "extensionless",
+                "directory",
+                "explicit",
+                "appended",
+                "arbitrary-declaration",
+                "arbitrary-raw",
+            ] {
+                let package_dir = dir
+                    .path()
+                    .join(format!("{field}-{package_type_name}-{target_kind}"));
+                std::fs::create_dir_all(&package_dir).expect("create root field package");
+                let (target, permissive_path, explicit_path) = match target_kind {
+                    "extensionless" => {
+                        let path = package_dir.join("entry.d.ts");
+                        std::fs::write(&path, "export interface ExtensionlessProps {}")
+                            .expect("write extensionless root field target");
+                        ("./entry", Some(path), None)
+                    }
+                    "directory" => {
+                        let target_dir = package_dir.join("directory");
+                        std::fs::create_dir_all(&target_dir)
+                            .expect("create root field target directory");
+                        std::fs::write(
+                            target_dir.join("package.json"),
+                            r#"{"types":"nested.d.ts"}"#,
+                        )
+                        .expect("write nested target manifest decoy");
+                        std::fs::write(
+                            target_dir.join("nested.d.ts"),
+                            "export interface WrongNestedManifestProps {}",
+                        )
+                        .expect("write nested target manifest entry");
+                        let path = target_dir.join("index.d.ts");
+                        std::fs::write(&path, "export interface DirectoryIndexProps {}")
+                            .expect("write root field directory index");
+                        ("./directory", Some(path), None)
+                    }
+                    "explicit" => {
+                        let path = package_dir.join("explicit.d.ts");
+                        std::fs::write(&path, "export interface ExplicitProps {}")
+                            .expect("write explicit root field target");
+                        ("./explicit.js", Some(path.clone()), Some(path))
+                    }
+                    "appended" => {
+                        let path = package_dir.join("appended.js.d.ts");
+                        std::fs::write(&path, "export interface AppendedProps {}")
+                            .expect("write appended root field target");
+                        ("./appended.js", Some(path), None)
+                    }
+                    "arbitrary-declaration" => {
+                        let path = package_dir.join("styles.d.css.ts");
+                        std::fs::write(&path, "export interface StyleProps {}")
+                            .expect("write arbitrary extension declaration");
+                        ("./styles.css", Some(path.clone()), Some(path))
+                    }
+                    "arbitrary-raw" => {
+                        std::fs::write(
+                            package_dir.join("raw.css"),
+                            "export interface WrongRawProps {}",
+                        )
+                        .expect("write raw arbitrary extension decoy");
+                        ("./raw.css", None, None)
+                    }
+                    _ => unreachable!(),
+                };
+                let mut manifest = serde_json::Map::new();
+                manifest.insert(field.to_string(), serde_json::json!(target));
+                if let Some(package_type) = package_type {
+                    manifest.insert("type".to_string(), serde_json::json!(package_type));
+                }
+                std::fs::write(
+                    package_dir.join("package.json"),
+                    serde_json::Value::Object(manifest).to_string(),
+                )
+                .expect("write root field package manifest");
+
+                for module_resolution in [
+                    Vue3TypeModuleResolutionKind::Node10,
+                    Vue3TypeModuleResolutionKind::Node16,
+                    Vue3TypeModuleResolutionKind::NodeNext,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                ] {
+                    for resolution_mode in [
+                        Vue3TypeResolutionMode::Import,
+                        Vue3TypeResolutionMode::Require,
+                    ] {
+                        let resolver = Vue3TypeResolverContext {
+                            typescript_version: (6, 0, 3).into(),
+                            module_resolution,
+                            ..Vue3TypeResolverContext::default()
+                        };
+                        let strict = package_type == Some("module")
+                            && matches!(
+                                module_resolution,
+                                Vue3TypeModuleResolutionKind::Node16
+                                    | Vue3TypeModuleResolutionKind::NodeNext
+                            )
+                            && resolution_mode == Vue3TypeResolutionMode::Import;
+                        let expected = if strict {
+                            explicit_path.clone()
+                        } else {
+                            permissive_path.clone()
+                        }
+                        .map_or(
+                                Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+                                Vue3PackageJsonTypeResolution::Resolved,
+                            );
+                        assert_eq!(
+                            resolve_vue3_package_json_type_entry_with_mode(
+                                &package_dir,
+                                None,
+                                resolution_mode,
+                                &resolver,
+                            ),
+                            expected,
+                            "{field} {package_type_name} {target_kind} {module_resolution:?} {resolution_mode:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn vue3_bare_package_subpaths_cannot_escape_package_root() {
     assert_eq!(
         vue3_package_import_parts("package/feature/item"),
@@ -1716,7 +1863,7 @@ fn write_vue3_package_resolution_chain(root: &Path, count: usize) {
 }
 
 #[test]
-fn vue3_package_metadata_bounds_resolution_depth() {
+fn vue3_legacy_package_targets_do_not_recurse_into_nested_manifests() {
     assert_eq!(VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH, 64);
     let dir = tempfile::tempdir().expect("temp dir");
     let accepted_package = dir.path().join("accepted");
@@ -1725,22 +1872,24 @@ fn vue3_package_metadata_bounds_resolution_depth() {
     write_vue3_package_resolution_chain(&rejected_package, 3);
 
     let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
-        max_package_resolution_depth: 2,
+        max_package_resolution_depth: 1,
         ..Vue3ExternalTypeLoadLimits::default()
     });
-    assert!(matches!(
+    assert_eq!(
         resolve_vue3_package_json_type_entry(&accepted_package, None, &accepted),
-        Vue3PackageJsonTypeResolution::Resolved(_)
-    ));
+        Vue3PackageJsonTypeResolution::Resolved(accepted_package.join("child/index.d.ts"))
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
 
     let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
-        max_package_resolution_depth: 2,
+        max_package_resolution_depth: 1,
         ..Vue3ExternalTypeLoadLimits::default()
     });
     assert_eq!(
         resolve_vue3_package_json_type_entry(&rejected_package, None, &rejected),
-        Vue3PackageJsonTypeResolution::Blocked
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
     );
+    assert!(!rejected.external_type_session.metadata_is_blocked());
 }
 
 #[cfg(unix)]

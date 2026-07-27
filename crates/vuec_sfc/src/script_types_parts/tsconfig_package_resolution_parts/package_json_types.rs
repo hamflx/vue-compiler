@@ -470,6 +470,11 @@ fn resolve_vue3_package_json_type_entry_with_exports(
                 package_dir,
                 target,
                 path_resolution_mode,
+                vue3_package_root_field_target_policy(
+                    manifest.module_type,
+                    path_resolution_mode,
+                    type_resolver,
+                ),
                 type_resolver,
             );
             if type_resolver.external_type_session.metadata_is_blocked() {
@@ -1274,6 +1279,7 @@ pub(crate) fn vue3_package_types_versions_type_path(
             package_dir,
             &target,
             resolution_mode,
+            Vue3LegacyPackageTargetPolicy::AllowImplicit,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -1333,6 +1339,7 @@ fn vue3_package_type_field_path_with_mode(
     package_dir: &Path,
     target: &str,
     resolution_mode: Vue3TypeResolutionMode,
+    policy: Vue3LegacyPackageTargetPolicy,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if !vue3_package_type_target_is_safe(target) {
@@ -1342,8 +1349,25 @@ fn vue3_package_type_field_path_with_mode(
         package_dir,
         target.trim_start_matches("./"),
         resolution_mode,
+        policy,
         type_resolver,
     )
+}
+
+fn vue3_package_root_field_target_policy(
+    module_type: Vue3PackageModuleType,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3LegacyPackageTargetPolicy {
+    if module_type == Vue3PackageModuleType::Module
+        && type_resolver
+            .module_resolution
+            .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version)
+    {
+        Vue3LegacyPackageTargetPolicy::RequireExplicitFileName
+    } else {
+        Vue3LegacyPackageTargetPolicy::AllowImplicit
+    }
 }
 
 pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
@@ -1365,12 +1389,14 @@ fn vue3_legacy_package_target_path_with_mode(
     package_dir: &Path,
     target: &str,
     resolution_mode: Vue3TypeResolutionMode,
+    policy: Vue3LegacyPackageTargetPolicy,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let candidate = vue3_package_type_target_candidate(package_dir, target, type_resolver)?;
     resolve_vue3_metadata_legacy_package_field_path_with_mode(
         &candidate,
         resolution_mode,
+        policy,
         type_resolver,
     )
 }
