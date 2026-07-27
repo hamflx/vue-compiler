@@ -186,25 +186,16 @@ fn resolve_vue3_project_package_input_target_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    for phase in [
-        Vue3PackageResolutionPhase::Types,
-        Vue3PackageResolutionPhase::JavaScript,
-    ] {
-        let resolved = resolve_vue3_project_package_input_target_for_phase_with_mode(
-            importer,
-            package_dir,
-            target,
-            config_path,
-            options,
-            resolution_mode,
-            phase,
-            type_resolver,
-        );
-        if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
-            return resolved;
-        }
-    }
-    None
+    resolve_vue3_project_package_input_target_with_pass(
+        importer,
+        package_dir,
+        target,
+        config_path,
+        options,
+        resolution_mode,
+        Vue3ProjectPackageInputPass::All,
+        type_resolver,
+    )
 }
 
 fn resolve_vue3_project_package_input_target_for_phase_with_mode(
@@ -215,6 +206,34 @@ fn resolve_vue3_project_package_input_target_for_phase_with_mode(
     options: &Vue3TsconfigEmitPathOptions,
     resolution_mode: Vue3TypeResolutionMode,
     phase: Vue3PackageResolutionPhase,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_project_package_input_target_with_pass(
+        importer,
+        package_dir,
+        target,
+        config_path,
+        options,
+        resolution_mode,
+        Vue3ProjectPackageInputPass::Phase(phase),
+        type_resolver,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Vue3ProjectPackageInputPass {
+    All,
+    Phase(Vue3PackageResolutionPhase),
+}
+
+fn resolve_vue3_project_package_input_target_with_pass(
+    importer: &Path,
+    package_dir: &Path,
+    target: &str,
+    config_path: &Path,
+    options: &Vue3TsconfigEmitPathOptions,
+    resolution_mode: Vue3TypeResolutionMode,
+    pass: Vue3ProjectPackageInputPass,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if options.out_dir.is_none() && options.declaration_dir.is_none() {
@@ -255,13 +274,27 @@ fn resolve_vue3_project_package_input_target_for_phase_with_mode(
             }
             let possible_input = normalize_path_components(source_root.join(path_fragment));
             for candidate in vue3_possible_project_input_paths(&possible_input) {
+                let Some(candidate_phase) = vue3_project_package_input_candidate_phase(&candidate)
+                else {
+                    continue;
+                };
+                if matches!(pass, Vue3ProjectPackageInputPass::Phase(phase) if phase != candidate_phase)
+                {
+                    continue;
+                }
                 if !type_resolver
                     .external_type_session
                     .metadata_path_is_within_limit(&normalize_path_string(&candidate))
                 {
                     return None;
                 }
-                let resolved = match phase {
+                if !type_resolver
+                    .external_type_session
+                    .metadata_path_is_file(&candidate)?
+                {
+                    continue;
+                }
+                return match candidate_phase {
                     Vue3PackageResolutionPhase::Types => {
                         resolve_vue3_metadata_package_map_type_target_path_with_mode(
                             &candidate,
@@ -277,14 +310,29 @@ fn resolve_vue3_project_package_input_target_for_phase_with_mode(
                         )
                     }
                 };
-                if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked()
-                {
-                    return resolved;
-                }
             }
         }
     }
     None
+}
+
+fn vue3_project_package_input_candidate_phase(
+    candidate: &Path,
+) -> Option<Vue3PackageResolutionPhase> {
+    let extension = vue3_typescript_path_extension(candidate)?;
+    if ["ts", "tsx", "mts", "cts"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
+        Some(Vue3PackageResolutionPhase::Types)
+    } else if ["js", "jsx", "mjs", "cjs"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
+        Some(Vue3PackageResolutionPhase::JavaScript)
+    } else {
+        None
+    }
 }
 
 fn resolve_vue3_package_relative_target_with_project_input(
@@ -504,13 +552,13 @@ mod project_package_input_target_tests {
 
         let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
             max_metadata_fanout_entries: 1,
-            max_metadata_resolution_path_probes: 2,
+            max_metadata_resolution_path_probes: 3,
             ..Vue3ExternalTypeLoadLimits::default()
         });
         assert_eq!(resolve_fixture(dir.path(), &exact), Some(leaf.clone()));
         let stats = exact.external_type_session.stats();
         assert_eq!(stats.metadata_fanout_entries, 1);
-        assert_eq!(stats.metadata_resolution_path_probes, 2);
+        assert_eq!(stats.metadata_resolution_path_probes, 3);
         assert!(!exact.external_type_session.metadata_is_blocked());
 
         let no_fanout = resolver_with_limits(Vue3ExternalTypeLoadLimits {
@@ -520,12 +568,12 @@ mod project_package_input_target_tests {
         assert!(resolve_fixture(dir.path(), &no_fanout).is_none());
         assert!(no_fanout.external_type_session.metadata_is_blocked());
 
-        let one_probe = resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_metadata_resolution_path_probes: 1,
+        let two_probes = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: 2,
             ..Vue3ExternalTypeLoadLimits::default()
         });
-        assert!(resolve_fixture(dir.path(), &one_probe).is_none());
-        assert!(one_probe.external_type_session.metadata_is_blocked());
+        assert!(resolve_fixture(dir.path(), &two_probes).is_none());
+        assert!(two_probes.external_type_session.metadata_is_blocked());
 
         let package_dir = dir.path().join("package");
         let longest_path = [
@@ -551,6 +599,172 @@ mod project_package_input_target_tests {
         });
         assert!(resolve_fixture(dir.path(), &short_path).is_none());
         assert!(short_path.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_package_input_mapping_preserves_source_root_order_within_passes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("workspace").join("package");
+        let source_dir = package_dir.join("src");
+        let output_dir = package_dir.join("dist");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        let stem = format!(
+            "vuec-root-order-{}",
+            dir.path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temp directory name")
+        );
+        let early_javascript = dir.path().join(format!("{stem}.js"));
+        let late_typescript = package_dir.join(format!("{stem}.ts"));
+        std::fs::write(&early_javascript, "export const early = true;")
+            .expect("write earlier JavaScript input");
+        std::fs::write(&late_typescript, "export const late = true;")
+            .expect("write later TypeScript input");
+        let importer = source_dir.join("Comp.vue");
+        let config_path = package_dir.join("tsconfig.json");
+        let target = format!("./dist/{stem}.js");
+        let options = Vue3TsconfigEmitPathOptions {
+            root_dir: None,
+            out_dir: Some(output_dir),
+            declaration_dir: None,
+            composite: None,
+        };
+
+        assert_eq!(
+            resolve_vue3_project_package_input_target_with_mode(
+                &importer,
+                &package_dir,
+                &target,
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(early_javascript.clone()),
+        );
+        assert_eq!(
+            resolve_vue3_project_package_input_target_for_phase_with_mode(
+                &importer,
+                &package_dir,
+                &target,
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                Vue3PackageResolutionPhase::Types,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(late_typescript),
+        );
+        assert_eq!(
+            resolve_vue3_project_package_input_target_for_phase_with_mode(
+                &importer,
+                &package_dir,
+                &target,
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                Vue3PackageResolutionPhase::JavaScript,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(early_javascript),
+        );
+    }
+
+    #[test]
+    fn project_package_input_mapping_requires_exact_original_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("package");
+        let source_dir = package_dir.join("src");
+        let output_dir = package_dir.join("dist");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            source_dir.join("declaration.d.ts"),
+            "export interface DeclarationOnly {}",
+        )
+        .expect("write adjacent declaration");
+        std::fs::write(
+            source_dir.join("suffix.native.ts"),
+            "export interface SuffixOnly {}",
+        )
+        .expect("write module-suffixed input");
+        let importer = source_dir.join("Comp.vue");
+        let config_path = package_dir.join("tsconfig.json");
+        let options = Vue3TsconfigEmitPathOptions {
+            root_dir: Some(source_dir),
+            out_dir: Some(output_dir),
+            declaration_dir: None,
+            composite: None,
+        };
+        let resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([
+                ".native".to_string(),
+                String::new(),
+            ]),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        for target in ["./dist/declaration.js", "./dist/suffix.js"] {
+            assert!(resolve_vue3_project_package_input_target_with_mode(
+                &importer,
+                &package_dir,
+                target,
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            )
+            .is_none());
+        }
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            8,
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_package_input_loader_miss_falls_back_to_emitted_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("package");
+        let source_dir = package_dir.join("src");
+        let output_dir = package_dir.join("dist");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::create_dir_all(&output_dir).expect("create output directory");
+        std::fs::write(source_dir.join("leaf.ts"), "export interface Input {}")
+            .expect("write exact input candidate");
+        let emitted = output_dir.join("leaf.native.d.ts");
+        std::fs::write(&emitted, "export interface Emitted {}")
+            .expect("write module-suffixed declaration output");
+        let importer = source_dir.join("Comp.vue");
+        let options = (
+            package_dir.join("tsconfig.json"),
+            Vue3TsconfigEmitPathOptions {
+                root_dir: Some(source_dir),
+                out_dir: Some(output_dir),
+                declaration_dir: None,
+                composite: None,
+            },
+        );
+        let resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([".native".to_string()]),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        assert_eq!(
+            resolve_vue3_package_relative_target_with_project_input(
+                &importer,
+                &package_dir,
+                "./dist/leaf.js",
+                Some(&options),
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(emitted),
+        );
     }
 
     #[test]
