@@ -1991,6 +1991,423 @@ fn vue3_package_root_field_phase_transition_obeys_probe_budget() {
 }
 
 #[test]
+fn vue3_package_resolution_finishes_the_type_index_before_the_javascript_phase() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create phased package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"missing.js","main":"main.js"}"#,
+    )
+    .expect("write phased package manifest");
+    let index = package_dir.join("index.d.ts");
+    std::fs::write(&index, "export interface IndexProps {}")
+        .expect("write phased type index");
+    std::fs::write(
+        package_dir.join("main.js"),
+        "export const implementation = true;",
+    )
+    .expect("write phased JavaScript main");
+
+    for module_resolution in [
+        Vue3TypeModuleResolutionKind::Node10,
+        Vue3TypeModuleResolutionKind::Node16,
+        Vue3TypeModuleResolutionKind::NodeNext,
+        Vue3TypeModuleResolutionKind::Bundler,
+    ] {
+        for resolution_mode in [
+            Vue3TypeResolutionMode::Import,
+            Vue3TypeResolutionMode::Require,
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_package_type_entry_with_mode(
+                    &package_dir,
+                    None,
+                    resolution_mode,
+                    &resolver,
+                ),
+                Some(index.clone()),
+                "{module_resolution:?} {resolution_mode:?}",
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+}
+
+#[test]
+fn vue3_types_versions_reselect_the_root_source_for_each_resolution_phase() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create phased typesVersions package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{
+            "types":"missing-types.d.ts",
+            "main":"runtime",
+            "typesVersions":{"*":{
+                "missing-types.d.ts":["missing-target"],
+                "runtime":["mapped-runtime"]
+            }}
+        }"#,
+    )
+    .expect("write phased typesVersions manifest");
+    let runtime = package_dir.join("mapped-runtime.js");
+    std::fs::write(&runtime, "export const runtime = true;")
+        .expect("write mapped JavaScript runtime");
+
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_type_entry_with_mode(
+            &package_dir,
+            None,
+            Vue3TypeResolutionMode::Import,
+            &resolver,
+        ),
+        Some(runtime),
+    );
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        2,
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+
+    let reference = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_json_type_reference_entry(
+            &package_dir,
+            None,
+            None,
+            &reference,
+        ),
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+    );
+    assert_eq!(
+        reference
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        1,
+    );
+    assert!(!reference.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_types_versions_use_index_as_the_default_root_source() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create default-source package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"typesVersions":{"*":{"index":["mapped.d.ts"],"index.d.ts":["wrong.d.ts"]}}}"#,
+    )
+    .expect("write default-source manifest");
+    let mapped = package_dir.join("mapped.d.ts");
+    std::fs::write(&mapped, "export interface MappedProps {}")
+        .expect("write default-source target");
+    std::fs::write(
+        package_dir.join("wrong.d.ts"),
+        "export interface WrongProps {}",
+    )
+    .expect("write default-source decoy");
+
+    assert_eq!(
+        resolve_vue3_package_type_entry(&package_dir, None, &Vue3TypeResolverContext::default()),
+        Some(mapped),
+    );
+}
+
+#[test]
+fn vue3_types_versions_cannot_redirect_unsafe_root_fields_back_into_the_package() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create unsafe-source package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"../outside.d.ts","typesVersions":{"*":{"../outside.d.ts":["inside.d.ts"]}}}"#,
+    )
+    .expect("write unsafe-source manifest");
+    std::fs::write(
+        package_dir.join("inside.d.ts"),
+        "export interface IncorrectlyRedirectedProps {}",
+    )
+    .expect("write unsafe-source mapping target");
+
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &package_dir,
+            None,
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::Blocked,
+    );
+}
+
+#[test]
+fn vue3_types_versions_explicit_raw_targets_precede_phase_replacements() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create raw-priority package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"source.d.ts","typesVersions":{"*":{"source.d.ts":["mapped.js"]}}}"#,
+    )
+    .expect("write raw-priority manifest");
+    let raw = package_dir.join("mapped.js");
+    std::fs::write(&raw, "export const raw = true;").expect("write raw target");
+    std::fs::write(
+        package_dir.join("mapped.d.ts"),
+        "export interface ReplacementProps {}",
+    )
+    .expect("write replacement decoy");
+
+    assert_eq!(
+        resolve_vue3_package_type_entry(&package_dir, None, &Vue3TypeResolverContext::default()),
+        Some(raw),
+    );
+}
+
+#[test]
+fn vue3_types_versions_raw_priority_uses_the_unsubstituted_target_template() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    let mapped_dir = package_dir.join("mapped");
+    std::fs::create_dir_all(&mapped_dir).expect("create template-priority package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"typesVersions":{"*":{"*":["mapped/*"]}}}"#,
+    )
+    .expect("write template-priority manifest");
+    std::fs::write(
+        mapped_dir.join("feature.js"),
+        "export const implementation = true;",
+    )
+    .expect("write captured raw target");
+    let declaration = mapped_dir.join("feature.d.ts");
+    std::fs::write(&declaration, "export interface FeatureProps {}")
+        .expect("write captured declaration target");
+
+    assert_eq!(
+        resolve_vue3_package_type_entry(
+            &package_dir,
+            Some("feature.js"),
+            &Vue3TypeResolverContext::default(),
+        ),
+        Some(declaration),
+    );
+}
+
+#[test]
+fn vue3_types_versions_type_references_reject_raw_javascript_without_panicking() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create reference package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"source.d.ts","typesVersions":{"*":{"source.d.ts":["mapped.js"]}}}"#,
+    )
+    .expect("write reference manifest");
+    std::fs::write(
+        package_dir.join("mapped.js"),
+        "export const implementation = true;",
+    )
+    .expect("write reference raw target");
+
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_json_type_reference_entry(
+            &package_dir,
+            None,
+            None,
+            &resolver,
+        ),
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_types_versions_javascript_targets_follow_strict_package_rules() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for target_kind in ["extensionless", "directory"] {
+        let package_dir = dir.path().join(target_kind);
+        std::fs::create_dir_all(&package_dir).expect("create strict JavaScript package");
+        let target = match target_kind {
+            "extensionless" => {
+                let target = package_dir.join("mapped.js");
+                std::fs::write(&target, "export const mapped = true;")
+                    .expect("write extensionless JavaScript target");
+                target
+            }
+            "directory" => {
+                let directory = package_dir.join("mapped");
+                std::fs::create_dir_all(&directory).expect("create JavaScript target directory");
+                let target = directory.join("index.js");
+                std::fs::write(&target, "export const mapped = true;")
+                    .expect("write directory JavaScript target");
+                target
+            }
+            _ => unreachable!(),
+        };
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"type":"module","typesVersions":{"*":{"index":["mapped"]}}}"#,
+        )
+        .expect("write strict JavaScript manifest");
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node10,
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+            Vue3TypeModuleResolutionKind::Bundler,
+        ] {
+            for resolution_mode in [
+                Vue3TypeResolutionMode::Import,
+                Vue3TypeResolutionMode::Require,
+            ] {
+                let resolver = Vue3TypeResolverContext {
+                    typescript_version: (6, 0, 3).into(),
+                    module_resolution,
+                    ..Vue3TypeResolverContext::default()
+                };
+                let strict = resolution_mode == Vue3TypeResolutionMode::Import
+                    && matches!(
+                        module_resolution,
+                        Vue3TypeModuleResolutionKind::Node16
+                            | Vue3TypeModuleResolutionKind::NodeNext
+                    );
+                assert_eq!(
+                    resolve_vue3_package_type_entry_with_mode(
+                        &package_dir,
+                        None,
+                        resolution_mode,
+                        &resolver,
+                    ),
+                    (!strict).then_some(target.clone()),
+                    "{target_kind} {module_resolution:?} {resolution_mode:?}",
+                );
+                assert!(!resolver.external_type_session.metadata_is_blocked());
+            }
+        }
+    }
+}
+
+#[test]
+fn vue3_types_versions_matched_missing_targets_suppress_same_phase_fallbacks() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create matched-missing package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"types.d.ts","typesVersions":{"*":{"types.d.ts":["missing.d.ts"]}}}"#,
+    )
+    .expect("write matched-missing manifest");
+    std::fs::write(
+        package_dir.join("types.d.ts"),
+        "export interface WrongFieldProps {}",
+    )
+    .expect("write blocked field fallback");
+    std::fs::write(
+        package_dir.join("index.d.ts"),
+        "export interface WrongIndexProps {}",
+    )
+    .expect("write blocked index fallback");
+
+    let resolver = Vue3TypeResolverContext::default();
+    assert!(resolve_vue3_package_type_entry(&package_dir, None, &resolver).is_none());
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_types_versions_javascript_phase_obeys_fanout_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create fanout package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"typesVersions":{"*":{"index":["mapped"]}}}"#,
+    )
+    .expect("write fanout manifest");
+    let target = package_dir.join("mapped.js");
+    std::fs::write(&target, "export const mapped = true;")
+        .expect("write fanout JavaScript target");
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_type_entry(&package_dir, None, &accepted),
+        Some(target),
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        2,
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+    let exact_probe_count = accepted
+        .external_type_session
+        .stats()
+        .metadata_resolution_path_probes;
+
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        max_metadata_resolution_path_probes: exact_probe_count,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_type_entry(&package_dir, None, &exact),
+        Some(package_dir.join("mapped.js")),
+    );
+    assert_eq!(
+        exact
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        exact_probe_count,
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    let probe_limited = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        max_metadata_resolution_path_probes: exact_probe_count - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_package_type_entry(&package_dir, None, &probe_limited).is_none());
+    assert_eq!(
+        probe_limited
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        exact_probe_count - 1,
+    );
+    assert!(probe_limited.external_type_session.metadata_is_blocked());
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_package_type_entry(&package_dir, None, &rejected).is_none());
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        1,
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_types_versions_targets_follow_root_and_subpath_path_rules() {
     let dir = tempfile::tempdir().expect("temp dir");
     for (scope, subpath, mapping_source) in [

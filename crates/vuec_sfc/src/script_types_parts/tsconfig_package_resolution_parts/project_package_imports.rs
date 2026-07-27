@@ -177,6 +177,7 @@ fn vue3_tsconfig_compiler_option_path(
     )
 }
 
+#[cfg(test)]
 fn resolve_vue3_project_package_input_target_with_mode(
     importer: &Path,
     package_dir: &Path,
@@ -184,6 +185,37 @@ fn resolve_vue3_project_package_input_target_with_mode(
     config_path: &Path,
     options: &Vue3TsconfigEmitPathOptions,
     resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    for phase in [
+        Vue3PackageResolutionPhase::Types,
+        Vue3PackageResolutionPhase::JavaScript,
+    ] {
+        let resolved = resolve_vue3_project_package_input_target_for_phase_with_mode(
+            importer,
+            package_dir,
+            target,
+            config_path,
+            options,
+            resolution_mode,
+            phase,
+            type_resolver,
+        );
+        if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+            return resolved;
+        }
+    }
+    None
+}
+
+fn resolve_vue3_project_package_input_target_for_phase_with_mode(
+    importer: &Path,
+    package_dir: &Path,
+    target: &str,
+    config_path: &Path,
+    options: &Vue3TsconfigEmitPathOptions,
+    resolution_mode: Vue3TypeResolutionMode,
+    phase: Vue3PackageResolutionPhase,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if options.out_dir.is_none() && options.declaration_dir.is_none() {
@@ -230,11 +262,22 @@ fn resolve_vue3_project_package_input_target_with_mode(
                 {
                     return None;
                 }
-                let resolved = resolve_vue3_metadata_package_map_target_path_with_mode(
-                    &candidate,
-                    resolution_mode,
-                    type_resolver,
-                );
+                let resolved = match phase {
+                    Vue3PackageResolutionPhase::Types => {
+                        resolve_vue3_metadata_package_map_type_target_path_with_mode(
+                            &candidate,
+                            resolution_mode,
+                            type_resolver,
+                        )
+                    }
+                    Vue3PackageResolutionPhase::JavaScript => {
+                        resolve_vue3_metadata_legacy_package_javascript_field_path(
+                            &candidate,
+                            Vue3PackageTargetPathPolicy::RequireExplicitFileName,
+                            type_resolver,
+                        )
+                    }
+                };
                 if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked()
                 {
                     return resolved;
@@ -253,25 +296,56 @@ fn resolve_vue3_package_relative_target_with_project_input(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    for phase in [
+        Vue3PackageResolutionPhase::Types,
+        Vue3PackageResolutionPhase::JavaScript,
+    ] {
+        let resolved = resolve_vue3_package_relative_target_with_project_input_for_phase(
+            importer,
+            package_dir,
+            target,
+            emit_path_options,
+            resolution_mode,
+            phase,
+            type_resolver,
+        );
+        if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+            return resolved;
+        }
+    }
+    None
+}
+
+fn resolve_vue3_package_relative_target_with_project_input_for_phase(
+    importer: &Path,
+    package_dir: &Path,
+    target: &str,
+    emit_path_options: Option<&(PathBuf, Vue3TsconfigEmitPathOptions)>,
+    resolution_mode: Vue3TypeResolutionMode,
+    phase: Vue3PackageResolutionPhase,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     target.strip_prefix("./")?;
     let input = emit_path_options.and_then(|(config_path, options)| {
-        resolve_vue3_project_package_input_target_with_mode(
+        resolve_vue3_project_package_input_target_for_phase_with_mode(
             importer,
             package_dir,
             target,
             config_path,
             options,
             resolution_mode,
+            phase,
             type_resolver,
         )
     });
     if input.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
         input
     } else {
-        vue3_package_export_type_path_with_mode(
+        vue3_package_export_path_for_phase_with_mode(
             package_dir,
             target,
             resolution_mode,
+            phase,
             type_resolver,
         )
     }

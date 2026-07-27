@@ -2206,6 +2206,314 @@ defineProps<ProjectProps>()
     }
 
     #[test]
+    fn vue3_nested_package_manifest_precedes_root_types_versions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let package = node_modules.join("vuec-nested-before-versions");
+        let nested = package.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"typesVersions":{"*":{"nested":["mapped.d.ts"]}}}"#,
+        )
+        .expect("write root package manifest");
+        let mapped = package.join("mapped.d.ts");
+        std::fs::write(&mapped, "export interface RootMappingDecoy {}")
+            .expect("write root mapping decoy");
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{"types":"nested.d.ts"}"#,
+        )
+        .expect("write nested package manifest");
+        let nested_entry = nested.join("nested.d.ts");
+        std::fs::write(&nested_entry, "export interface NestedEntry {}")
+            .expect("write nested package entry");
+        let importer = dir.path().join("entry.mts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+
+        let mut resolver =
+            vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+                max_metadata_fanout_entries: 0,
+                ..Vue3ExternalTypeLoadLimits::default()
+            });
+        resolver.module_resolution = Vue3TypeModuleResolutionKind::NodeNext;
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-nested-before-versions/nested",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(nested_entry),
+        );
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .metadata_fanout_entries,
+            0,
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_self_name_exports_finish_type_phase_before_javascript() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-self-name-phases");
+        std::fs::create_dir_all(&package).expect("create self-name package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "name":"vuec-self-name-phases",
+                "exports":{
+                    ".":{
+                        "import":"./runtime.js",
+                        "default":"./types.d.ts"
+                    }
+                }
+            }"#,
+        )
+        .expect("write self-name package manifest");
+        let importer = package.join("consumer.d.ts");
+        std::fs::write(&importer, "export {};").expect("write self-name importer");
+        std::fs::write(
+            package.join("runtime.js"),
+            "export const implementation = true;",
+        )
+        .expect("write JavaScript phase decoy");
+        let declaration = package.join("types.d.ts");
+        std::fs::write(&declaration, "export interface PackageProps {}")
+            .expect("write declaration target");
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-self-name-phases",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(declaration),
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_package_subpath_directory_reuses_root_types_versions_for_index() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("vuec-index-mapping");
+        let feature = package.join("feature");
+        std::fs::create_dir_all(&feature).expect("create package subpath directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"typesVersions":{"*":{"index":["mapped.d.ts"]}}}"#,
+        )
+        .expect("write root package manifest");
+        let mapped = feature.join("mapped.d.ts");
+        std::fs::write(&mapped, "export interface MappedProps {}")
+            .expect("write mapped declaration");
+        std::fs::write(
+            feature.join("index.d.ts"),
+            "export interface IndexFallbackDecoy {}",
+        )
+        .expect("write index fallback decoy");
+        let importer = dir.path().join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-index-mapping/feature",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(mapped),
+        );
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .metadata_fanout_entries,
+            1,
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+
+        let matched_package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-matched-subpath");
+        let matched_feature = matched_package.join("feature");
+        std::fs::create_dir_all(&matched_feature).expect("create matched subpath directory");
+        std::fs::write(
+            matched_package.join("package.json"),
+            r#"{
+                "typesVersions":{
+                    "*":{
+                        "feature":["missing.d.ts"],
+                        "index":["mapped.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write matched root package manifest");
+        std::fs::write(
+            matched_feature.join("mapped.d.ts"),
+            "export interface IndexMappingDecoy {}",
+        )
+        .expect("write index mapping decoy");
+        std::fs::write(
+            matched_feature.join("index.d.ts"),
+            "export interface IndexFallbackDecoy {}",
+        )
+        .expect("write index fallback decoy");
+        let matched_resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-matched-subpath/feature",
+                Vue3TypeResolutionMode::Import,
+                &matched_resolver,
+            ),
+            None,
+        );
+        assert!(!matched_resolver
+            .external_type_session
+            .metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_package_subpath_files_precede_root_index_types_versions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let importer = dir.path().join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+
+        for (package_name, mapping_target, sibling_extension, mapped_extension) in [
+            (
+                "vuec-type-sibling-priority",
+                "mapped.d.ts",
+                "ts",
+                "d.ts",
+            ),
+            (
+                "vuec-javascript-sibling-priority",
+                "mapped",
+                "js",
+                "js",
+            ),
+        ] {
+            let package = dir.path().join("node_modules").join(package_name);
+            let feature = package.join("feature");
+            std::fs::create_dir_all(&feature).expect("create package subpath directory");
+            std::fs::write(
+                package.join("package.json"),
+                format!(
+                    r#"{{"typesVersions":{{"*":{{"index":["{mapping_target}"]}}}}}}"#
+                ),
+            )
+            .expect("write root package manifest");
+            std::fs::write(
+                feature.join(format!("mapped.{mapped_extension}")),
+                "export interface IndexMappingDecoy {}",
+            )
+            .expect("write index mapping decoy");
+            let sibling = package.join(format!("feature.{sibling_extension}"));
+            std::fs::write(&sibling, "export interface SiblingProps {}")
+                .expect("write sibling target");
+            let resolver = Vue3TypeResolverContext::default();
+
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    &format!("{package_name}/feature"),
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                Some(sibling),
+                "package {package_name}",
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn vue3_bare_package_declaration_pass_precedes_javascript_fallbacks() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let importer = dir.path().join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+
+        for (package_name, manifest) in [
+            ("vuec-two-pass-main", r#"{"main":"runtime.js"}"#),
+            (
+                "vuec-two-pass-exports",
+                r#"{"exports":{".":"./runtime.js"}}"#,
+            ),
+        ] {
+            let implementation = node_modules.join(package_name);
+            let declarations = node_modules.join("@types").join(package_name);
+            std::fs::create_dir_all(&implementation).expect("create implementation package");
+            std::fs::create_dir_all(&declarations).expect("create declaration package");
+            std::fs::write(implementation.join("package.json"), manifest)
+                .expect("write implementation manifest");
+            std::fs::write(
+                implementation.join("runtime.js"),
+                "export const implementation = true;",
+            )
+            .expect("write implementation entry");
+            std::fs::write(
+                declarations.join("package.json"),
+                r#"{"types":"index.d.ts"}"#,
+            )
+            .expect("write declaration manifest");
+            let declaration = declarations.join("index.d.ts");
+            std::fs::write(&declaration, "export interface PackageProps {}")
+                .expect("write declaration entry");
+
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    package_name,
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                Some(declaration),
+                "package {package_name}",
+            );
+        }
+
+        let javascript_only = node_modules.join("vuec-javascript-only-exports");
+        std::fs::create_dir_all(&javascript_only).expect("create JavaScript-only package");
+        std::fs::write(
+            javascript_only.join("package.json"),
+            r#"{"exports":{".":"./runtime.js"}}"#,
+        )
+        .expect("write JavaScript-only manifest");
+        let runtime = javascript_only.join("runtime.js");
+        std::fs::write(&runtime, "export const implementation = true;")
+            .expect("write JavaScript-only entry");
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-javascript-only-exports",
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ),
+            Some(runtime),
+        );
+    }
+
+    #[test]
     fn vue3_dependency_package_imports_resolve_modes_patterns_external_targets_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_vue3_bundler_config(dir.path());

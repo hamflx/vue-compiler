@@ -321,41 +321,51 @@ pub(crate) fn resolve_vue3_bare_type_import_with_mode(
         return None;
     }
     let (package_name, subpath) = vue3_package_import_parts(source)?;
-    for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
-        let package_dir = node_modules.join(&package_name);
-        let is_package_dir = type_resolver
-            .external_type_session
-            .metadata_path_is_dir(&package_dir)?;
-        if is_package_dir {
-            let resolved = resolve_vue3_package_type_entry_with_mode(
-                &package_dir,
-                subpath.as_deref(),
-                resolution_mode,
-                type_resolver,
-            );
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return None;
+    for phase in [
+        Vue3PackageResolutionPhase::Types,
+        Vue3PackageResolutionPhase::JavaScript,
+    ] {
+        for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
+            let package_dir = node_modules.join(&package_name);
+            let is_package_dir = type_resolver
+                .external_type_session
+                .metadata_path_is_dir(&package_dir)?;
+            if is_package_dir {
+                let resolved = resolve_vue3_package_entry_phase_with_mode(
+                    &package_dir,
+                    subpath.as_deref(),
+                    resolution_mode,
+                    phase,
+                    type_resolver,
+                );
+                if type_resolver.external_type_session.metadata_is_blocked() {
+                    return None;
+                }
+                if let Some(resolved) = resolved {
+                    return Some(resolved);
+                }
             }
-            if let Some(resolved) = resolved {
-                return Some(resolved);
-            }
-        }
-        let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
-        let is_types_package_dir = type_resolver
-            .external_type_session
-            .metadata_path_is_dir(&types_package_dir)?;
-        if is_types_package_dir {
-            let resolved = resolve_vue3_package_type_entry_with_mode(
-                &types_package_dir,
-                subpath.as_deref(),
-                resolution_mode,
-                type_resolver,
-            );
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return None;
-            }
-            if let Some(resolved) = resolved {
-                return Some(resolved);
+            if phase == Vue3PackageResolutionPhase::Types {
+                let types_package_dir =
+                    node_modules.join(vue3_at_types_package_name(&package_name));
+                let is_types_package_dir = type_resolver
+                    .external_type_session
+                    .metadata_path_is_dir(&types_package_dir)?;
+                if is_types_package_dir {
+                    let resolved = resolve_vue3_package_entry_phase_with_mode(
+                        &types_package_dir,
+                        subpath.as_deref(),
+                        resolution_mode,
+                        phase,
+                        type_resolver,
+                    );
+                    if type_resolver.external_type_session.metadata_is_blocked() {
+                        return None;
+                    }
+                    if let Some(resolved) = resolved {
+                        return Some(resolved);
+                    }
+                }
             }
         }
     }
@@ -408,10 +418,11 @@ pub(crate) fn resolve_vue3_classic_type_import_with_mode(
         {
             continue;
         }
-        let resolved = resolve_vue3_package_type_entry_with_mode(
+        let resolved = resolve_vue3_package_entry_phase_with_mode(
             &types_package_dir,
             subpath.as_deref(),
             resolution_mode,
+            Vue3PackageResolutionPhase::Types,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -657,6 +668,7 @@ pub(crate) fn vue3_at_types_package_name(package_name: &str) -> PathBuf {
     PathBuf::from("@types").join(package_name)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_package_type_entry(
     package_dir: &Path,
     subpath: Option<&str>,
@@ -670,49 +682,214 @@ pub(crate) fn resolve_vue3_package_type_entry(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_vue3_package_type_entry_with_mode(
     package_dir: &Path,
     subpath: Option<&str>,
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let uses_node_esm_specifier_rules = type_resolver
-        .module_resolution
-        .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
-    let allow_nested_package_manifest = match resolve_vue3_package_json_type_entry_with_mode(
+    let resolved = resolve_vue3_package_entry_phase_with_mode(
         package_dir,
         subpath,
         resolution_mode,
+        Vue3PackageResolutionPhase::Types,
         type_resolver,
-    ) {
-        Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-        Vue3PackageJsonTypeResolution::Blocked
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
-        Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => false,
-        Vue3PackageJsonTypeResolution::NoPackageJson
-            if subpath.is_none() && uses_node_esm_specifier_rules =>
-        {
-            return None;
-        }
-        Vue3PackageJsonTypeResolution::NoPackageJson => true,
-        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
-            if subpath.is_none() && uses_node_esm_specifier_rules =>
-        {
-            return resolve_vue3_metadata_module_specifier_path_with_mode(
-                &package_dir.join("index.js"),
+    );
+    if resolved.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+        return resolved;
+    }
+    resolve_vue3_package_entry_phase_with_mode(
+        package_dir,
+        subpath,
+        resolution_mode,
+        Vue3PackageResolutionPhase::JavaScript,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_entry_phase_with_mode(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    phase: Vue3PackageResolutionPhase,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let uses_node_esm_specifier_rules = type_resolver
+        .module_resolution
+        .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
+    match vue3_package_subpath_lookup(package_dir, subpath, type_resolver) {
+        Vue3PackageSubpathLookup::Nested => {
+            let fallback = Vue3PackagePathFallback {
+                allowed: true,
+                allow_nested_manifest: true,
+                allow_index: true,
+            };
+            return resolve_vue3_package_path_fallback_for_phase(
+                package_dir,
+                subpath,
                 resolution_mode,
+                phase,
+                fallback,
+                uses_node_esm_specifier_rules,
                 type_resolver,
             );
         }
-        Vue3PackageJsonTypeResolution::NoPackageTypeEntry => true,
-    };
-    let candidate = subpath
-        .map(|subpath| package_dir.join(subpath))
-        .unwrap_or_else(|| package_dir.to_path_buf());
-    resolve_vue3_metadata_bare_package_fallback_path_with_mode(
-        &candidate,
+        Vue3PackageSubpathLookup::Root => {}
+        Vue3PackageSubpathLookup::Blocked => return None,
+    }
+    let phase_resolution = resolve_vue3_package_json_entry_phase_with_mode(
+        package_dir,
+        subpath,
         resolution_mode,
-        allow_nested_package_manifest,
+        phase,
+        type_resolver,
+    );
+    let fallback = match phase_resolution {
+        Vue3PackageJsonPhaseResolution::Resolved(path) => return Some(path),
+        Vue3PackageJsonPhaseResolution::Blocked => return None,
+        Vue3PackageJsonPhaseResolution::NoPackageJson => {
+            if subpath.is_none() && uses_node_esm_specifier_rules {
+                return None;
+            }
+            Vue3PackagePathFallback {
+                allowed: true,
+                allow_nested_manifest: true,
+                allow_index: true,
+            }
+        }
+        Vue3PackageJsonPhaseResolution::Missing(fallback) => fallback,
+    };
+    resolve_vue3_package_path_fallback_for_phase(
+        package_dir,
+        subpath,
+        resolution_mode,
+        phase,
+        fallback,
+        uses_node_esm_specifier_rules,
         type_resolver,
     )
+}
+
+enum Vue3PackageSubpathLookup {
+    Root,
+    Nested,
+    Blocked,
+}
+
+fn vue3_package_subpath_lookup(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageSubpathLookup {
+    let Some(subpath) = subpath else {
+        return Vue3PackageSubpathLookup::Root;
+    };
+    let candidate = normalize_path_components(package_dir.join(subpath));
+    let nested_package_json = candidate.join("package.json");
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&nested_package_json))
+    {
+        return Vue3PackageSubpathLookup::Blocked;
+    }
+    let nested_manifest = type_resolver
+        .external_type_session
+        .package_json_from_path(&nested_package_json);
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageSubpathLookup::Blocked;
+    }
+    if nested_manifest.is_none() {
+        return Vue3PackageSubpathLookup::Root;
+    }
+    if !type_resolver.package_json_features().exports {
+        return Vue3PackageSubpathLookup::Nested;
+    }
+
+    let root_package_json = package_dir.join("package.json");
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&root_package_json))
+    {
+        return Vue3PackageSubpathLookup::Blocked;
+    }
+    let root_manifest = type_resolver
+        .external_type_session
+        .package_json_from_path(&root_package_json);
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageSubpathLookup::Blocked;
+    }
+    if root_manifest.is_some_and(|manifest| manifest.exports.is_some()) {
+        Vue3PackageSubpathLookup::Root
+    } else {
+        Vue3PackageSubpathLookup::Nested
+    }
+}
+
+fn resolve_vue3_package_path_fallback_for_phase(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    resolution_mode: Vue3TypeResolutionMode,
+    phase: Vue3PackageResolutionPhase,
+    fallback: Vue3PackagePathFallback,
+    uses_node_esm_specifier_rules: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if !fallback.allowed {
+        return None;
+    }
+    if let Some(subpath) = subpath {
+        let candidate = normalize_path_components(package_dir.join(subpath));
+        return match phase {
+            Vue3PackageResolutionPhase::Types => {
+                resolve_vue3_metadata_bare_package_type_fallback_path_with_mode(
+                    &candidate,
+                    package_dir,
+                    resolution_mode,
+                    fallback.allow_nested_manifest,
+                    type_resolver,
+                )
+            }
+            Vue3PackageResolutionPhase::JavaScript => {
+                resolve_vue3_metadata_bare_package_javascript_fallback_path_with_mode(
+                    &candidate,
+                    package_dir,
+                    resolution_mode,
+                    fallback.allow_nested_manifest,
+                    type_resolver,
+                )
+            }
+        };
+    }
+    if !fallback.allow_index {
+        return None;
+    }
+    let (candidate, policy) = if uses_node_esm_specifier_rules {
+        (
+            package_dir.join("index.js"),
+            Vue3PackageTargetPathPolicy::RequireExplicitFileName,
+        )
+    } else {
+        (
+            package_dir.join("index"),
+            Vue3PackageTargetPathPolicy::AllowImplicit,
+        )
+    };
+    match phase {
+        Vue3PackageResolutionPhase::Types => {
+            resolve_vue3_metadata_legacy_package_type_field_path_with_mode(
+                &candidate,
+                resolution_mode,
+                policy,
+                type_resolver,
+            )
+        }
+        Vue3PackageResolutionPhase::JavaScript => {
+            resolve_vue3_metadata_legacy_package_javascript_field_path(
+                &candidate,
+                policy,
+                type_resolver,
+            )
+        }
+    }
 }
