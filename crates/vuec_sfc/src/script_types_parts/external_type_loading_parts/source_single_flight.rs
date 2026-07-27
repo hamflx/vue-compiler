@@ -649,6 +649,134 @@ mod source_single_flight_tests {
     }
 
     #[test]
+    fn source_cache_keys_dynamic_resolution_mode_independently() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("root.d.cts");
+        std::fs::write(
+            &root,
+            "export type Props = import('conditional-package').Props",
+        )
+        .expect("write dynamic import source");
+        let package = dir.path().join("node_modules").join("conditional-package");
+        std::fs::create_dir_all(&package).expect("create conditional package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.ts",
+                            "require": "./require.d.ts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional manifest");
+        let import_entry = package.join("import.d.ts");
+        let require_entry = package.join("require.d.ts");
+        std::fs::write(&import_entry, "export interface Props { imported: string }")
+            .expect("write import branch");
+        std::fs::write(&require_entry, "export interface Props { required: string }")
+            .expect("write require branch");
+
+        let session = Vue3ExternalTypeLoadSession::default();
+        let commonjs = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            module: Some(Vue3TypeModuleKind::CommonJs),
+            external_type_session: session.clone(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let preserve = Vue3TypeResolverContext {
+            module: Some(Vue3TypeModuleKind::Preserve),
+            ..commonjs.clone()
+        };
+
+        let commonjs_source = session
+            .source_from_path_with_resolver(
+                &root,
+                Vue3ExternalTypeSourceKind::Import,
+                &commonjs,
+            )
+            .expect("read CommonJS source mode");
+        let preserve_source = session
+            .source_from_path_with_resolver(
+                &root,
+                Vue3ExternalTypeSourceKind::Import,
+                &preserve,
+            )
+            .expect("read Preserve source mode");
+        assert_eq!(
+            commonjs_source.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+        assert_eq!(
+            preserve_source.resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+        assert_eq!(
+            commonjs_source.dynamic_resolution_mode,
+            Vue3TypeResolutionMode::Require
+        );
+        assert_eq!(
+            preserve_source.dynamic_resolution_mode,
+            Vue3TypeResolutionMode::Import
+        );
+        assert!(!std::sync::Arc::ptr_eq(
+            &commonjs_source,
+            &preserve_source
+        ));
+
+        let filename = root.to_string_lossy();
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "conditional-package",
+                commonjs_source.dynamic_resolution_mode,
+                &commonjs,
+            ),
+            Some(require_entry)
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &filename,
+                "conditional-package",
+                preserve_source.dynamic_resolution_mode,
+                &preserve,
+            ),
+            Some(import_entry)
+        );
+        assert_eq!(session.stats().import_files_read, 2);
+        assert_eq!(session.stats().source_cache_hits, 0);
+
+        let commonjs_cached = session
+            .source_from_path_with_resolver(
+                &root,
+                Vue3ExternalTypeSourceKind::Import,
+                &commonjs,
+            )
+            .expect("reuse CommonJS source mode");
+        let preserve_cached = session
+            .source_from_path_with_resolver(
+                &root,
+                Vue3ExternalTypeSourceKind::Import,
+                &preserve,
+            )
+            .expect("reuse Preserve source mode");
+        assert!(std::sync::Arc::ptr_eq(
+            &commonjs_source,
+            &commonjs_cached
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &preserve_source,
+            &preserve_cached
+        ));
+        assert_eq!(session.stats().import_files_read, 2);
+        assert_eq!(session.stats().source_cache_hits, 2);
+    }
+
+    #[test]
     fn package_scope_metadata_precedes_source_budget_and_is_cached() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir.path().join("node_modules").join("package");
