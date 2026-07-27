@@ -4038,6 +4038,64 @@ mod vue3_type_reference_directive_tests {
     }
 
     #[test]
+    fn reference_types_package_targets_do_not_add_declaration_suffixes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("package");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    "./extensionless": {
+                        "types": ["./extensionless", "./fallback.d.ts"]
+                    },
+                    "./arbitrary": {
+                        "types": ["./arbitrary.custom", "./fallback.d.ts"]
+                    },
+                    "./arbitrary-valid": { "types": "./valid.custom" },
+                    "./javascript": { "types": "./javascript.js" },
+                    "./explicit": { "types": "./explicit.d.ts" }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        for file in [
+            "extensionless.d.ts",
+            "arbitrary.custom.d.ts",
+            "fallback.d.ts",
+            "valid.d.custom.ts",
+            "javascript.d.ts",
+            "explicit.d.ts",
+        ] {
+            std::fs::write(package.join(file), "interface PackageTargetType {}")
+                .expect("write declaration target");
+        }
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
+
+        for (subpath, expected) in [
+            ("extensionless", "fallback.d.ts"),
+            ("arbitrary", "fallback.d.ts"),
+            ("arbitrary-valid", "valid.d.custom.ts"),
+            ("javascript", "javascript.d.ts"),
+            ("explicit", "explicit.d.ts"),
+        ] {
+            assert_eq!(
+                resolve_vue3_package_json_type_reference_entry(
+                    &package,
+                    Some(subpath),
+                    Some(Vue3TypeResolutionMode::Import),
+                    &resolver,
+                ),
+                Vue3PackageJsonTypeResolution::Resolved(package.join(expected)),
+                "subpath {subpath}",
+            );
+        }
+    }
+
+    #[test]
     fn reference_types_conditional_export_fanout_is_bounded() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = write_conditional_type_package(

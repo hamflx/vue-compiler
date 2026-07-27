@@ -1213,7 +1213,7 @@ fn vue3_package_export_type_reference_path(
         return None;
     }
     let candidate = normalize_path_components(package_dir.join(target));
-    resolve_vue3_metadata_type_reference_declaration_file(&candidate, type_resolver)
+    resolve_vue3_metadata_package_target_declaration_file(&candidate, type_resolver)
 }
 
 pub(crate) fn vue3_package_types_versions_type_path(
