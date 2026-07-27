@@ -658,6 +658,118 @@ fn vue3_types_versions_select_only_the_longest_prefix_pattern() {
 }
 
 #[test]
+fn vue3_types_versions_keep_the_first_matching_selector() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_dir = dir.path().join("src");
+    let package = dir
+        .path()
+        .join("node_modules")
+        .join("vuec-first-types-version");
+    let feature_dir = package.join("feature");
+    std::fs::create_dir_all(&source_dir).expect("create importer directory");
+    std::fs::create_dir_all(&feature_dir).expect("create package feature directory");
+    let importer = source_dir.join("Comp.vue");
+    let root = package.join("types.d.ts");
+    let feature = feature_dir.join("item.d.ts");
+    std::fs::write(&root, "export interface Root { root: string }")
+        .expect("write root fallback");
+    std::fs::write(&feature, "export interface Feature { feature: string }")
+        .expect("write subpath fallback");
+    std::fs::write(
+        package.join("wrong.d.ts"),
+        "export interface Wrong { wrong: never }",
+    )
+    .expect("write later selector decoy");
+
+    for (name, manifest) in [
+        (
+            "empty-object",
+            r#"{"types":"types.d.ts","typesVersions":{"*":{},">=0":{"*":["wrong.d.ts"]}}}"#,
+        ),
+        (
+            "number",
+            r#"{"types":"types.d.ts","typesVersions":{"*":42,">=0":{"*":["wrong.d.ts"]}}}"#,
+        ),
+        (
+            "array",
+            r#"{"types":"types.d.ts","typesVersions":{"*":[],">=0":{"*":["wrong.d.ts"]}}}"#,
+        ),
+        (
+            "null",
+            r#"{"types":"types.d.ts","typesVersions":{"*":null,">=0":{"*":["wrong.d.ts"]}}}"#,
+        ),
+    ] {
+        std::fs::write(package.join("package.json"), manifest)
+            .expect("write typesVersions manifest");
+        let resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_type_import(
+                &importer.to_string_lossy(),
+                "vuec-first-types-version",
+                &resolver,
+            ),
+            Some(root.clone()),
+            "root: {name}"
+        );
+        assert_eq!(
+            resolve_vue3_type_import(
+                &importer.to_string_lossy(),
+                "vuec-first-types-version/feature/item",
+                &resolver,
+            ),
+            Some(feature.clone()),
+            "subpath: {name}"
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+}
+
+#[test]
+fn vue3_types_versions_follow_javascript_property_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package = dir.path().join("ordered-types-versions");
+    std::fs::create_dir_all(&package).expect("create ordered typesVersions package");
+    for name in [
+        "wildcard.d.ts",
+        "numeric.d.ts",
+        "stale.d.ts",
+        "replacement.d.ts",
+    ] {
+        std::fs::write(package.join(name), "export interface Selected {}").expect("write target");
+    }
+
+    for (name, manifest, expected) in [
+        (
+            "array-index-selector-first",
+            r#"{"typesVersions":{"*":{"*":["wildcard.d.ts"]},"5":{"*":["numeric.d.ts"]}}}"#,
+            "numeric.d.ts",
+        ),
+        (
+            "last-duplicate-selector-value",
+            r#"{"typesVersions":{"*":{"*":["stale.d.ts"]},"*":{"*":["replacement.d.ts"]}}}"#,
+            "replacement.d.ts",
+        ),
+        (
+            "last-duplicate-mapping-value",
+            r#"{"typesVersions":{"*":{"*":["stale.d.ts"],"*":["replacement.d.ts"]}}}"#,
+            "replacement.d.ts",
+        ),
+    ] {
+        std::fs::write(package.join("package.json"), manifest)
+            .expect("write ordered typesVersions manifest");
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(
+                &package,
+                None,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(package.join(expected)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn vue3_generated_package_paths_are_bounded_before_expansion() {
     let dir = tempfile::tempdir().expect("temp dir");
     let exports_package = dir.path().join("exports-package");

@@ -87,12 +87,44 @@ pub(crate) struct Vue3PackageTypesVersions(Vec<Vue3PackageTypesVersionEntry>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Vue3PackageTypesVersionEntry {
-    pub(crate) selector: String,
-    pub(crate) mappings: Vue3PackageTypesVersionMappings,
+    selector: String,
+    value: Vue3PackageTypesVersionValue,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Vue3PackageTypesVersionMappings(Vec<(String, serde_json::Value)>);
+
+#[derive(Clone, Debug)]
+enum Vue3PackageTypesVersionValue {
+    Unavailable,
+    Mappings(Vue3PackageTypesVersionMappings),
+}
+
+fn vue3_insert_json_object_property<T>(
+    properties: &mut Vec<(String, T)>,
+    property_indexes: &mut BTreeMap<String, usize>,
+    name: String,
+    value: T,
+) {
+    if let Some(index) = property_indexes.get(&name).copied() {
+        properties[index].1 = value;
+        return;
+    }
+    property_indexes.insert(name.clone(), properties.len());
+    properties.push((name, value));
+}
+
+fn vue3_sort_json_object_properties<T>(properties: &mut [(String, T)]) {
+    // JSON.parse keeps the last duplicate value, then Object.keys enumerates array indexes first.
+    properties.sort_by_key(|(name, _)| {
+        vue3_javascript_array_index(name).map_or((1, 0), |index| (0, index))
+    });
+}
+
+fn vue3_javascript_array_index(name: &str) -> Option<u32> {
+    let index = name.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == name).then_some(index)
+}
 
 impl<'de> Deserialize<'de> for Vue3PackageTypesVersions {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -112,13 +144,22 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersions {
             where
                 M: MapAccess<'de>,
             {
-                let mut entries = Vec::new();
+                let mut properties = Vec::new();
+                let mut property_indexes = BTreeMap::new();
                 while let Some(selector) = map.next_key::<String>()? {
-                    let mappings = map.next_value::<Vue3PackageTypesVersionMappings>()?;
-                    if !mappings.0.is_empty() {
-                        entries.push(Vue3PackageTypesVersionEntry { selector, mappings });
-                    }
+                    let value = map.next_value::<Vue3PackageTypesVersionValue>()?;
+                    vue3_insert_json_object_property(
+                        &mut properties,
+                        &mut property_indexes,
+                        selector,
+                        value,
+                    );
                 }
+                vue3_sort_json_object_properties(&mut properties);
+                let entries = properties
+                    .into_iter()
+                    .map(|(selector, value)| Vue3PackageTypesVersionEntry { selector, value })
+                    .collect();
                 Ok(Vue3PackageTypesVersions(entries))
             }
 
@@ -163,7 +204,7 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersions {
     }
 }
 
-impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
+impl<'de> Deserialize<'de> for Vue3PackageTypesVersionValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -171,7 +212,7 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
         struct TypesVersionMappingsVisitor;
 
         impl<'de> Visitor<'de> for TypesVersionMappingsVisitor {
-            type Value = Vue3PackageTypesVersionMappings;
+            type Value = Vue3PackageTypesVersionValue;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a package.json typesVersions mapping object")
@@ -182,38 +223,48 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
                 M: MapAccess<'de>,
             {
                 let mut mappings = Vec::new();
+                let mut mapping_indexes = BTreeMap::new();
                 while let Some(pattern) = map.next_key::<String>()? {
-                    mappings.push((pattern, map.next_value()?));
+                    let target = map.next_value()?;
+                    vue3_insert_json_object_property(
+                        &mut mappings,
+                        &mut mapping_indexes,
+                        pattern,
+                        target,
+                    );
                 }
-                Ok(Vue3PackageTypesVersionMappings(mappings))
+                vue3_sort_json_object_properties(&mut mappings);
+                Ok(Vue3PackageTypesVersionValue::Mappings(
+                    Vue3PackageTypesVersionMappings(mappings),
+                ))
             }
 
             fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -221,7 +272,7 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
                 A: SeqAccess<'de>,
             {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(Vue3PackageTypesVersionMappings::default())
+                Ok(Vue3PackageTypesVersionValue::Unavailable)
             }
         }
 
@@ -1167,7 +1218,7 @@ pub(crate) fn vue3_package_types_versions_mapping<'a>(
     types_versions: &'a Vue3PackageTypesVersions,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<&'a Vue3PackageTypesVersionMappings> {
-    types_versions
+    let entry = types_versions
         .0
         .iter()
         .find(|entry| {
@@ -1175,8 +1226,11 @@ pub(crate) fn vue3_package_types_versions_mapping<'a>(
                 &entry.selector,
                 &type_resolver.typescript_version,
             )
-        })
-        .map(|entry| &entry.mappings)
+        })?;
+    match &entry.value {
+        Vue3PackageTypesVersionValue::Unavailable => None,
+        Vue3PackageTypesVersionValue::Mappings(mappings) => Some(mappings),
+    }
 }
 
 #[cfg(test)]
