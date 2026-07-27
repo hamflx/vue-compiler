@@ -1012,7 +1012,11 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
     let module_resolution =
         configured.effective_module_resolution(&type_resolver.typescript_version);
     let module = configured.effective_module(&type_resolver.typescript_version);
-    if matches!(
+    if !vue3_tsconfig_module_resolution_is_compatible(
+        module,
+        module_resolution,
+        &type_resolver.typescript_version,
+    ) || matches!(
         module_resolution,
         Vue3TypeModuleResolutionKind::Classic | Vue3TypeModuleResolutionKind::Node10
     ) && (configured.resolve_package_json_exports == Some(true)
@@ -1259,6 +1263,28 @@ fn vue3_tsconfig_direct_module_resolution_kind(
         type_resolver.external_type_session.block_metadata();
         None
     })
+}
+
+fn vue3_tsconfig_module_resolution_is_compatible(
+    module: Vue3TypeModuleKind,
+    module_resolution: Vue3TypeModuleResolutionKind,
+    typescript_version: &nodejs_semver::Version,
+) -> bool {
+    let node_module = matches!(module, Vue3TypeModuleKind::Node16 | Vue3TypeModuleKind::NodeNext);
+    let node_resolution = matches!(
+        module_resolution,
+        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext
+    );
+    if node_module != node_resolution {
+        return false;
+    }
+    module_resolution != Vue3TypeModuleResolutionKind::Bundler
+        || matches!(
+            module,
+            Vue3TypeModuleKind::EcmaScript | Vue3TypeModuleKind::Preserve
+        )
+        || module == Vue3TypeModuleKind::CommonJs
+            && typescript_version >= &(6, 0, 0).into()
 }
 
 fn vue3_tsconfig_direct_target_kind(
@@ -3954,10 +3980,7 @@ mod vue3_module_suffix_config_tests {
             resolution_override.join("tsconfig.json"),
             r#"{
                 "extends":"../base.json",
-                "compilerOptions": {
-                    "module":"NodeNext",
-                    "moduleResolution":"Bundler"
-                }
+                "compilerOptions":{"moduleResolution":"NodeNext"}
             }"#,
         )
         .expect("write resolution override config");
@@ -3975,8 +3998,8 @@ mod vue3_module_suffix_config_tests {
             ),
             (
                 &resolution_override,
-                Vue3TypeModuleResolutionKind::Bundler,
-                Vue3TypeModuleKind::NodeNext,
+                Vue3TypeModuleResolutionKind::NodeNext,
+                Vue3TypeModuleKind::Node16,
             ),
         ] {
             let resolver = vue3_type_resolver_context_for_filename(
@@ -4165,12 +4188,12 @@ mod vue3_module_suffix_config_tests {
         for (version, source, expected) in [
             (
                 (4, 7, 0),
-                r#"{"compilerOptions":{"moduleResolution":"NodeNext"}}"#,
+                r#"{"compilerOptions":{"module":"Node16","moduleResolution":"NodeNext"}}"#,
                 Vue3TypeModuleResolutionKind::NodeNext,
             ),
             (
                 (5, 0, 0),
-                r#"{"compilerOptions":{"moduleResolution":"Bundler"}}"#,
+                r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler"}}"#,
                 Vue3TypeModuleResolutionKind::Bundler,
             ),
             (
@@ -4204,6 +4227,86 @@ mod vue3_module_suffix_config_tests {
                 "TypeScript {version:?}: {source}"
             );
             assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn module_and_module_resolution_combinations_match_typescript() {
+        for (version, module, module_resolution) in [
+            ((5, 9, 0), "Node16", "NodeNext"),
+            ((5, 9, 0), "NodeNext", "Node16"),
+            ((5, 9, 0), "CommonJS", "Node10"),
+            ((5, 9, 0), "ESNext", "Node10"),
+            ((5, 9, 0), "ESNext", "Bundler"),
+            ((5, 9, 0), "Preserve", "Bundler"),
+            ((6, 0, 0), "CommonJS", "Bundler"),
+        ] {
+            let dir = tempfile::tempdir().expect("valid module combination dir");
+            let source = format!(
+                r#"{{"compilerOptions":{{"module":"{module}","moduleResolution":"{module_resolution}"}}}}"#
+            );
+            let filename = write_config(dir.path(), &source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver).is_some(),
+                "TypeScript {version:?}: {module} + {module_resolution}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+
+        for (version, module, module_resolution) in [
+            ((5, 9, 0), "Node16", "Bundler"),
+            ((5, 9, 0), "NodeNext", "Node10"),
+            ((5, 9, 0), "ESNext", "Node16"),
+            ((5, 9, 0), "Preserve", "NodeNext"),
+            ((5, 9, 0), "CommonJS", "Bundler"),
+            ((5, 9, 0), "AMD", "Bundler"),
+        ] {
+            let dir = tempfile::tempdir().expect("invalid module combination dir");
+            let source = format!(
+                r#"{{"compilerOptions":{{"module":"{module}","moduleResolution":"{module_resolution}"}}}}"#
+            );
+            let filename = write_config(dir.path(), &source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none(),
+                "TypeScript {version:?}: {module} + {module_resolution}"
+            );
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+
+        for (version, module_resolution, should_resolve) in [
+            ((5, 9, 0), "NodeNext", false),
+            ((5, 9, 0), "Bundler", false),
+            ((6, 0, 0), "Bundler", true),
+        ] {
+            let dir = tempfile::tempdir().expect("implicit module combination dir");
+            let source = format!(
+                r#"{{"compilerOptions":{{"moduleResolution":"{module_resolution}"}}}}"#
+            );
+            let filename = write_config(dir.path(), &source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert_eq!(
+                vue3_tsconfig_type_resolver_options(&filename, &resolver).is_some(),
+                should_resolve,
+                "TypeScript {version:?}: implicit module + {module_resolution}"
+            );
+            assert_eq!(
+                resolver.external_type_session.metadata_is_blocked(),
+                !should_resolve
+            );
         }
     }
 
