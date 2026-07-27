@@ -3,6 +3,7 @@ pub(crate) enum Vue3PackageJsonTypeResolution {
     NoPackageJson,
     NoPackageTypeEntry,
     NoPackageTypeEntryWithoutIndex,
+    NoPackageTypeEntryWithoutNestedManifest,
     Resolved(PathBuf),
     Blocked,
 }
@@ -365,7 +366,7 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     exports_mode: Option<Vue3TypeResolutionMode>,
     declaration_only_exports: bool,
     enable_exports: bool,
-    apply_node_esm_bare_package_rules: bool,
+    apply_bare_package_rules: bool,
 ) -> Vue3PackageJsonTypeResolution {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
@@ -459,7 +460,14 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
     }
-    let node_esm_root_index_is_suppressed = apply_node_esm_bare_package_rules
+    let nested_manifest_is_suppressed = apply_bare_package_rules
+        && subpath.is_some()
+        && enable_exports
+        && manifest.exports.is_some();
+    if nested_manifest_is_suppressed {
+        return Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest;
+    }
+    let node_esm_root_index_is_suppressed = apply_bare_package_rules
         && subpath.is_none()
         && exports_mode.is_some_and(|resolution_mode| {
             type_resolver

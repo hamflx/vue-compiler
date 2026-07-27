@@ -900,7 +900,8 @@ fn resolve_vue3_type_reference_package_candidate(
     ) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
         Vue3PackageJsonTypeResolution::Blocked
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
         | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
     }

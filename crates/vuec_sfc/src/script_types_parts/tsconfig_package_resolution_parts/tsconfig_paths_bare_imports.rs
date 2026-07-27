@@ -679,7 +679,7 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
     let uses_node_esm_specifier_rules = type_resolver
         .module_resolution
         .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
-    match resolve_vue3_package_json_type_entry_with_mode(
+    let allow_nested_package_manifest = match resolve_vue3_package_json_type_entry_with_mode(
         package_dir,
         subpath,
         resolution_mode,
@@ -688,12 +688,13 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
         Vue3PackageJsonTypeResolution::Blocked
         | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => false,
         Vue3PackageJsonTypeResolution::NoPackageJson
             if subpath.is_none() && uses_node_esm_specifier_rules =>
         {
             return None;
         }
-        Vue3PackageJsonTypeResolution::NoPackageJson => {}
+        Vue3PackageJsonTypeResolution::NoPackageJson => true,
         Vue3PackageJsonTypeResolution::NoPackageTypeEntry
             if subpath.is_none() && uses_node_esm_specifier_rules =>
         {
@@ -703,14 +704,15 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
                 type_resolver,
             );
         }
-        Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
-    }
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry => true,
+    };
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
     resolve_vue3_metadata_bare_package_fallback_path_with_mode(
         &candidate,
         resolution_mode,
+        allow_nested_package_manifest,
         type_resolver,
     )
 }

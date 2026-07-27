@@ -190,6 +190,7 @@ pub(crate) fn resolve_vue3_metadata_package_target_path_with_mode(
 pub(crate) fn resolve_vue3_metadata_bare_package_fallback_path_with_mode(
     candidate: &Path,
     resolution_mode: Vue3TypeResolutionMode,
+    allow_package_manifest: bool,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     resolve_vue3_type_import_path_with_probe_mode(
@@ -197,7 +198,11 @@ pub(crate) fn resolve_vue3_metadata_bare_package_fallback_path_with_mode(
         resolution_mode,
         type_resolver,
         Vue3TypeImportPathProbeMode::Metadata,
-        Vue3TypeImportPathSemantics::BarePackageFallback,
+        if allow_package_manifest {
+            Vue3TypeImportPathSemantics::BarePackageFallback
+        } else {
+            Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest
+        },
     )
 }
 
@@ -212,6 +217,7 @@ enum Vue3TypeImportPathSemantics {
     ModuleSpecifier,
     PackageJsonTarget,
     BarePackageFallback,
+    BarePackageFallbackWithoutManifest,
 }
 
 impl Vue3TypeImportPathProbeMode {
@@ -345,7 +351,9 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     {
         return resolved;
     }
-    if probe_mode.is_dir(candidate, type_resolver)? {
+    if semantics != Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest
+        && probe_mode.is_dir(candidate, type_resolver)?
+    {
         match resolve_vue3_package_json_directory_type_entry_with_mode(
             candidate,
             resolution_mode,
@@ -353,7 +361,10 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         ) {
             Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
             Vue3PackageJsonTypeResolution::Blocked
-            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => {
+                return None;
+            }
             Vue3PackageJsonTypeResolution::NoPackageJson
             | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
         }

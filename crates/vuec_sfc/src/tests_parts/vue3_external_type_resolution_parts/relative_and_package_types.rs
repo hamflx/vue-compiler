@@ -1962,6 +1962,147 @@ defineProps<ProjectProps>()
     }
 
     #[test]
+    fn vue3_package_subpath_fallback_respects_root_exports_property_presence() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let importer = dir.path().join("entry.mts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+        let mut fixtures = Vec::new();
+        for (case, exports) in [
+            ("null", serde_json::Value::Null),
+            ("false", serde_json::json!(false)),
+            ("zero", serde_json::json!(0)),
+            ("negative-zero", serde_json::json!(-0.0)),
+            ("empty-string", serde_json::json!("")),
+        ] {
+            let package_name = format!("vuec-root-exports-{case}");
+            let package = node_modules.join(&package_name);
+            let nested = package.join("nested");
+            std::fs::create_dir_all(&nested).expect("create nested package");
+            std::fs::write(
+                package.join("package.json"),
+                serde_json::json!({ "exports": exports }).to_string(),
+            )
+            .expect("write root package manifest");
+            std::fs::write(
+                nested.join("package.json"),
+                r#"{"types":"entry.d.ts"}"#,
+            )
+            .expect("write nested package manifest");
+            let nested_entry = nested.join("entry.d.ts");
+            let nested_index = nested.join("index.d.ts");
+            std::fs::write(&nested_entry, "export interface NestedProps {}").expect("write entry");
+            std::fs::write(&nested_index, "export interface NestedProps {}").expect("write index");
+            fixtures.push((package_name, nested_entry, nested_index));
+        }
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 3).into(),
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            for (package_name, _, nested_index) in fixtures.iter() {
+                let source = format!("{package_name}/nested");
+                assert_eq!(
+                    resolve_vue3_type_import_with_mode(
+                        &importer.to_string_lossy(),
+                        &source,
+                        Vue3TypeResolutionMode::Import,
+                        &resolver,
+                    ),
+                    None,
+                    "Node ESM must ignore the nested manifest for {package_name}"
+                );
+                assert_eq!(
+                    resolve_vue3_type_import_with_mode(
+                        &importer.to_string_lossy(),
+                        &source,
+                        Vue3TypeResolutionMode::Require,
+                        &resolver,
+                    ),
+                    Some(nested_index.clone()),
+                    "CommonJS must use index instead of the nested manifest for {package_name}"
+                );
+            }
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let bundler = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        let bundler_exports_disabled = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            resolve_package_json_exports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
+        for (package_name, nested_entry, nested_index) in fixtures.iter() {
+            let source = format!("{package_name}/nested");
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    &source,
+                    Vue3TypeResolutionMode::Import,
+                    &bundler,
+                ),
+                Some(nested_index.clone()),
+                "Bundler must ignore the nested manifest for {package_name}"
+            );
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    &source,
+                    Vue3TypeResolutionMode::Import,
+                    &bundler_exports_disabled,
+                ),
+                Some(nested_entry.clone()),
+                "disabled exports must restore nested manifest lookup for {package_name}"
+            );
+        }
+
+        let legacy_package_name = "vuec-root-without-exports";
+        let legacy_nested = node_modules.join(legacy_package_name).join("nested");
+        std::fs::create_dir_all(&legacy_nested).expect("create legacy nested package");
+        std::fs::write(
+            node_modules
+                .join(legacy_package_name)
+                .join("package.json"),
+            "{}",
+        )
+        .expect("write legacy root manifest");
+        std::fs::write(
+            legacy_nested.join("package.json"),
+            r#"{"types":"entry.d.ts"}"#,
+        )
+        .expect("write legacy nested manifest");
+        let legacy_entry = legacy_nested.join("entry.d.ts");
+        std::fs::write(&legacy_entry, "export interface NestedProps {}").expect("write legacy entry");
+        let node_next = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-root-without-exports/nested",
+                Vue3TypeResolutionMode::Import,
+                &node_next,
+            ),
+            Some(legacy_entry)
+        );
+        for resolver in [&bundler, &bundler_exports_disabled, &node_next] {
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
     fn vue3_dependency_package_imports_resolve_modes_patterns_external_targets_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_vue3_bundler_config(dir.path());
