@@ -1317,6 +1317,7 @@
         )
         .expect("write declaration fallback");
         let disabled = Vue3TypeResolverContext {
+            typescript_version: (5, 2, 2).into(),
             module_resolution: Vue3TypeModuleResolutionKind::Bundler,
             ..Vue3TypeResolverContext::default()
         };

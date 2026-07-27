@@ -2288,6 +2288,7 @@ defineProps<ProjectProps>()
         std::fs::write(&declaration, "export interface PackageProps {}")
             .expect("write declaration target");
         let resolver = Vue3TypeResolverContext {
+            typescript_version: (5, 2, 2).into(),
             module_resolution: Vue3TypeModuleResolutionKind::Bundler,
             allow_js: true,
             ..Vue3TypeResolverContext::default()
@@ -2307,17 +2308,23 @@ defineProps<ProjectProps>()
 
     #[test]
     fn vue3_project_self_name_allow_js_prefers_input_javascript_per_export_target() {
-        for (name, javascript_options, expected_allow_js) in [
-            ("default", "", false),
-            ("allow", r#", "allowJs": true"#, true),
-            ("check", r#", "checkJs": true"#, true),
+        for (name, version, javascript_options, expected_allow_js, expected_javascript) in [
+            ("default", "5.2.2", "", false, false),
+            ("allow", "5.2.2", r#", "allowJs": true"#, true, true),
+            ("check", "5.2.2", r#", "checkJs": true"#, true, true),
             (
                 "explicit-disable",
+                "5.2.2",
                 r#", "allowJs": false, "checkJs": true"#,
                 false,
+                false,
             ),
+            ("typescript-4-9", "4.9.5", r#", "allowJs": true"#, true, false),
+            ("typescript-5-0", "5.0.4", r#", "allowJs": true"#, true, false),
+            ("typescript-5-1", "5.1.6", r#", "allowJs": true"#, true, false),
         ] {
             let dir = tempfile::tempdir().expect("temp dir");
+            write_vue3_typescript_version(dir.path(), version);
             let source_dir = dir.path().join("src");
             let output_dir = dir.path().join("dist");
             for directory in [&source_dir, &output_dir] {
@@ -2327,6 +2334,7 @@ defineProps<ProjectProps>()
                 dir.path().join("package.json"),
                 r#"{
                     "name":"vuec-allow-js-self",
+                    "type":"module",
                     "exports":{
                         ".":{
                             "import":"./dist/runtime.js",
@@ -2341,8 +2349,8 @@ defineProps<ProjectProps>()
                 format!(
                     r#"{{
                         "compilerOptions":{{
-                            "module":"ESNext",
-                            "moduleResolution":"Bundler",
+                            "module":"NodeNext",
+                            "moduleResolution":"NodeNext",
                             "rootDir":"./src",
                             "outDir":"./dist"{javascript_options}
                         }}
@@ -2377,7 +2385,7 @@ defineProps<ProjectProps>()
                     Vue3TypeResolutionMode::Import,
                     &resolver,
                 ),
-                Some(if expected_allow_js {
+                Some(if expected_javascript {
                     javascript
                 } else {
                     emitted_declaration

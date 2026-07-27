@@ -354,8 +354,9 @@ fn resolve_vue3_package_self_reference_with_mode(
             .and_then(|object| object.get("."))
             .is_some_and(serde_json::Value::is_null);
 
-    // Project JS inputs must beat their emitted declarations within each export target.
-    let single_pass = type_resolver.allow_js
+    // Since TypeScript 5.2, project JS inputs beat their emitted declarations per target.
+    let single_pass = type_resolver.typescript_version >= (5, 2, 0).into()
+        && type_resolver.allow_js
         && !vue3_path_contains_node_modules(
             filename.parent().unwrap_or_else(|| Path::new("")),
         );
