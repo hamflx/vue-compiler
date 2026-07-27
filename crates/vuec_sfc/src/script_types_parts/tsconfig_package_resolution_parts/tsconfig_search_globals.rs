@@ -907,7 +907,16 @@ fn resolve_vue3_type_reference_package_candidate(
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
-    if subpath.is_none() && allow_direct_file {
+    // Enabled exports precede the legacy root sibling-file probe in node_modules.
+    let exports_precede_direct = subpath.is_none()
+        && allow_direct_file
+        && lookup_kind == Vue3TypeReferenceLookupKind::NodeModules
+        && type_resolver.package_json_features().exports
+        && vue3_package_json_has_truthy_exports(package_dir, type_resolver);
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    if subpath.is_none() && allow_direct_file && !exports_precede_direct {
         let direct = resolve_vue3_type_reference_direct_file_with_mode(
             &candidate,
             uses_node_esm_specifier_rules,
@@ -3651,6 +3660,144 @@ mod vue3_type_reference_directive_tests {
                 &typescript_5_2,
             ),
             Some(legacy_entry),
+        );
+    }
+
+    #[test]
+    fn reference_types_truthy_exports_precede_flat_secondary_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let node_modules = project_dir.join("node_modules");
+        let package_name = "flat-shadow";
+        std::fs::create_dir_all(&project_dir).expect("create project directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        let package = write_conditional_type_package(
+            &node_modules,
+            package_name,
+            r#"{
+                "types": "./legacy.d.ts",
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+            &["import.d.mts", "require.d.cts", "legacy.d.ts"],
+        );
+        let flat = node_modules.join(format!("{package_name}.d.ts"));
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        std::fs::write(&flat, "interface FlatExportPrecedence {}")
+            .expect("write flat declaration");
+        let filename = project_dir.join("Comp.vue");
+        let filename = filename.to_string_lossy();
+
+        for (module_resolution, mode, expected) in [
+            (
+                Vue3TypeModuleResolutionKind::NodeNext,
+                None,
+                &require_entry,
+            ),
+            (
+                Vue3TypeModuleResolutionKind::NodeNext,
+                Some(Vue3TypeResolutionMode::Import),
+                &import_entry,
+            ),
+            (
+                Vue3TypeModuleResolutionKind::NodeNext,
+                Some(Vue3TypeResolutionMode::Require),
+                &require_entry,
+            ),
+            (
+                Vue3TypeModuleResolutionKind::Bundler,
+                None,
+                &import_entry,
+            ),
+            (
+                Vue3TypeModuleResolutionKind::Classic,
+                Some(Vue3TypeResolutionMode::Import),
+                &import_entry,
+            ),
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 3).into(),
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_reference_directive_with_mode(
+                    &filename,
+                    &filename,
+                    package_name,
+                    mode,
+                    &resolver,
+                ),
+                Some(expected.clone()),
+                "{module_resolution:?} {mode:?}",
+            );
+        }
+
+        for (version, mode, expected) in [
+            ((5, 2, 2), Some(Vue3TypeResolutionMode::Require), &flat),
+            ((6, 0, 3), None, &flat),
+            (
+                (6, 0, 3),
+                Some(Vue3TypeResolutionMode::Require),
+                &require_entry,
+            ),
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+                resolve_package_json_exports: Some(false),
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_reference_directive_with_mode(
+                    &filename,
+                    &filename,
+                    package_name,
+                    mode,
+                    &resolver,
+                ),
+                Some(expected.clone()),
+                "TypeScript {version:?} {mode:?}",
+            );
+        }
+
+        let blocked_name = "flat-blocked";
+        write_conditional_type_package(
+            &node_modules,
+            blocked_name,
+            r#"{"exports":{}}"#,
+            &[],
+        );
+        std::fs::write(
+            node_modules.join(format!("{blocked_name}.d.ts")),
+            "interface BlockedFlatDecoy {}",
+        )
+        .expect("write blocked flat decoy");
+        let types_fallback = write_type_package(&node_modules.join("@types"), blocked_name);
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_reference_directive(
+                &filename,
+                &filename,
+                blocked_name,
+                &resolver,
+            ),
+            Some(types_fallback),
         );
     }
 

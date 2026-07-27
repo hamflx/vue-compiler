@@ -952,6 +952,24 @@ fn vue3_package_json_value_is_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
+pub(crate) fn vue3_package_json_has_truthy_exports(
+    package_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return false;
+    }
+    type_resolver
+        .external_type_session
+        .package_json_from_path(&package_dir.join("package.json"))
+        .is_some_and(|manifest| {
+            manifest
+                .exports
+                .as_ref()
+                .is_some_and(vue3_package_json_value_is_truthy)
+        })
+}
+
 fn vue3_package_json_path_field(value: Option<&serde_json::Value>) -> Option<&str> {
     value
         .and_then(serde_json::Value::as_str)
