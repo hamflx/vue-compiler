@@ -260,6 +260,101 @@
     }
 
     #[test]
+    fn vue3_classic_resolution_uses_ancestor_files_and_type_packages_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let nested_dir = source_dir.join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("create nested source directory");
+        std::fs::write(dir.path().join("tsconfig.json"), r#"{}"#)
+            .expect("write project config");
+
+        let ancestor_target = source_dir.join("choice.ts");
+        std::fs::write(
+            &ancestor_target,
+            "export interface ChoiceProps { ancestor: string }",
+        )
+        .expect("write Classic ancestor target");
+        let relative_directory = nested_dir.join("directory");
+        std::fs::create_dir_all(&relative_directory).expect("create relative directory decoy");
+        std::fs::write(
+            relative_directory.join("index.ts"),
+            "export interface DirectoryProps { directory: never }",
+        )
+        .expect("write relative directory decoy");
+
+        let package = dir.path().join("node_modules").join("choice");
+        std::fs::create_dir_all(&package).expect("create implementation package decoy");
+        std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write implementation package manifest");
+        let package_target = package.join("index.d.ts");
+        std::fs::write(
+            &package_target,
+            "export interface ChoiceProps { package: never }",
+        )
+        .expect("write implementation package decoy");
+
+        let package_only = dir.path().join("node_modules").join("package-only");
+        std::fs::create_dir_all(&package_only).expect("create package-only decoy");
+        std::fs::write(
+            package_only.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write package-only manifest");
+        std::fs::write(
+            package_only.join("index.d.ts"),
+            "export interface PackageOnlyProps { packageOnly: never }",
+        )
+        .expect("write package-only target");
+
+        let types_package = dir
+            .path()
+            .join("node_modules")
+            .join("@types")
+            .join("typed-only");
+        std::fs::create_dir_all(&types_package).expect("create @types fallback package");
+        std::fs::write(
+            types_package.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write @types fallback manifest");
+        let types_target = types_package.join("index.d.ts");
+        std::fs::write(
+            &types_target,
+            "export interface TypedOnlyProps { typedOnly: boolean }",
+        )
+        .expect("write @types fallback target");
+
+        let filename = nested_dir.join("Comp.vue").to_string_lossy().to_string();
+        let classic = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Classic,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "choice", &classic),
+            Some(ancestor_target)
+        );
+        assert!(resolve_vue3_type_import(&filename, "./directory", &classic).is_none());
+        assert!(resolve_vue3_type_import(&filename, "package-only", &classic).is_none());
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "typed-only", &classic),
+            Some(types_target)
+        );
+
+        let node10 = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "choice", &node10),
+            Some(package_target)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "./directory", &node10),
+            Some(relative_directory.join("index.ts"))
+        );
+    }
+
+    #[test]
     fn vue3_type_import_resolution_cache_is_a_session_snapshot() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();

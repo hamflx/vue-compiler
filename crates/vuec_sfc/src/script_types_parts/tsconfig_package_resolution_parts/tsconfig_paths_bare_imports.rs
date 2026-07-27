@@ -362,6 +362,68 @@ pub(crate) fn resolve_vue3_bare_type_import_with_mode(
     None
 }
 
+pub(crate) fn resolve_vue3_classic_type_import_with_mode(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if source.is_empty()
+        || vue3_type_import_source_is_relative(source)
+        || type_resolver.external_type_session.metadata_is_blocked()
+        || !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(source)
+    {
+        return None;
+    }
+    let normalized_source = source.replace('\\', "/");
+    for directory in Vue3AncestorSearchPaths::directories(
+        Path::new(filename).parent(),
+        &type_resolver.external_type_session,
+    ) {
+        let candidate = normalize_path_components(directory.join(&normalized_source));
+        let resolved = resolve_vue3_metadata_module_specifier_path_with_mode(
+            &candidate,
+            resolution_mode,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
+            return Some(resolved);
+        }
+    }
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+
+    let (package_name, subpath) = vue3_package_import_parts(source)?;
+    for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
+        let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
+        if !type_resolver
+            .external_type_session
+            .metadata_path_is_dir(&types_package_dir)?
+        {
+            continue;
+        }
+        let resolved = resolve_vue3_package_type_entry_with_mode(
+            &types_package_dir,
+            subpath.as_deref(),
+            resolution_mode,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 pub(crate) fn vue3_package_import_parts(source: &str) -> Option<(String, Option<String>)> {
     if source.is_empty()
         || source.starts_with('.')
@@ -397,7 +459,9 @@ pub(crate) fn vue3_ancestor_search_candidate_weight(dir: &Path, suffix: &str) ->
     dir.as_os_str()
         .as_encoded_bytes()
         .len()
-        .saturating_add(usize::from(!dir.as_os_str().is_empty()))
+        .saturating_add(usize::from(
+            !dir.as_os_str().is_empty() && !suffix.is_empty(),
+        ))
         .saturating_add(suffix.len())
 }
 
@@ -428,6 +492,13 @@ impl<'a> Vue3AncestorSearchPaths<'a> {
         self.stop_before_node_modules = true;
         self
     }
+
+    fn directories(
+        current: Option<&'a Path>,
+        session: &'a Vue3ExternalTypeLoadSession,
+    ) -> Self {
+        Self::new(current, "", session)
+    }
 }
 
 impl Iterator for Vue3AncestorSearchPaths<'_> {
@@ -453,7 +524,11 @@ impl Iterator for Vue3AncestorSearchPaths<'_> {
             self.current = None;
             return None;
         }
-        Some(normalize_path_components(dir.join(self.suffix)))
+        Some(normalize_path_components(if self.suffix.is_empty() {
+            dir.to_path_buf()
+        } else {
+            dir.join(self.suffix)
+        }))
     }
 }
 

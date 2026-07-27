@@ -139,6 +139,55 @@ defineProps<ExtensionlessProps & DirectoryProps & ExplicitProps>()
     }
 
     #[test]
+    fn vue3_classic_imports_resolve_ancestor_files_before_type_packages() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let component_dir = source_dir.join("components");
+        std::fs::create_dir_all(&component_dir).expect("create component directory");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"moduleResolution":"Classic"}}"#,
+        )
+        .expect("write Classic config");
+        let ancestor = source_dir.join("shared.ts");
+        std::fs::write(
+            &ancestor,
+            "export interface SharedProps { classicAncestor: string }",
+        )
+        .expect("write Classic ancestor type");
+
+        let package = dir.path().join("node_modules").join("shared");
+        std::fs::create_dir_all(&package).expect("create package decoy");
+        std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write package decoy manifest");
+        std::fs::write(
+            package.join("index.d.ts"),
+            "export interface SharedProps { wrongPackage: never }",
+        )
+        .expect("write package decoy type");
+
+        let filename = component_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { SharedProps } from 'shared'
+defineProps<SharedProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("classicAncestor: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongPackage"));
+        assert_eq!(script.deps, vec![normalize_path_string(&ancestor)]);
+    }
+
+    #[test]
     fn vue3_module_suffixes_respect_configured_order_for_relative_imports() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(

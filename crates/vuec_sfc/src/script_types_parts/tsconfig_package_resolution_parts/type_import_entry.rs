@@ -77,6 +77,14 @@ fn resolve_vue3_type_import_uncached(
     ) {
         return Some(resolved);
     }
+    if type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Classic {
+        return resolve_vue3_classic_type_import_with_mode(
+            filename,
+            source,
+            resolution_mode,
+            type_resolver,
+        );
+    }
     match resolve_vue3_package_imports_with_mode(
         filename,
         source,

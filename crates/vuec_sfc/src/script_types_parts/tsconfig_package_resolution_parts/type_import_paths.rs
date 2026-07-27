@@ -299,6 +299,9 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         && type_resolver
             .module_resolution
             .uses_node_esm_specifier_rules(resolution_mode);
+    let uses_classic_specifier_rules = semantics
+        == Vue3TypeImportPathSemantics::ModuleSpecifier
+        && type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Classic;
     let extension = vue3_typescript_path_extension(candidate);
     let mut candidates = Vec::new();
     if let Some(extension) = extension {
@@ -331,6 +334,7 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         probe_mode,
     );
     if resolved.is_some()
+        || uses_classic_specifier_rules
         || type_resolver.external_type_session.failure_epoch() != failure_epoch
     {
         return resolved;
