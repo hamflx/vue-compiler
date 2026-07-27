@@ -375,12 +375,7 @@ impl Vue3TypeResolverContext {
             .module_resolution
             .default_package_json_features(&self.typescript_version);
         if self.typescript_version >= (5, 0, 0).into()
-            && matches!(
-                self.module_resolution,
-                Vue3TypeModuleResolutionKind::Node16
-                    | Vue3TypeModuleResolutionKind::NodeNext
-                    | Vue3TypeModuleResolutionKind::Bundler
-            )
+            && self.module_resolution == Vue3TypeModuleResolutionKind::Bundler
         {
             if let Some(enabled) = self.resolve_package_json_exports {
                 features.exports = enabled;

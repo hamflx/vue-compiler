@@ -611,12 +611,13 @@
             };
             assert_eq!(
                 resolve_vue3_type_import(&filename, "mapped-package", &node_maps_disabled),
-                Some(legacy.clone()),
-                "{module_resolution:?} should disable exports"
+                Some(modern.clone()),
+                "{module_resolution:?} should preserve exports"
             );
-            assert!(
-                resolve_vue3_type_import(&filename, "#alias", &node_maps_disabled).is_none(),
-                "{module_resolution:?} should disable imports"
+            assert_eq!(
+                resolve_vue3_type_import(&filename, "#alias", &node_maps_disabled),
+                Some(alias.clone()),
+                "{module_resolution:?} should preserve imports"
             );
             assert_eq!(
                 resolve_vue3_type_import(
