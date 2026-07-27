@@ -2,6 +2,7 @@
 pub(crate) enum Vue3PackageJsonTypeResolution {
     NoPackageJson,
     NoPackageTypeEntry,
+    NoPackageTypeEntryWithoutIndex,
     Resolved(PathBuf),
     Blocked,
 }
@@ -293,6 +294,7 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
         Some(Vue3TypeResolutionMode::Import),
         false,
         true,
+        true,
     )
 }
 
@@ -309,6 +311,7 @@ pub(crate) fn resolve_vue3_package_json_type_entry_with_mode(
         Some(resolution_mode),
         false,
         type_resolver.package_json_features().exports,
+        true,
     )
 }
 
@@ -322,6 +325,7 @@ pub(crate) fn resolve_vue3_package_json_directory_type_entry_with_mode(
         None,
         type_resolver,
         Some(resolution_mode),
+        false,
         false,
         false,
     )
@@ -350,6 +354,7 @@ pub(crate) fn resolve_vue3_package_json_type_reference_entry(
         exports_mode,
         true,
         enable_exports,
+        false,
     )
 }
 
@@ -360,6 +365,7 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     exports_mode: Option<Vue3TypeResolutionMode>,
     declaration_only_exports: bool,
     enable_exports: bool,
+    apply_node_esm_bare_package_rules: bool,
 ) -> Vue3PackageJsonTypeResolution {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
@@ -451,7 +457,24 @@ fn resolve_vue3_package_json_type_entry_with_exports(
         }
     }
     if type_resolver.external_type_session.metadata_is_blocked() {
-        Vue3PackageJsonTypeResolution::Blocked
+        return Vue3PackageJsonTypeResolution::Blocked;
+    }
+    let node_esm_root_index_is_suppressed = apply_node_esm_bare_package_rules
+        && subpath.is_none()
+        && exports_mode.is_some_and(|resolution_mode| {
+            type_resolver
+                .module_resolution
+                .uses_node_esm_specifier_rules(
+                    resolution_mode,
+                    &type_resolver.typescript_version,
+                )
+        })
+        && manifest
+            .exports
+            .as_ref()
+            .is_some_and(|exports| !exports.is_null());
+    if node_esm_root_index_is_suppressed {
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
     } else {
         Vue3PackageJsonTypeResolution::NoPackageTypeEntry
     }

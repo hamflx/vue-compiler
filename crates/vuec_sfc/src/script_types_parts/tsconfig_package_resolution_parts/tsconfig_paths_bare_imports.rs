@@ -676,6 +676,9 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    let uses_node_esm_specifier_rules = type_resolver
+        .module_resolution
+        .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
     match resolve_vue3_package_json_type_entry_with_mode(
         package_dir,
         subpath,
@@ -683,9 +686,24 @@ pub(crate) fn resolve_vue3_package_type_entry_with_mode(
         type_resolver,
     ) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-        Vue3PackageJsonTypeResolution::Blocked => return None,
+        Vue3PackageJsonTypeResolution::Blocked
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
+            if subpath.is_none() && uses_node_esm_specifier_rules =>
+        {
+            return None;
+        }
+        Vue3PackageJsonTypeResolution::NoPackageJson => {}
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+            if subpath.is_none() && uses_node_esm_specifier_rules =>
+        {
+            return resolve_vue3_metadata_module_specifier_path_with_mode(
+                &package_dir.join("index.js"),
+                resolution_mode,
+                type_resolver,
+            );
+        }
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
     }
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))

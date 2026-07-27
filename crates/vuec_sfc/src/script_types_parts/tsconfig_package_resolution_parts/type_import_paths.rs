@@ -295,10 +295,10 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         return None;
     }
     let uses_node_esm_specifier_rules = semantics
-        == Vue3TypeImportPathSemantics::ModuleSpecifier
+        != Vue3TypeImportPathSemantics::PackageJsonTarget
         && type_resolver
             .module_resolution
-            .uses_node_esm_specifier_rules(resolution_mode);
+            .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
     let uses_classic_specifier_rules = semantics
         == Vue3TypeImportPathSemantics::ModuleSpecifier
         && type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Classic;
@@ -324,15 +324,21 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         candidates.push(candidate.to_path_buf());
         return resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
     }
-    if uses_node_esm_specifier_rules {
+    if uses_node_esm_specifier_rules
+        && semantics == Vue3TypeImportPathSemantics::ModuleSpecifier
+    {
         return None;
     }
     let failure_epoch = type_resolver.external_type_session.failure_epoch();
-    let resolved = resolve_vue3_module_suffixed_file(
-        vue3_ts_resolution_candidates(candidate, None, true),
-        type_resolver,
-        probe_mode,
-    );
+    let resolved = if uses_node_esm_specifier_rules {
+        None
+    } else {
+        resolve_vue3_module_suffixed_file(
+            vue3_ts_resolution_candidates(candidate, None, true),
+            type_resolver,
+            probe_mode,
+        )
+    };
     if resolved.is_some()
         || uses_classic_specifier_rules
         || type_resolver.external_type_session.failure_epoch() != failure_epoch
@@ -346,13 +352,17 @@ fn resolve_vue3_type_import_path_with_probe_mode(
             type_resolver,
         ) {
             Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-            Vue3PackageJsonTypeResolution::Blocked => return None,
+            Vue3PackageJsonTypeResolution::Blocked
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
             Vue3PackageJsonTypeResolution::NoPackageJson
             | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }
+    }
+    if uses_node_esm_specifier_rules {
+        return None;
     }
     resolve_vue3_module_suffixed_file(
         [

@@ -899,7 +899,8 @@ fn resolve_vue3_type_reference_package_candidate(
         type_resolver,
     ) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-        Vue3PackageJsonTypeResolution::Blocked => return None,
+        Vue3PackageJsonTypeResolution::Blocked
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
         | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
     }

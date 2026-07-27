@@ -341,8 +341,10 @@ impl Vue3TypeModuleResolutionKind {
     pub(crate) fn uses_node_esm_specifier_rules(
         self,
         resolution_mode: Vue3TypeResolutionMode,
+        typescript_version: &nodejs_semver::Version,
     ) -> bool {
-        matches!(self, Self::Node16 | Self::NodeNext)
+        typescript_version >= &(4, 7, 0).into()
+            && matches!(self, Self::Node16 | Self::NodeNext)
             && resolution_mode == Vue3TypeResolutionMode::Import
     }
 }

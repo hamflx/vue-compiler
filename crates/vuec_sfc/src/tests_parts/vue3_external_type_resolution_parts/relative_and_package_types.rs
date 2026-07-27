@@ -1584,19 +1584,39 @@ defineProps<RootProps & FeatureProps>()
         let importer = importer.to_string_lossy();
 
         assert_eq!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/feature", &legacy),
+            resolve_vue3_type_import_with_mode(
+                &importer,
+                "vuec-versioned-self/feature",
+                Vue3TypeResolutionMode::Require,
+                &legacy,
+            ),
             Some(fallback)
         );
         assert_eq!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/feature", &current),
+            resolve_vue3_type_import_with_mode(
+                &importer,
+                "vuec-versioned-self/feature",
+                Vue3TypeResolutionMode::Require,
+                &current,
+            ),
             Some(local)
         );
         assert_eq!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/excluded", &current),
+            resolve_vue3_type_import_with_mode(
+                &importer,
+                "vuec-versioned-self/excluded",
+                Vue3TypeResolutionMode::Require,
+                &current,
+            ),
             Some(excluded_fallback)
         );
         assert_eq!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/missing", &current),
+            resolve_vue3_type_import_with_mode(
+                &importer,
+                "vuec-versioned-self/missing",
+                Vue3TypeResolutionMode::Require,
+                &current,
+            ),
             Some(missing_fallback)
         );
         assert!(!legacy.external_type_session.metadata_is_blocked());
@@ -1697,6 +1717,248 @@ defineProps<ProjectProps>()
             );
             assert!(!resolver.external_type_session.metadata_is_blocked());
         }
+    }
+
+    #[test]
+    fn vue3_node_esm_package_root_index_fallback_requires_a_legacy_manifest() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        let importer = source_dir.join("entry.mts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+
+        let cases = [
+            ("no-manifest", None, false),
+            (
+                "missing-exports",
+                Some(r#"{"types":"missing.d.ts"}"#),
+                true,
+            ),
+            (
+                "null-exports",
+                Some(r#"{"types":"missing.d.ts","exports":null}"#),
+                true,
+            ),
+            (
+                "false-exports",
+                Some(r#"{"types":"missing.d.ts","exports":false}"#),
+                false,
+            ),
+            (
+                "zero-exports",
+                Some(r#"{"types":"missing.d.ts","exports":0}"#),
+                false,
+            ),
+            (
+                "negative-zero-exports",
+                Some(r#"{"types":"missing.d.ts","exports":-0.0}"#),
+                false,
+            ),
+            (
+                "empty-string-exports",
+                Some(r#"{"types":"missing.d.ts","exports":""}"#),
+                false,
+            ),
+        ];
+        let mut fixtures = Vec::new();
+        for (case, manifest, node_esm_uses_package_index) in cases {
+            let package_name = format!("vuec-esm-root-{case}");
+            let package = node_modules.join(&package_name);
+            std::fs::create_dir_all(&package).expect("create package directory");
+            if let Some(manifest) = manifest {
+                std::fs::write(package.join("package.json"), manifest)
+                    .expect("write package manifest");
+            }
+            let package_index = package.join("index.d.ts");
+            std::fs::write(&package_index, "export interface RootProps {}").expect("write index");
+
+            let types_package = node_modules.join("@types").join(&package_name);
+            std::fs::create_dir_all(&types_package).expect("create @types package");
+            std::fs::write(types_package.join("package.json"), r#"{"exports":null}"#)
+                .expect("write @types manifest");
+            let types_index = types_package.join("index.d.ts");
+            std::fs::write(&types_index, "export interface RootProps {}").expect("write @types index");
+
+            fixtures.push((
+                package_name,
+                package_index,
+                types_index,
+                node_esm_uses_package_index,
+            ));
+        }
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 3).into(),
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            for (package_name, package_index, types_index, node_esm_uses_package_index) in
+                fixtures.iter()
+            {
+                assert_eq!(
+                    resolve_vue3_type_import_with_mode(
+                        &importer.to_string_lossy(),
+                        package_name,
+                        Vue3TypeResolutionMode::Import,
+                        &resolver,
+                    ),
+                    Some(if *node_esm_uses_package_index {
+                        package_index.clone()
+                    } else {
+                        types_index.clone()
+                    }),
+                    "Node ESM root fallback for {package_name}"
+                );
+                assert_eq!(
+                    resolve_vue3_type_import_with_mode(
+                        &importer.to_string_lossy(),
+                        package_name,
+                        Vue3TypeResolutionMode::Require,
+                        &resolver,
+                    ),
+                    Some(package_index.clone()),
+                    "CommonJS root fallback for {package_name}"
+                );
+            }
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let bundler = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        for (package_name, package_index, _, _) in fixtures.iter() {
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    package_name,
+                    Vue3TypeResolutionMode::Import,
+                    &bundler,
+                ),
+                Some(package_index.clone()),
+                "Bundler root fallback for {package_name}"
+            );
+        }
+        assert!(!bundler.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_node_esm_package_subpaths_require_explicit_files_or_package_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-esm-subpath-fallback");
+        let folder = package.join("folder");
+        let nested = package.join("nested");
+        for directory in [&package, &folder, &nested] {
+            std::fs::create_dir_all(directory).expect("create package fixture");
+        }
+        std::fs::write(package.join("package.json"), "{}").expect("write package manifest");
+        let extensionless = package.join("extensionless.d.ts");
+        let explicit = package.join("explicit.d.ts");
+        let folder_index = folder.join("index.d.ts");
+        let nested_index = nested.join("index.d.ts");
+        for target in [&extensionless, &explicit, &folder_index, &nested_index] {
+            std::fs::write(target, "export interface SubpathProps {}").expect("write type file");
+        }
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{"types":"index.d.ts"}"#,
+        )
+        .expect("write nested package manifest");
+        let importer = dir.path().join("entry.mts");
+        std::fs::write(&importer, "export {};").expect("write importer");
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 3).into(),
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-esm-subpath-fallback/extensionless",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                None
+            );
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-esm-subpath-fallback/explicit.js",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                Some(explicit.clone())
+            );
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-esm-subpath-fallback/folder",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                None
+            );
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-esm-subpath-fallback/nested",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                Some(nested_index.clone())
+            );
+            for (source, expected) in [
+                ("vuec-esm-subpath-fallback/extensionless", &extensionless),
+                ("vuec-esm-subpath-fallback/folder", &folder_index),
+            ] {
+                assert_eq!(
+                    resolve_vue3_type_import_with_mode(
+                        &importer.to_string_lossy(),
+                        source,
+                        Vue3TypeResolutionMode::Require,
+                        &resolver,
+                    ),
+                    Some(expected.clone())
+                );
+            }
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let bundler = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        for (source, expected) in [
+            ("vuec-esm-subpath-fallback/extensionless", extensionless),
+            ("vuec-esm-subpath-fallback/folder", folder_index),
+            ("vuec-esm-subpath-fallback/nested", nested_index),
+        ] {
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    source,
+                    Vue3TypeResolutionMode::Import,
+                    &bundler,
+                ),
+                Some(expected)
+            );
+        }
+        assert!(!bundler.external_type_session.metadata_is_blocked());
     }
 
     #[test]
