@@ -24,6 +24,98 @@
         .expect("write NodeNext config");
     }
 
+    const VUE3_EXACT_PACKAGE_MAP_TARGET_CASES: [(&str, &str, Option<&str>); 6] = [
+        ("explicit-ts", "explicit-ts.js", Some("explicit-ts.ts")),
+        (
+            "explicit-dts",
+            "explicit-dts.js",
+            Some("explicit-dts.d.ts"),
+        ),
+        ("extensionless-ts", "extensionless-ts", None),
+        ("extensionless-dts", "extensionless-dts", None),
+        ("directory-manifest", "directory-manifest", None),
+        ("directory-index", "directory-index", None),
+    ];
+
+    fn vue3_exact_package_map(key_prefix: &str, target_dir: &str) -> serde_json::Value {
+        serde_json::Value::Object(
+            VUE3_EXACT_PACKAGE_MAP_TARGET_CASES
+                .iter()
+                .map(|(key, target, _)| {
+                    (
+                        format!("{key_prefix}{key}"),
+                        serde_json::Value::String(format!("./{target_dir}/{target}")),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn write_vue3_exact_package_map_targets(root: &Path) {
+        std::fs::create_dir_all(root).expect("create package-map target directory");
+        for name in [
+            "explicit-ts.ts",
+            "explicit-dts.d.ts",
+            "extensionless-ts.ts",
+            "extensionless-dts.d.ts",
+        ] {
+            std::fs::write(root.join(name), "export {};").expect("write package-map target");
+        }
+
+        let manifest_directory = root.join("directory-manifest");
+        std::fs::create_dir_all(&manifest_directory).expect("create manifest target directory");
+        std::fs::write(
+            manifest_directory.join("package.json"),
+            r#"{"types":"./entry.d.ts"}"#,
+        )
+        .expect("write nested target manifest");
+        std::fs::write(manifest_directory.join("entry.d.ts"), "export {};")
+            .expect("write nested manifest decoy");
+
+        let index_directory = root.join("directory-index");
+        std::fs::create_dir_all(&index_directory).expect("create index target directory");
+        for name in ["index.ts", "index.d.ts"] {
+            std::fs::write(index_directory.join(name), "export {};")
+                .expect("write directory index decoy");
+        }
+    }
+
+    fn assert_vue3_exact_package_map_targets(
+        importer: &Path,
+        source_prefix: &str,
+        target_root: &Path,
+    ) {
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+            Vue3TypeModuleResolutionKind::Bundler,
+        ] {
+            for resolution_mode in [
+                Vue3TypeResolutionMode::Import,
+                Vue3TypeResolutionMode::Require,
+            ] {
+                let resolver = Vue3TypeResolverContext {
+                    typescript_version: (6, 0, 3).into(),
+                    module_resolution,
+                    ..Vue3TypeResolverContext::default()
+                };
+                for (case, _, expected) in VUE3_EXACT_PACKAGE_MAP_TARGET_CASES {
+                    let expected = expected.map(|expected| target_root.join(expected));
+                    assert_eq!(
+                        resolve_vue3_type_import_with_mode(
+                            &importer.to_string_lossy(),
+                            &format!("{source_prefix}{case}"),
+                            resolution_mode,
+                            &resolver,
+                        ),
+                        expected,
+                        "{module_resolution:?} {resolution_mode:?} package-map target {source_prefix}{case}",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn vue3_compile_script_resolves_relative_imported_macro_types_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2668,6 +2760,83 @@ defineProps<OutputProps & DeclarationProps>()
                 .collect::<Vec<_>>()
         );
         assert!(vue3_possible_project_input_paths(Path::new("project/dist/entry.ts")).is_empty());
+    }
+
+    #[test]
+    fn vue3_dependency_exports_targets_resolve_only_exact_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let package_name = "vuec-exact-dependency-exports";
+        let package = dir.path().join("node_modules").join(package_name);
+        let targets = package.join("targets");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::create_dir_all(&package).expect("create dependency package");
+        write_vue3_exact_package_map_targets(&targets);
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::json!({
+                "exports": vue3_exact_package_map("./", "targets")
+            })
+            .to_string(),
+        )
+        .expect("write dependency exports manifest");
+        let importer = source_dir.join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write dependency importer");
+
+        assert_vue3_exact_package_map_targets(
+            &importer,
+            &format!("{package_name}/"),
+            &targets,
+        );
+    }
+
+    #[test]
+    fn vue3_relative_package_import_targets_resolve_only_exact_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let targets = dir.path().join("import-targets");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        write_vue3_exact_package_map_targets(&targets);
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::json!({
+                "name": "vuec-exact-relative-imports",
+                "imports": vue3_exact_package_map("#", "import-targets")
+            })
+            .to_string(),
+        )
+        .expect("write package imports manifest");
+        let importer = source_dir.join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write package imports importer");
+
+        assert_vue3_exact_package_map_targets(&importer, "#", &targets);
+    }
+
+    #[test]
+    fn vue3_self_name_export_targets_resolve_only_exact_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let package_name = "vuec-exact-self-name";
+        let targets = dir.path().join("self-targets");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        write_vue3_exact_package_map_targets(&targets);
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::json!({
+                "name": package_name,
+                "exports": vue3_exact_package_map("./", "self-targets")
+            })
+            .to_string(),
+        )
+        .expect("write self-name exports manifest");
+        let importer = source_dir.join("entry.ts");
+        std::fs::write(&importer, "export {};").expect("write self-name importer");
+
+        assert_vue3_exact_package_map_targets(
+            &importer,
+            &format!("{package_name}/"),
+            &targets,
+        );
     }
 
     #[test]

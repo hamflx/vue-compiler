@@ -1214,7 +1214,7 @@ fn vue3_package_export_type_path_with_mode(
     if !target.starts_with("./") {
         return None;
     }
-    vue3_package_type_target_path_with_mode(
+    vue3_package_map_target_path_with_mode(
         package_dir,
         target,
         resolution_mode,
@@ -1338,7 +1338,7 @@ fn vue3_package_type_field_path_with_mode(
     if !vue3_package_type_target_is_safe(target) {
         return None;
     }
-    vue3_package_type_target_path_with_mode(
+    vue3_legacy_package_target_path_with_mode(
         package_dir,
         target.trim_start_matches("./"),
         resolution_mode,
@@ -1361,10 +1361,37 @@ pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
     has_normal
 }
 
-fn vue3_package_type_target_path_with_mode(
+fn vue3_legacy_package_target_path_with_mode(
     package_dir: &Path,
     target: &str,
     resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let candidate = vue3_package_type_target_candidate(package_dir, target, type_resolver)?;
+    resolve_vue3_metadata_legacy_package_field_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    )
+}
+
+fn vue3_package_map_target_path_with_mode(
+    package_dir: &Path,
+    target: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let candidate = vue3_package_type_target_candidate(package_dir, target, type_resolver)?;
+    resolve_vue3_metadata_package_map_target_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    )
+}
+
+fn vue3_package_type_target_candidate(
+    package_dir: &Path,
+    target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -1379,10 +1406,5 @@ fn vue3_package_type_target_path_with_mode(
     if !vue3_package_type_target_is_safe(target) {
         return None;
     }
-    let candidate = normalize_path_components(package_dir.join(target));
-    resolve_vue3_metadata_package_target_path_with_mode(
-        &candidate,
-        resolution_mode,
-        type_resolver,
-    )
+    Some(normalize_path_components(package_dir.join(target)))
 }

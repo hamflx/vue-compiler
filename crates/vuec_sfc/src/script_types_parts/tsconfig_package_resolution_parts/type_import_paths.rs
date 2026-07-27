@@ -195,7 +195,7 @@ pub(crate) fn resolve_vue3_metadata_module_specifier_path_with_mode(
     )
 }
 
-pub(crate) fn resolve_vue3_metadata_package_target_path_with_mode(
+pub(crate) fn resolve_vue3_metadata_package_map_target_path_with_mode(
     candidate: &Path,
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
@@ -205,7 +205,21 @@ pub(crate) fn resolve_vue3_metadata_package_target_path_with_mode(
         resolution_mode,
         type_resolver,
         Vue3TypeImportPathProbeMode::Metadata,
-        Vue3TypeImportPathSemantics::PackageJsonTarget,
+        Vue3TypeImportPathSemantics::PackageMapTarget,
+    )
+}
+
+pub(crate) fn resolve_vue3_metadata_legacy_package_field_path_with_mode(
+    candidate: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_type_import_path_with_probe_mode(
+        candidate,
+        resolution_mode,
+        type_resolver,
+        Vue3TypeImportPathProbeMode::Metadata,
+        Vue3TypeImportPathSemantics::LegacyPackageField,
     )
 }
 
@@ -237,7 +251,8 @@ enum Vue3TypeImportPathProbeMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Vue3TypeImportPathSemantics {
     ModuleSpecifier,
-    PackageJsonTarget,
+    PackageMapTarget,
+    LegacyPackageField,
     BarePackageFallback,
     BarePackageFallbackWithoutManifest,
 }
@@ -323,22 +338,25 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         return None;
     }
     let uses_node_esm_specifier_rules = semantics
-        != Vue3TypeImportPathSemantics::PackageJsonTarget
+        != Vue3TypeImportPathSemantics::LegacyPackageField
         && type_resolver
             .module_resolution
             .uses_node_esm_specifier_rules(resolution_mode, &type_resolver.typescript_version);
+    let allows_appended_extensions = semantics != Vue3TypeImportPathSemantics::PackageMapTarget
+        && !uses_node_esm_specifier_rules;
     let uses_classic_specifier_rules = semantics
         == Vue3TypeImportPathSemantics::ModuleSpecifier
         && type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Classic;
     let extension = vue3_typescript_path_extension(candidate);
     let mut candidates = Vec::new();
     if let Some(extension) = extension {
-        if !matches!(
+        let has_supported_source_extension = matches!(
             extension,
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
-        ) {
+        );
+        if !has_supported_source_extension {
             candidates.push(arbitrary_extension_type_candidate(candidate, extension));
-            if !uses_node_esm_specifier_rules {
+            if allows_appended_extensions {
                 candidates.extend(vue3_ts_appended_resolution_candidates(candidate));
             }
         }
@@ -346,11 +364,18 @@ fn resolve_vue3_type_import_path_with_probe_mode(
             candidates.extend(vue3_ts_resolution_candidates(
                 candidate,
                 Some(extension),
-                !uses_node_esm_specifier_rules,
+                allows_appended_extensions,
             ));
         }
-        candidates.push(candidate.to_path_buf());
+        if semantics != Vue3TypeImportPathSemantics::PackageMapTarget
+            || has_supported_source_extension
+        {
+            candidates.push(candidate.to_path_buf());
+        }
         return resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
+    }
+    if semantics == Vue3TypeImportPathSemantics::PackageMapTarget {
+        return None;
     }
     if uses_node_esm_specifier_rules
         && semantics == Vue3TypeImportPathSemantics::ModuleSpecifier
@@ -811,16 +836,19 @@ mod vue3_type_import_candidate_tests {
             Some(entry)
         );
 
-        let package_target = dir.path().join("package-target.ts");
-        std::fs::write(&package_target, "export interface PackageTargetProps {}")
-            .expect("write package target");
+        let legacy_package_target = dir.path().join("package-target.ts");
+        std::fs::write(
+            &legacy_package_target,
+            "export interface PackageTargetProps {}",
+        )
+        .expect("write package target");
         assert_eq!(
-            resolve_vue3_metadata_package_target_path_with_mode(
+            resolve_vue3_metadata_legacy_package_field_path_with_mode(
                 &dir.path().join("package-target"),
                 Vue3TypeResolutionMode::Import,
                 &node_next,
             ),
-            Some(package_target)
+            Some(legacy_package_target)
         );
 
         let suffixed = dir.path().join("platform.native.ts");
@@ -838,6 +866,118 @@ mod vue3_type_import_candidate_tests {
                 &suffixed_node_next,
             ),
             Some(suffixed)
+        );
+    }
+
+    #[test]
+    fn package_map_targets_require_explicit_file_names_in_every_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let extensionless = dir.path().join("extensionless.ts");
+        std::fs::write(&extensionless, "export interface ExtensionlessProps {}")
+            .expect("write extensionless decoy");
+
+        let directory = dir.path().join("directory");
+        std::fs::create_dir_all(&directory).expect("create package target directory");
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"types":"manifest.d.ts"}"#,
+        )
+        .expect("write nested package manifest");
+        std::fs::write(
+            directory.join("manifest.d.ts"),
+            "export interface ManifestProps {}",
+        )
+        .expect("write nested manifest target");
+        std::fs::write(
+            directory.join("index.ts"),
+            "export interface IndexProps {}",
+        )
+        .expect("write directory index decoy");
+
+        let javascript = dir.path().join("javascript.d.ts");
+        let module = dir.path().join("module.d.mts");
+        let commonjs = dir.path().join("commonjs.d.cts");
+        let arbitrary = dir.path().join("styles.d.css.ts");
+        let declaration = dir.path().join("declaration.d.ts");
+        for path in [&javascript, &module, &commonjs, &arbitrary, &declaration] {
+            std::fs::write(path, "export interface Props {}")
+                .expect("write explicit package map target");
+        }
+        std::fs::write(
+            dir.path().join("appended.js.d.ts"),
+            "export interface AppendedProps {}",
+        )
+        .expect("write appended extension decoy");
+        std::fs::write(
+            dir.path().join("raw.css"),
+            "export interface RawProps {}",
+        )
+        .expect("write raw arbitrary extension decoy");
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+            Vue3TypeModuleResolutionKind::Bundler,
+        ] {
+            let resolver = resolver_with_module_resolution(module_resolution);
+            for resolution_mode in [
+                Vue3TypeResolutionMode::Import,
+                Vue3TypeResolutionMode::Require,
+            ] {
+                for candidate in [
+                    dir.path().join("extensionless"),
+                    directory.clone(),
+                    dir.path().join("appended.js"),
+                    dir.path().join("raw.css"),
+                ] {
+                    assert!(
+                        resolve_vue3_metadata_package_map_target_path_with_mode(
+                            &candidate,
+                            resolution_mode,
+                            &resolver,
+                        )
+                        .is_none(),
+                        "unexpected {module_resolution:?} {resolution_mode:?} package-map resolution: {}",
+                        candidate.display(),
+                    );
+                }
+                for (candidate, expected) in [
+                    (dir.path().join("javascript.js"), javascript.clone()),
+                    (dir.path().join("module.mjs"), module.clone()),
+                    (dir.path().join("commonjs.cjs"), commonjs.clone()),
+                    (dir.path().join("styles.css"), arbitrary.clone()),
+                    (declaration.clone(), declaration.clone()),
+                ] {
+                    assert_eq!(
+                        resolve_vue3_metadata_package_map_target_path_with_mode(
+                            &candidate,
+                            resolution_mode,
+                            &resolver,
+                        ),
+                        Some(expected),
+                        "{module_resolution:?} {resolution_mode:?}: {}",
+                        candidate.display(),
+                    );
+                }
+            }
+        }
+
+        let legacy = resolver_with_module_resolution(Vue3TypeModuleResolutionKind::NodeNext);
+        assert_eq!(
+            resolve_vue3_metadata_legacy_package_field_path_with_mode(
+                &dir.path().join("extensionless"),
+                Vue3TypeResolutionMode::Import,
+                &legacy,
+            ),
+            Some(extensionless),
+        );
+        assert_eq!(
+            resolve_vue3_metadata_legacy_package_field_path_with_mode(
+                &directory,
+                Vue3TypeResolutionMode::Import,
+                &legacy,
+            ),
+            Some(directory.join("manifest.d.ts")),
         );
     }
 

@@ -230,7 +230,7 @@ fn resolve_vue3_project_package_input_target_with_mode(
                 {
                     return None;
                 }
-                let resolved = resolve_vue3_metadata_package_target_path_with_mode(
+                let resolved = resolve_vue3_metadata_package_map_target_path_with_mode(
                     &candidate,
                     resolution_mode,
                     type_resolver,
