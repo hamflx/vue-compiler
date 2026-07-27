@@ -516,6 +516,8 @@ pub(crate) fn vue3_tsconfig_search_paths<'a>(
         "tsconfig.json",
         &type_resolver.external_type_session,
     )
+    .with_alternate_suffix("jsconfig.json")
+    .project_config()
     .filter(|candidate| {
         type_resolver
             .external_type_session
@@ -1217,6 +1219,9 @@ fn vue3_tsconfig_type_resolver_options_from_config(
                 type_resolver,
             )?;
             configured.inherit(inherited);
+        }
+        if config_path.file_name() == Some(std::ffi::OsStr::new("jsconfig.json")) {
+            configured.allow_js = Some(true);
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
@@ -4806,6 +4811,200 @@ mod vue3_module_suffix_config_tests {
             assert!(vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none());
             assert!(resolver.external_type_session.metadata_is_blocked());
         }
+    }
+
+    #[test]
+    fn project_config_search_prefers_nearest_files_and_stops_at_node_modules() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("tsconfig.json"), "{}")
+            .expect("write root TypeScript config");
+
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested project");
+        let nested_jsconfig = nested.join("jsconfig.json");
+        std::fs::write(&nested_jsconfig, "{}").expect("write nested JavaScript config");
+        let nested_resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            vue3_tsconfig_search_paths(
+                &nested.join("Comp.vue").to_string_lossy(),
+                &nested_resolver,
+            )
+            .next(),
+            Some(nested_jsconfig),
+        );
+        assert_eq!(
+            nested_resolver
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            2,
+        );
+
+        let same_dir = dir.path().join("same-dir");
+        std::fs::create_dir_all(&same_dir).expect("create same-directory project");
+        let same_tsconfig = same_dir.join("tsconfig.json");
+        std::fs::write(&same_tsconfig, "{}").expect("write same-directory TypeScript config");
+        std::fs::write(same_dir.join("jsconfig.json"), "{}")
+            .expect("write same-directory JavaScript config");
+        let same_dir_resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            vue3_tsconfig_search_paths(
+                &same_dir.join("Comp.vue").to_string_lossy(),
+                &same_dir_resolver,
+            )
+            .next(),
+            Some(same_tsconfig),
+        );
+        assert_eq!(
+            same_dir_resolver
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            1,
+        );
+
+        let dependency = dir.path().join("node_modules").join("package").join("src");
+        std::fs::create_dir_all(&dependency).expect("create dependency source directory");
+        let dependency_resolver = Vue3TypeResolverContext::default();
+        assert!(vue3_tsconfig_search_paths(
+            &dependency.join("Comp.vue").to_string_lossy(),
+            &dependency_resolver,
+        )
+        .next()
+        .is_none());
+        assert_eq!(
+            dependency_resolver
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            6,
+        );
+        assert!(!dependency_resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn jsconfig_defaults_allow_js_per_config_and_obeys_probe_budgets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let default_project = dir.path().join("default");
+        std::fs::create_dir_all(&default_project).expect("create default JavaScript project");
+        std::fs::write(default_project.join("jsconfig.json"), "{}")
+            .expect("write default JavaScript config");
+        let filename = default_project
+            .join("Comp.vue")
+            .to_string_lossy()
+            .to_string();
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(
+            vue3_tsconfig_type_resolver_options(&filename, &exact)
+                .expect("resolve JavaScript config at exact probe limit")
+                .allow_js
+        );
+        assert_eq!(
+            exact
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            2,
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_type_resolver_options(&filename, &short).is_none());
+        assert_eq!(
+            short
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            1,
+        );
+        assert!(short.external_type_session.metadata_is_blocked());
+
+        let inherited_project = dir.path().join("inherited");
+        std::fs::create_dir_all(&inherited_project)
+            .expect("create inherited JavaScript project");
+        std::fs::write(
+            inherited_project.join("base.json"),
+            r#"{"compilerOptions":{"allowJs":false}}"#,
+        )
+        .expect("write inherited JavaScript base config");
+        std::fs::write(
+            inherited_project.join("jsconfig.json"),
+            r#"{"extends":"./base.json"}"#,
+        )
+        .expect("write inherited JavaScript config");
+        let inherited = vue3_tsconfig_type_resolver_options(
+            &inherited_project.join("Comp.vue").to_string_lossy(),
+            &Vue3TypeResolverContext::default(),
+        )
+        .expect("resolve inherited JavaScript config");
+        assert!(inherited.allow_js);
+
+        let explicit_project = dir.path().join("explicit");
+        std::fs::create_dir_all(&explicit_project).expect("create explicit JavaScript project");
+        std::fs::write(
+            explicit_project.join("jsconfig.json"),
+            r#"{"compilerOptions":{"allowJs":false}}"#,
+        )
+        .expect("write explicit JavaScript config");
+        let explicit = vue3_tsconfig_type_resolver_options(
+            &explicit_project.join("Comp.vue").to_string_lossy(),
+            &Vue3TypeResolverContext::default(),
+        )
+        .expect("resolve explicit JavaScript config");
+        assert!(!explicit.allow_js);
+
+        let extended_project = dir.path().join("extended");
+        std::fs::create_dir_all(&extended_project).expect("create extended project");
+        std::fs::write(extended_project.join("jsconfig.json"), "{}")
+            .expect("write extended JavaScript config");
+        let child = extended_project.join("child");
+        std::fs::create_dir_all(&child).expect("create TypeScript child project");
+        std::fs::write(
+            child.join("tsconfig.json"),
+            r#"{"extends":"../jsconfig.json"}"#,
+        )
+        .expect("write TypeScript child config");
+        let extended = vue3_tsconfig_type_resolver_options(
+            &child.join("Comp.vue").to_string_lossy(),
+            &Vue3TypeResolverContext::default(),
+        )
+        .expect("resolve JavaScript config defaults through extends");
+        assert!(extended.allow_js);
+    }
+
+    #[test]
+    fn jsconfig_drives_path_resolution_and_resolver_options() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("src").join("aliased.d.ts");
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create JavaScript project source directory");
+        std::fs::write(&target, "export interface AliasedProps { value: string }")
+            .expect("write aliased declaration");
+        std::fs::write(
+            dir.path().join("jsconfig.json"),
+            r#"{
+                "compilerOptions":{
+                    "baseUrl":".",
+                    "paths":{"project-alias":["./src/aliased"]}
+                }
+            }"#,
+        )
+        .expect("write JavaScript project config");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = vue3_type_resolver_context_for_filename(&filename);
+
+        assert!(resolver.allow_js);
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "project-alias", &resolver),
+            Some(target),
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
     }
 
     #[test]

@@ -479,8 +479,11 @@ pub(crate) fn vue3_ancestor_search_candidate_weight(dir: &Path, suffix: &str) ->
 struct Vue3AncestorSearchPaths<'a> {
     current: Option<&'a Path>,
     suffix: &'static str,
+    alternate_suffix: Option<&'static str>,
+    emit_alternate_suffix: bool,
     remaining_depth: usize,
     stop_before_node_modules: bool,
+    stop_after_node_modules: bool,
     session: &'a Vue3ExternalTypeLoadSession,
 }
 
@@ -493,14 +496,27 @@ impl<'a> Vue3AncestorSearchPaths<'a> {
         Self {
             current,
             suffix,
+            alternate_suffix: None,
+            emit_alternate_suffix: false,
             remaining_depth: session.max_ancestor_search_depth(),
             stop_before_node_modules: false,
+            stop_after_node_modules: false,
             session,
         }
     }
 
+    fn with_alternate_suffix(mut self, suffix: &'static str) -> Self {
+        self.alternate_suffix = Some(suffix);
+        self
+    }
+
     fn package_scope(mut self) -> Self {
         self.stop_before_node_modules = true;
+        self
+    }
+
+    fn project_config(mut self) -> Self {
+        self.stop_after_node_modules = true;
         self
     }
 
@@ -517,28 +533,48 @@ impl Iterator for Vue3AncestorSearchPaths<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let dir = self.current.take()?;
-        if self.stop_before_node_modules
-            && dir
-                .file_name()
-                .is_some_and(vue3_path_component_is_node_modules)
+        let is_alternate = self.emit_alternate_suffix;
+        let is_node_modules = dir
+            .file_name()
+            .is_some_and(vue3_path_component_is_node_modules);
+        if !is_alternate
+            && self.stop_before_node_modules
+            && is_node_modules
         {
             return None;
         }
-        self.current = dir.parent();
-        if self.remaining_depth == 0 {
-            self.current = None;
+        if !is_alternate && self.remaining_depth == 0 {
             self.session.block_metadata();
             return None;
         }
-        self.remaining_depth -= 1;
-        if !self.session.claim_ancestor_search_dir(dir, self.suffix) {
+        if !is_alternate {
+            self.remaining_depth -= 1;
+        }
+        let suffix = if is_alternate {
+            self.alternate_suffix
+                .expect("alternate suffix emission requires a suffix")
+        } else {
+            self.suffix
+        };
+        let finished_dir = is_alternate || self.alternate_suffix.is_none();
+        if finished_dir {
+            self.current = (!self.stop_after_node_modules || !is_node_modules)
+                .then(|| dir.parent())
+                .flatten();
+            self.emit_alternate_suffix = false;
+        } else {
+            self.current = Some(dir);
+            self.emit_alternate_suffix = true;
+        }
+        if !self.session.claim_ancestor_search_dir(dir, suffix) {
             self.current = None;
+            self.emit_alternate_suffix = false;
             return None;
         }
-        Some(normalize_path_components(if self.suffix.is_empty() {
+        Some(normalize_path_components(if suffix.is_empty() {
             dir.to_path_buf()
         } else {
-            dir.join(self.suffix)
+            dir.join(suffix)
         }))
     }
 }
