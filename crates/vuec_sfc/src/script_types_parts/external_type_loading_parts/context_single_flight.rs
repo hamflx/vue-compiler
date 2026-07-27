@@ -344,6 +344,7 @@ mod context_single_flight_tests {
                 typescript_version: "5.0.0".into(),
                 module_resolution: Vue3TypeModuleResolutionKind::Node10,
                 module: Vue3TypeModuleKind::CommonJs,
+                allow_js: false,
                 package_json_features: Vue3PackageJsonResolutionFeatures::default(),
                 type_reference_package_json_features:
                     Vue3PackageJsonResolutionFeatures::default(),

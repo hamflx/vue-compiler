@@ -354,6 +354,7 @@ pub(crate) struct Vue3TypeResolverContext {
     pub(crate) typescript_version: nodejs_semver::Version,
     pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
     pub(crate) module: Option<Vue3TypeModuleKind>,
+    pub(crate) allow_js: bool,
     pub(crate) resolve_package_json_exports: Option<bool>,
     pub(crate) resolve_package_json_imports: Option<bool>,
     pub(crate) active_package_json_features: Option<Vue3PackageJsonResolutionFeatures>,
@@ -446,6 +447,7 @@ impl PartialEq for Vue3TypeResolverContext {
         self.typescript_version == other.typescript_version
             && self.module_resolution == other.module_resolution
             && self.effective_module() == other.effective_module()
+            && self.allow_js == other.allow_js
             && self.package_json_features() == other.package_json_features()
             && self.package_json_features_for_type_reference(false)
                 == other.package_json_features_for_type_reference(false)
@@ -466,6 +468,7 @@ impl Default for Vue3TypeResolverContext {
             typescript_version: vue3_package_typescript_baseline_version(),
             module_resolution: Vue3TypeModuleResolutionKind::default(),
             module: None,
+            allow_js: false,
             resolve_package_json_exports: None,
             resolve_package_json_imports: None,
             active_package_json_features: None,

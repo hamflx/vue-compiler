@@ -58,6 +58,8 @@ struct Vue3TsconfigInheritedResolverOptions {
     module: Option<Vue3TypeModuleKind>,
     module_resolution: Option<Vue3TypeModuleResolutionKind>,
     module_suffixes: Option<std::sync::Arc<[String]>>,
+    allow_js: Option<bool>,
+    check_js: Option<bool>,
     resolve_package_json_exports: Option<bool>,
     resolve_package_json_imports: Option<bool>,
     target: Option<Vue3TsconfigTargetKind>,
@@ -73,6 +75,12 @@ impl Vue3TsconfigInheritedResolverOptions {
         }
         if inherited.module_suffixes.is_some() {
             self.module_suffixes = inherited.module_suffixes;
+        }
+        if inherited.allow_js.is_some() {
+            self.allow_js = inherited.allow_js;
+        }
+        if inherited.check_js.is_some() {
+            self.check_js = inherited.check_js;
         }
         if inherited.resolve_package_json_exports.is_some() {
             self.resolve_package_json_exports = inherited.resolve_package_json_exports;
@@ -134,6 +142,7 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
     pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
     pub(crate) module: Vue3TypeModuleKind,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
+    pub(crate) allow_js: bool,
     pub(crate) resolve_package_json_exports: Option<bool>,
     pub(crate) resolve_package_json_imports: Option<bool>,
 }
@@ -1129,6 +1138,7 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
     }
     let resolve_package_json_exports = configured.resolve_package_json_exports;
     let resolve_package_json_imports = configured.resolve_package_json_imports;
+    let allow_js = configured.allow_js.unwrap_or(configured.check_js.unwrap_or(false));
     let module_suffixes = match configured.module_suffixes {
         Some(suffixes) if !suffixes.is_empty() => suffixes,
         Some(_) | None => vue3_default_module_suffixes(),
@@ -1137,6 +1147,7 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
         module_resolution,
         module,
         module_suffixes,
+        allow_js,
         resolve_package_json_exports,
         resolve_package_json_imports,
     })
@@ -1224,6 +1235,12 @@ fn vue3_tsconfig_type_resolver_options_from_config(
                     type_resolver,
                 )?);
             }
+        }
+        if let Some(value) = compiler_options.and_then(|options| options.get("allowJs")) {
+            configured.allow_js = Some(vue3_tsconfig_direct_bool(value, type_resolver)?);
+        }
+        if let Some(value) = compiler_options.and_then(|options| options.get("checkJs")) {
+            configured.check_js = Some(vue3_tsconfig_direct_bool(value, type_resolver)?);
         }
         if type_resolver.typescript_version >= (5, 0, 0).into() {
             if let Some(value) = compiler_options
@@ -4670,6 +4687,71 @@ mod vue3_module_suffix_config_tests {
         assert_eq!(resolver.effective_module(), Vue3TypeModuleKind::CommonJs);
         assert_eq!(resolver.external_type_session.stats().tsconfig_nodes, 4);
         assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn allow_js_and_check_js_inherit_independently_with_explicit_precedence() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("base.json"),
+            r#"{"compilerOptions":{"allowJs":true,"checkJs":false}}"#,
+        )
+        .expect("write base JavaScript config");
+        let cases = [
+            (
+                "inherited",
+                r#"{"extends":"../base.json"}"#,
+                true,
+            ),
+            (
+                "check-override",
+                r#"{
+                    "extends":"../base.json",
+                    "compilerOptions":{"checkJs":true}
+                }"#,
+                true,
+            ),
+            (
+                "allow-override",
+                r#"{
+                    "extends":"../base.json",
+                    "compilerOptions":{"allowJs":false,"checkJs":true}
+                }"#,
+                false,
+            ),
+            (
+                "check-only",
+                r#"{"compilerOptions":{"checkJs":true}}"#,
+                true,
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let project = dir.path().join(name);
+            std::fs::create_dir_all(&project).expect("create JavaScript option project");
+            std::fs::write(project.join("tsconfig.json"), source)
+                .expect("write JavaScript option config");
+            let filename = project.join("Comp.vue").to_string_lossy().to_string();
+            let resolver = vue3_type_resolver_context_for_filename(&filename);
+
+            assert_eq!(resolver.allow_js, expected, "{name}");
+            assert!(!resolver.external_type_session.metadata_is_blocked(), "{name}");
+        }
+    }
+
+    #[test]
+    fn invalid_allow_js_and_check_js_values_fail_closed() {
+        for source in [
+            r#"{"compilerOptions":{"allowJs":"true"}}"#,
+            r#"{"compilerOptions":{"checkJs":1}}"#,
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext::default();
+
+            assert!(vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
     }
 
     #[test]

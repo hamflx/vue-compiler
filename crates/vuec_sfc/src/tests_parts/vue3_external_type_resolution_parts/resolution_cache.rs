@@ -1099,6 +1099,7 @@
             + measuring.typescript_version.to_string().len()
             + std::mem::size_of::<Vue3TypeModuleResolutionKind>()
             + std::mem::size_of::<Vue3TypeModuleKind>()
+            + std::mem::size_of::<bool>()
             + std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2
             + measuring
                 .module_suffixes
@@ -1168,6 +1169,7 @@
                 .expect("parse long TypeScript version"),
             module_resolution: Vue3TypeModuleResolutionKind::Node10,
             module: None,
+            allow_js: false,
             resolve_package_json_exports: None,
             resolve_package_json_imports: None,
             active_package_json_features: None,
@@ -1263,6 +1265,90 @@
         let stats = entry_limited.external_type_session.stats();
         assert_eq!(stats.resolution_lookups, 4);
         assert_eq!(stats.resolution_cache_hits, 1);
+    }
+
+    #[test]
+    fn vue3_type_import_resolution_cache_isolates_allow_js_self_name_semantics() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let output_dir = dir.path().join("dist");
+        for directory in [&source_dir, &output_dir] {
+            std::fs::create_dir_all(directory).expect("create project directory");
+        }
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name":"vuec-allow-js-cache",
+                "exports":{
+                    ".":{
+                        "import":"./dist/runtime.js",
+                        "default":"./types.d.ts"
+                    }
+                }
+            }"#,
+        )
+        .expect("write self-name package manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions":{
+                    "module":"ESNext",
+                    "moduleResolution":"Bundler",
+                    "rootDir":"./src",
+                    "outDir":"./dist"
+                }
+            }"#,
+        )
+        .expect("write self-name project config");
+        let importer = source_dir.join("consumer.ts");
+        std::fs::write(&importer, "export {};").expect("write self-name importer");
+        let javascript = source_dir.join("runtime.js");
+        std::fs::write(&javascript, "export const runtime = true;")
+            .expect("write project JavaScript input");
+        let emitted_declaration = output_dir.join("runtime.d.ts");
+        std::fs::write(
+            &emitted_declaration,
+            "export interface EmittedDeclarationProps {}",
+        )
+        .expect("write emitted declaration");
+        std::fs::write(
+            dir.path().join("types.d.ts"),
+            "export interface FallbackDeclarationProps {}",
+        )
+        .expect("write declaration fallback");
+        let disabled = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        let enabled = Vue3TypeResolverContext {
+            allow_js: true,
+            ..disabled.clone()
+        };
+
+        assert_eq!(
+            resolve_vue3_type_import_with_mode(
+                &importer.to_string_lossy(),
+                "vuec-allow-js-cache",
+                Vue3TypeResolutionMode::Import,
+                &disabled,
+            ),
+            Some(emitted_declaration),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-allow-js-cache",
+                    Vue3TypeResolutionMode::Import,
+                    &enabled,
+                ),
+                Some(javascript.clone()),
+            );
+        }
+        let stats = disabled.external_type_session.stats();
+        assert_eq!(stats.resolution_lookups, 3);
+        assert_eq!(stats.resolution_cache_hits, 1);
+        assert!(!disabled.external_type_session.metadata_is_blocked());
     }
 
     #[test]

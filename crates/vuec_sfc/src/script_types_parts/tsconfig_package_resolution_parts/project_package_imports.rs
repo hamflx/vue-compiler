@@ -177,7 +177,6 @@ fn vue3_tsconfig_compiler_option_path(
     )
 }
 
-#[cfg(test)]
 fn resolve_vue3_project_package_input_target_with_mode(
     importer: &Path,
     package_dir: &Path,
@@ -296,15 +295,28 @@ fn resolve_vue3_package_relative_target_with_project_input(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    target.strip_prefix("./")?;
+    let input = emit_path_options.and_then(|(config_path, options)| {
+        resolve_vue3_project_package_input_target_with_mode(
+            importer,
+            package_dir,
+            target,
+            config_path,
+            options,
+            resolution_mode,
+            type_resolver,
+        )
+    });
+    if input.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
+        return input;
+    }
     for phase in [
         Vue3PackageResolutionPhase::Types,
         Vue3PackageResolutionPhase::JavaScript,
     ] {
-        let resolved = resolve_vue3_package_relative_target_with_project_input_for_phase(
-            importer,
+        let resolved = vue3_package_export_path_for_phase_with_mode(
             package_dir,
             target,
-            emit_path_options,
             resolution_mode,
             phase,
             type_resolver,

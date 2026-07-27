@@ -165,6 +165,7 @@ struct Vue3TypeResolverCacheIdentity {
     typescript_version: String,
     module_resolution: Vue3TypeModuleResolutionKind,
     module: Vue3TypeModuleKind,
+    allow_js: bool,
     package_json_features: Vue3PackageJsonResolutionFeatures,
     type_reference_package_json_features: Vue3PackageJsonResolutionFeatures,
     module_suffixes: std::sync::Arc<[String]>,
@@ -176,6 +177,7 @@ impl Vue3TypeResolverCacheIdentity {
             typescript_version: type_resolver.typescript_version.to_string(),
             module_resolution: type_resolver.module_resolution,
             module: type_resolver.effective_module(),
+            allow_js: type_resolver.allow_js,
             package_json_features: type_resolver.package_json_features(),
             type_reference_package_json_features: type_resolver
                 .package_json_features_for_type_reference(false),
@@ -189,6 +191,7 @@ impl Vue3TypeResolverCacheIdentity {
                 .len()
                 .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>())
                 .saturating_add(std::mem::size_of::<Vue3TypeModuleKind>())
+                .saturating_add(std::mem::size_of::<bool>())
                 .saturating_add(std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2),
             |weight, suffix| {
                 weight

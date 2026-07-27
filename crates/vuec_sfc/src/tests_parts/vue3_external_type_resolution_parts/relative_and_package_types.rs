@@ -2257,7 +2257,7 @@ defineProps<ProjectProps>()
     }
 
     #[test]
-    fn vue3_self_name_exports_finish_type_phase_before_javascript() {
+    fn vue3_dependency_self_name_exports_finish_type_phase_before_javascript_with_allow_js() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir
             .path()
@@ -2289,6 +2289,7 @@ defineProps<ProjectProps>()
             .expect("write declaration target");
         let resolver = Vue3TypeResolverContext {
             module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            allow_js: true,
             ..Vue3TypeResolverContext::default()
         };
 
@@ -2302,6 +2303,89 @@ defineProps<ProjectProps>()
             Some(declaration),
         );
         assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_project_self_name_allow_js_prefers_input_javascript_per_export_target() {
+        for (name, javascript_options, expected_allow_js) in [
+            ("default", "", false),
+            ("allow", r#", "allowJs": true"#, true),
+            ("check", r#", "checkJs": true"#, true),
+            (
+                "explicit-disable",
+                r#", "allowJs": false, "checkJs": true"#,
+                false,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source_dir = dir.path().join("src");
+            let output_dir = dir.path().join("dist");
+            for directory in [&source_dir, &output_dir] {
+                std::fs::create_dir_all(directory).expect("create project directory");
+            }
+            std::fs::write(
+                dir.path().join("package.json"),
+                r#"{
+                    "name":"vuec-allow-js-self",
+                    "exports":{
+                        ".":{
+                            "import":"./dist/runtime.js",
+                            "default":"./types.d.ts"
+                        }
+                    }
+                }"#,
+            )
+            .expect("write self-name package manifest");
+            std::fs::write(
+                dir.path().join("tsconfig.json"),
+                format!(
+                    r#"{{
+                        "compilerOptions":{{
+                            "module":"ESNext",
+                            "moduleResolution":"Bundler",
+                            "rootDir":"./src",
+                            "outDir":"./dist"{javascript_options}
+                        }}
+                    }}"#,
+                ),
+            )
+            .expect("write self-name project config");
+            let importer = source_dir.join("consumer.ts");
+            std::fs::write(&importer, "export {};").expect("write self-name importer");
+            let javascript = source_dir.join("runtime.js");
+            std::fs::write(&javascript, "export const runtime = true;")
+                .expect("write project JavaScript input");
+            let emitted_declaration = output_dir.join("runtime.d.ts");
+            std::fs::write(
+                &emitted_declaration,
+                "export interface EmittedDeclarationProps {}",
+            )
+            .expect("write emitted declaration");
+            std::fs::write(
+                dir.path().join("types.d.ts"),
+                "export interface FallbackDeclarationProps {}",
+            )
+            .expect("write declaration fallback");
+            let resolver =
+                vue3_type_resolver_context_for_filename(&importer.to_string_lossy());
+
+            assert_eq!(resolver.allow_js, expected_allow_js, "{name}");
+            assert_eq!(
+                resolve_vue3_type_import_with_mode(
+                    &importer.to_string_lossy(),
+                    "vuec-allow-js-self",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                ),
+                Some(if expected_allow_js {
+                    javascript
+                } else {
+                    emitted_declaration
+                }),
+                "{name}",
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked(), "{name}");
+        }
     }
 
     #[test]

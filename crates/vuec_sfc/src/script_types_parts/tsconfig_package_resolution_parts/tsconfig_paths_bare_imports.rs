@@ -626,6 +626,7 @@ pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3Typ
         type_resolver.module_resolution = options.module_resolution;
         type_resolver.module = Some(options.module);
         type_resolver.module_suffixes = options.module_suffixes;
+        type_resolver.allow_js = options.allow_js;
         type_resolver.resolve_package_json_exports = options.resolve_package_json_exports;
         type_resolver.resolve_package_json_imports = options.resolve_package_json_imports;
     } else {

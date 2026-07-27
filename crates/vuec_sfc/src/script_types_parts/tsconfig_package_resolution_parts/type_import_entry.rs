@@ -354,10 +354,20 @@ fn resolve_vue3_package_self_reference_with_mode(
             .and_then(|object| object.get("."))
             .is_some_and(serde_json::Value::is_null);
 
-    for phase in [
-        Vue3PackageResolutionPhase::Types,
-        Vue3PackageResolutionPhase::JavaScript,
-    ] {
+    // Project JS inputs must beat their emitted declarations within each export target.
+    let single_pass = type_resolver.allow_js
+        && !vue3_path_contains_node_modules(
+            filename.parent().unwrap_or_else(|| Path::new("")),
+        );
+    let passes: &[Option<Vue3PackageResolutionPhase>] = if single_pass {
+        &[None]
+    } else {
+        &[
+            Some(Vue3PackageResolutionPhase::Types),
+            Some(Vue3PackageResolutionPhase::JavaScript),
+        ]
+    };
+    for phase in passes.iter().copied() {
         let mut resolved = None;
         let result = visit_vue3_package_exports_type_targets(
             exports,
@@ -366,7 +376,7 @@ fn resolve_vue3_package_self_reference_with_mode(
             type_resolver,
             &mut |target| {
                 let failure_epoch = type_resolver.external_type_session.failure_epoch();
-                let candidate =
+                let candidate = if let Some(phase) = phase {
                     resolve_vue3_package_relative_target_with_project_input_for_phase(
                         &filename,
                         &package_dir,
@@ -375,7 +385,17 @@ fn resolve_vue3_package_self_reference_with_mode(
                         resolution_mode,
                         phase,
                         type_resolver,
-                    );
+                    )
+                } else {
+                    resolve_vue3_package_relative_target_with_project_input(
+                        &filename,
+                        &package_dir,
+                        target,
+                        emit_path_options.as_ref(),
+                        resolution_mode,
+                        type_resolver,
+                    )
+                };
                 if type_resolver.external_type_session.metadata_is_blocked()
                     || type_resolver.external_type_session.failure_epoch() != failure_epoch
                 {
