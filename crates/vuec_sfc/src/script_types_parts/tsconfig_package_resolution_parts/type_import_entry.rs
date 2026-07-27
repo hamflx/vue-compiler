@@ -196,7 +196,11 @@ fn resolve_vue3_package_imports_with_mode(
             return Vue3PackageImportsResolution::Blocked;
         }
     };
-    let Some(imports) = manifest.imports.as_ref().filter(|imports| !imports.is_null()) else {
+    let Some(imports) = manifest
+        .imports
+        .as_ref()
+        .filter(|imports| vue3_package_json_value_is_truthy(imports))
+    else {
         return Vue3PackageImportsResolution::Rejected;
     };
     let is_project_package = !vue3_path_contains_node_modules(&package_dir);
@@ -313,7 +317,11 @@ fn resolve_vue3_package_self_reference_with_mode(
     if manifest.name.as_deref() != Some(package_name.as_str()) {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     }
-    let Some(exports) = manifest.exports.as_ref().filter(|exports| !exports.is_null()) else {
+    let Some(exports) = manifest
+        .exports
+        .as_ref()
+        .filter(|exports| vue3_package_json_value_is_truthy(exports))
+    else {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     };
     let emit_path_options = if vue3_path_contains_node_modules(&package_dir) {

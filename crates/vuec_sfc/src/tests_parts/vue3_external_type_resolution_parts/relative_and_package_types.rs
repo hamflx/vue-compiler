@@ -1666,27 +1666,37 @@ defineProps<ProjectProps>()
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir.path().join("node_modules").join("vuec-self-legacy");
         std::fs::create_dir_all(&package).expect("create legacy self package");
-        std::fs::write(
-            package.join("package.json"),
-            r#"{"name":"vuec-self-legacy","exports":null}"#,
-        )
-        .expect("write legacy self manifest");
         let importer = package.join("index.d.ts");
         let leaf = package.join("leaf.d.ts");
         std::fs::write(&importer, "export {};").expect("write legacy self importer");
         std::fs::write(&leaf, "export interface LegacyProps { value: string }")
             .expect("write legacy self leaf");
-        let resolver = Vue3TypeResolverContext::default();
 
-        assert_eq!(
-            resolve_vue3_type_import(
-                &importer.to_string_lossy(),
-                "vuec-self-legacy/leaf",
-                &resolver,
-            ),
-            Some(leaf)
-        );
-        assert!(!resolver.external_type_session.metadata_is_blocked());
+        for exports in [
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(-0.0),
+            serde_json::json!(""),
+        ] {
+            let manifest = serde_json::json!({
+                "name": "vuec-self-legacy",
+                "exports": exports,
+            });
+            std::fs::write(package.join("package.json"), manifest.to_string())
+                .expect("write legacy self manifest");
+            let resolver = Vue3TypeResolverContext::default();
+            assert_eq!(
+                resolve_vue3_type_import(
+                    &importer.to_string_lossy(),
+                    "vuec-self-legacy/leaf",
+                    &resolver,
+                ),
+                Some(leaf.clone()),
+                "{manifest}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn resolve_vue3_package_json_type_entry_with_exports(
             .exports
             .as_ref()
             .zip(exports_mode)
-            .filter(|(exports, _)| !exports.is_null())
+            .filter(|(exports, _)| vue3_package_json_value_is_truthy(exports))
         {
             return resolve_vue3_package_exports_type_path(
                 package_dir,
@@ -848,6 +848,16 @@ fn vue3_package_null_target_stops_fallback(
 ) -> bool {
     // TypeScript 6 made null a terminal empty SearchResult; older releases try the next target.
     type_resolver.typescript_version >= (6, 0, 0).into()
+}
+
+fn vue3_package_json_value_is_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+    }
 }
 
 fn vue3_package_target_is_safe(

@@ -1188,7 +1188,7 @@ fn vue3_package_exports_reject_forbidden_path_segments() {
 }
 
 #[test]
-fn vue3_non_null_package_exports_block_legacy_root_fallback() {
+fn vue3_truthy_package_exports_block_legacy_root_fallback() {
     let dir = tempfile::tempdir().expect("temp dir");
     for (name, manifest) in [
         (
@@ -1199,6 +1199,14 @@ fn vue3_non_null_package_exports_block_legacy_root_fallback() {
         (
             "subpath-only",
             r#"{"types":"index.d.ts","exports":{"./feature":"./feature.d.ts"}}"#,
+        ),
+        (
+            "boolean-exports",
+            r#"{"types":"index.d.ts","exports":true}"#,
+        ),
+        (
+            "numeric-exports",
+            r#"{"types":"index.d.ts","exports":1}"#,
         ),
     ] {
         let package_dir = dir.path().join(name);
@@ -1237,19 +1245,26 @@ fn vue3_non_null_package_exports_block_legacy_root_fallback() {
         );
     }
 
-    let null_exports = dir.path().join("null-exports");
-    write_vue3_test_type_package(
-        &null_exports,
-        r#"{"types":"index.d.ts","exports":null}"#,
-    );
-    assert_eq!(
-        resolve_vue3_package_json_type_entry(
-            &null_exports,
-            None,
-            &Vue3TypeResolverContext::default(),
-        ),
-        Vue3PackageJsonTypeResolution::Resolved(null_exports.join("index.d.ts"))
-    );
+    for (name, exports) in [
+        ("null-exports", serde_json::Value::Null),
+        ("false-exports", serde_json::json!(false)),
+        ("zero-exports", serde_json::json!(0)),
+        ("negative-zero-exports", serde_json::json!(-0.0)),
+        ("empty-string-exports", serde_json::json!("")),
+    ] {
+        let package_dir = dir.path().join(name);
+        let manifest = serde_json::json!({ "types": "index.d.ts", "exports": exports });
+        write_vue3_test_type_package(&package_dir, &manifest.to_string());
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(
+                &package_dir,
+                None,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(package_dir.join("index.d.ts")),
+            "{name}"
+        );
+    }
 }
 
 #[test]
