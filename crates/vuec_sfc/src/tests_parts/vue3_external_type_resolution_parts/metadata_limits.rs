@@ -1268,6 +1268,89 @@ fn vue3_truthy_package_exports_block_legacy_root_fallback() {
 }
 
 #[test]
+fn vue3_package_type_fields_follow_typescript_precedence() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("type-fields");
+    std::fs::create_dir_all(&package_dir).expect("create type field package");
+    for (name, declaration) in [
+        ("typings.d.ts", "export type Selected = 'typings'"),
+        ("types.d.ts", "export type Selected = 'types'"),
+        ("main.d.ts", "export type Selected = 'main'"),
+    ] {
+        std::fs::write(package_dir.join(name), declaration).expect("write type field target");
+    }
+
+    let cases = [
+        (
+            "typings-before-types",
+            serde_json::json!({
+                "typings": "typings.d.ts",
+                "types": "types.d.ts",
+                "main": "main.js",
+            }),
+            Vue3PackageJsonTypeResolution::Resolved(package_dir.join("typings.d.ts")),
+        ),
+        (
+            "empty-typings",
+            serde_json::json!({
+                "typings": "",
+                "types": "types.d.ts",
+                "main": "main.js",
+            }),
+            Vue3PackageJsonTypeResolution::Resolved(package_dir.join("types.d.ts")),
+        ),
+        (
+            "non-string-type-fields",
+            serde_json::json!({
+                "typings": false,
+                "types": 0,
+                "main": "main.js",
+            }),
+            Vue3PackageJsonTypeResolution::Resolved(package_dir.join("main.d.ts")),
+        ),
+        (
+            "missing-typings",
+            serde_json::json!({
+                "typings": "missing.d.ts",
+                "types": "types.d.ts",
+                "main": "main.js",
+            }),
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+        ),
+        (
+            "missing-types",
+            serde_json::json!({
+                "types": "missing.d.ts",
+                "main": "main.js",
+            }),
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+        ),
+        (
+            "empty-type-fields",
+            serde_json::json!({
+                "typings": "",
+                "types": "",
+                "main": "",
+            }),
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntry,
+        ),
+    ];
+    for (name, manifest, expected) in cases {
+        std::fs::write(package_dir.join("package.json"), manifest.to_string())
+            .expect("write type field manifest");
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(
+                &package_dir,
+                None,
+                &Vue3TypeResolverContext::default(),
+            ),
+            expected,
+            "{name}: {manifest}"
+        );
+    }
+}
+
+#[test]
 fn vue3_bare_package_subpaths_cannot_escape_package_root() {
     assert_eq!(
         vue3_package_import_parts("package/feature/item"),

@@ -348,22 +348,9 @@ fn resolve_vue3_package_json_type_entry_with_exports(
         }
     }
     let root_type_target = if subpath.is_none() {
-        manifest
-            .types
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                manifest
-                    .typings
-                    .as_ref()
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                manifest
-                    .main
-                    .as_ref()
-                    .and_then(serde_json::Value::as_str)
-            })
+        vue3_package_json_path_field(manifest.typings.as_ref())
+            .or_else(|| vue3_package_json_path_field(manifest.types.as_ref()))
+            .or_else(|| vue3_package_json_path_field(manifest.main.as_ref()))
     } else {
         None
     };
@@ -858,6 +845,12 @@ fn vue3_package_json_value_is_truthy(value: &serde_json::Value) -> bool {
         serde_json::Value::String(value) => !value.is_empty(),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
     }
+}
+
+fn vue3_package_json_path_field(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 fn vue3_package_target_is_safe(
