@@ -341,13 +341,7 @@ pub(crate) fn resolve_vue3_package_json_type_reference_entry(
     let enable_exports = type_resolver
         .package_json_features_for_type_reference(resolution_mode.is_some())
         .exports;
-    let exports_mode = resolution_mode.or(match type_resolver.module_resolution {
-        Vue3TypeModuleResolutionKind::Bundler => Some(Vue3TypeResolutionMode::Import),
-        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext => {
-            Some(Vue3TypeResolutionMode::Require)
-        }
-        Vue3TypeModuleResolutionKind::Classic | Vue3TypeModuleResolutionKind::Node10 => None,
-    });
+    let exports_mode = vue3_type_reference_package_resolution_mode(resolution_mode, type_resolver);
     resolve_vue3_package_json_type_entry_with_exports(
         package_dir,
         subpath,
@@ -355,8 +349,37 @@ pub(crate) fn resolve_vue3_package_json_type_reference_entry(
         exports_mode,
         true,
         enable_exports,
+        true,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_json_type_reference_directory_entry(
+    package_dir: &Path,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageJsonTypeResolution {
+    resolve_vue3_package_json_type_entry_with_exports(
+        package_dir,
+        None,
+        type_resolver,
+        vue3_type_reference_package_resolution_mode(resolution_mode, type_resolver),
+        true,
+        false,
         false,
     )
+}
+
+fn vue3_type_reference_package_resolution_mode(
+    resolution_mode: Option<Vue3TypeResolutionMode>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3TypeResolutionMode> {
+    resolution_mode.or(match type_resolver.module_resolution {
+        Vue3TypeModuleResolutionKind::Bundler => Some(Vue3TypeResolutionMode::Import),
+        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext => {
+            Some(Vue3TypeResolutionMode::Require)
+        }
+        Vue3TypeModuleResolutionKind::Classic | Vue3TypeModuleResolutionKind::Node10 => None,
+    })
 }
 
 fn resolve_vue3_package_json_type_entry_with_exports(

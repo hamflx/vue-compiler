@@ -595,6 +595,7 @@ fn resolve_vue3_type_reference_directive_uncached(
     let primary = resolve_vue3_tsconfig_named_type_global_type_file(
         &type_roots,
         &normalized_type_name,
+        resolution_mode,
         type_resolver,
     );
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -608,7 +609,14 @@ fn resolve_vue3_type_reference_directive_uncached(
             .parent()
             .unwrap_or_else(|| Path::new(""));
         let candidate = normalize_path_components(base.join(normalized_type_name));
-        resolve_vue3_type_reference_package_candidate(&candidate, None, true, None, type_resolver)
+        resolve_vue3_type_reference_package_candidate(
+            &candidate,
+            None,
+            true,
+            Vue3TypeReferenceLookupKind::Relative,
+            resolution_mode,
+            type_resolver,
+        )
     } else {
         resolve_vue3_bare_type_reference(
             containing_filename,
@@ -766,6 +774,7 @@ fn vue3_tsconfig_type_roots_override_from_config(
 fn resolve_vue3_tsconfig_named_type_global_type_file(
     type_roots: &Vue3TsconfigTypeRoots,
     type_name: &str,
+    resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_name.is_empty() {
@@ -791,7 +800,8 @@ fn resolve_vue3_tsconfig_named_type_global_type_file(
             &package_dir,
             None,
             type_roots.is_explicit,
-            None,
+            Vue3TypeReferenceLookupKind::TypeRoot,
+            resolution_mode,
             type_resolver,
         );
         if type_resolver.external_type_session.metadata_is_blocked() {
@@ -842,6 +852,7 @@ fn resolve_vue3_bare_type_reference(
             &package_dir,
             subpath.as_deref(),
             true,
+            Vue3TypeReferenceLookupKind::NodeModules,
             resolution_mode,
             type_resolver,
         );
@@ -856,6 +867,7 @@ fn resolve_vue3_bare_type_reference(
             &types_package_dir,
             subpath.as_deref(),
             true,
+            Vue3TypeReferenceLookupKind::NodeModules,
             resolution_mode,
             type_resolver,
         );
@@ -869,22 +881,46 @@ fn resolve_vue3_bare_type_reference(
     None
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Vue3TypeReferenceLookupKind {
+    TypeRoot,
+    Relative,
+    NodeModules,
+}
+
 fn resolve_vue3_type_reference_package_candidate(
     package_dir: &Path,
     subpath: Option<&str>,
     allow_direct_file: bool,
+    lookup_kind: Vue3TypeReferenceLookupKind,
     resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    let uses_node_esm_specifier_rules = resolution_mode.is_some_and(|resolution_mode| {
+        type_resolver
+            .module_resolution
+            .uses_node_esm_specifier_rules(
+                resolution_mode,
+                &type_resolver.typescript_version,
+            )
+    });
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
     if subpath.is_none() && allow_direct_file {
-        let direct =
-            resolve_vue3_metadata_type_reference_declaration_file(&candidate, type_resolver);
+        let direct = resolve_vue3_type_reference_direct_file_with_mode(
+            &candidate,
+            uses_node_esm_specifier_rules,
+            type_resolver,
+        );
         if direct.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
             return direct;
         }
+    }
+    if lookup_kind == Vue3TypeReferenceLookupKind::Relative
+        && uses_node_esm_specifier_rules
+    {
+        return None;
     }
     if !type_resolver
         .external_type_session
@@ -892,25 +928,45 @@ fn resolve_vue3_type_reference_package_candidate(
     {
         return None;
     }
-    match resolve_vue3_package_json_type_reference_entry(
-        package_dir,
-        subpath,
-        resolution_mode,
-        type_resolver,
-    ) {
-        Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
-        Vue3PackageJsonTypeResolution::Blocked
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => return None,
-        Vue3PackageJsonTypeResolution::NoPackageJson
-        | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
-    }
+    let allow_candidate_manifest = if lookup_kind == Vue3TypeReferenceLookupKind::NodeModules {
+        match resolve_vue3_package_json_type_reference_entry(
+            package_dir,
+            subpath,
+            resolution_mode,
+            type_resolver,
+        ) {
+            Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
+            Vue3PackageJsonTypeResolution::Blocked
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex => return None,
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => false,
+            Vue3PackageJsonTypeResolution::NoPackageJson
+                if subpath.is_none() && uses_node_esm_specifier_rules =>
+            {
+                return None;
+            }
+            Vue3PackageJsonTypeResolution::NoPackageJson => true,
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+                if subpath.is_none() && uses_node_esm_specifier_rules =>
+            {
+                return resolve_vue3_metadata_type_reference_declaration_file(
+                    &candidate.join("index.js"),
+                    type_resolver,
+                );
+            }
+            Vue3PackageJsonTypeResolution::NoPackageTypeEntry => true,
+        }
+    } else {
+        true
+    };
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
     if subpath.is_some() {
-        let direct =
-            resolve_vue3_metadata_type_reference_declaration_file(&candidate, type_resolver);
+        let direct = resolve_vue3_type_reference_direct_file_with_mode(
+            &candidate,
+            uses_node_esm_specifier_rules,
+            type_resolver,
+        );
         if direct.is_some() || type_resolver.external_type_session.metadata_is_blocked() {
             return direct;
         }
@@ -921,10 +977,44 @@ fn resolve_vue3_type_reference_package_candidate(
     {
         return None;
     }
+    let resolve_candidate_manifest = lookup_kind != Vue3TypeReferenceLookupKind::NodeModules
+        || (subpath.is_some() && allow_candidate_manifest);
+    if resolve_candidate_manifest {
+        match resolve_vue3_package_json_type_reference_directory_entry(
+            &candidate,
+            resolution_mode,
+            type_resolver,
+        ) {
+            Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
+            Vue3PackageJsonTypeResolution::Blocked
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutIndex
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntryWithoutNestedManifest => {
+                return None;
+            }
+            Vue3PackageJsonTypeResolution::NoPackageJson
+            | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
+        }
+    }
+    if type_resolver.external_type_session.metadata_is_blocked()
+        || uses_node_esm_specifier_rules
+    {
+        return None;
+    }
     resolve_vue3_metadata_type_reference_declaration_file(
         &candidate.join("index"),
         type_resolver,
     )
+}
+
+fn resolve_vue3_type_reference_direct_file_with_mode(
+    candidate: &Path,
+    uses_node_esm_specifier_rules: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if uses_node_esm_specifier_rules && vue3_typescript_path_extension(candidate).is_none() {
+        return None;
+    }
+    resolve_vue3_metadata_type_reference_declaration_file(candidate, type_resolver)
 }
 
 fn vue3_tsconfig_module_resolution_from_config(
@@ -2602,6 +2692,44 @@ mod vue3_type_reference_directive_tests {
         }
     }
 
+    fn assert_node_type_reference_modes(
+        project: &Path,
+        containing: &Path,
+        type_name: &str,
+        import_expected: Option<&Path>,
+        require_expected: Option<&Path>,
+    ) {
+        let project = project.to_string_lossy();
+        let containing = containing.to_string_lossy();
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+        ] {
+            for (mode, expected) in [
+                (Vue3TypeResolutionMode::Import, import_expected),
+                (Vue3TypeResolutionMode::Require, require_expected),
+            ] {
+                let resolver = Vue3TypeResolverContext {
+                    typescript_version: (6, 0, 3).into(),
+                    module_resolution,
+                    ..Vue3TypeResolverContext::default()
+                };
+                let actual = resolve_vue3_type_reference_directive_with_mode(
+                    &project,
+                    &containing,
+                    type_name,
+                    Some(mode),
+                    &resolver,
+                );
+                assert_eq!(
+                    actual.as_deref(),
+                    expected,
+                    "{module_resolution:?} {mode:?} type reference {type_name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn reference_types_uses_effective_extended_type_roots() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -3527,14 +3655,15 @@ mod vue3_type_reference_directive_tests {
     }
 
     #[test]
-    fn reference_types_resolution_modes_do_not_override_primary_type_roots() {
+    fn reference_types_node_esm_primary_type_roots_match_typescript() {
         let dir = tempfile::tempdir().expect("temp dir");
         let project_dir = dir.path().join("project");
-        let package_dir = project_dir.join("types").join("primary-reference");
+        let type_root = project_dir.join("types");
+        let package_dir = type_root.join("primary-reference");
         std::fs::create_dir_all(&package_dir).expect("create package directory");
         std::fs::write(
             project_dir.join("tsconfig.json"),
-            r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+            r#"{"compilerOptions":{"types":[],"typeRoots":["./types"]}}"#,
         )
         .expect("write project config");
         std::fs::write(
@@ -3560,22 +3689,242 @@ mod vue3_type_reference_directive_tests {
         std::fs::write(package_dir.join("require.d.cts"), "interface RequireDecoy {}")
             .expect("write require decoy");
         let filename = project_dir.join("Comp.vue");
-        let filename = filename.to_string_lossy();
-        let resolver = Vue3TypeResolverContext::default();
+        assert_node_type_reference_modes(
+            &filename,
+            &filename,
+            "primary-reference",
+            Some(legacy_entry.as_path()),
+            Some(legacy_entry.as_path()),
+        );
 
-        for mode in [
-            Vue3TypeResolutionMode::Import,
-            Vue3TypeResolutionMode::Require,
+        let index_package = type_root.join("index-only");
+        std::fs::create_dir_all(&index_package).expect("create index package");
+        let index = index_package.join("index.d.ts");
+        std::fs::write(&index, "interface PrimaryIndex {}").expect("write primary index");
+        assert_node_type_reference_modes(
+            &filename,
+            &filename,
+            "index-only",
+            None,
+            Some(index.as_path()),
+        );
+    }
+
+    #[test]
+    fn reference_types_node_esm_secondary_root_fallbacks_match_typescript() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let source_dir = project_dir.join("src");
+        let node_modules = project_dir.join("node_modules");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        let project = project_dir.join("Comp.vue");
+        let containing = source_dir.join("ambient.d.ts");
+        std::fs::write(&containing, "export {};").expect("write containing declaration");
+
+        let cases = [
+            ("no-manifest", None, false),
+            (
+                "missing-exports",
+                Some(r#"{"types":"./missing.d.ts"}"#),
+                true,
+            ),
+            (
+                "null-exports",
+                Some(r#"{"types":"./missing.d.ts","exports":null}"#),
+                true,
+            ),
+            (
+                "false-exports",
+                Some(r#"{"types":"./missing.d.ts","exports":false}"#),
+                false,
+            ),
+            (
+                "zero-exports",
+                Some(r#"{"types":"./missing.d.ts","exports":0}"#),
+                false,
+            ),
+            (
+                "empty-string-exports",
+                Some(r#"{"types":"./missing.d.ts","exports":""}"#),
+                false,
+            ),
+        ];
+        for (case, manifest, import_uses_index) in cases {
+            let package_name = format!("vuec-reference-root-{case}");
+            let package_dir = node_modules.join(&package_name);
+            std::fs::create_dir_all(&package_dir).expect("create package directory");
+            if let Some(manifest) = manifest {
+                std::fs::write(package_dir.join("package.json"), manifest)
+                    .expect("write package manifest");
+            }
+            let index = package_dir.join("index.d.ts");
+            std::fs::write(&index, "interface RootReference {}").expect("write package index");
+
+            assert_node_type_reference_modes(
+                &project,
+                &containing,
+                &package_name,
+                import_uses_index.then_some(index.as_path()),
+                Some(index.as_path()),
+            );
+        }
+    }
+
+    #[test]
+    fn reference_types_node_esm_secondary_subpaths_match_typescript() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let source_dir = project_dir.join("src");
+        let node_modules = project_dir.join("node_modules");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        let project = project_dir.join("Comp.vue");
+        let containing = source_dir.join("ambient.d.ts");
+        std::fs::write(&containing, "export {};").expect("write containing declaration");
+
+        let package_name = "vuec-reference-subpaths";
+        let package_dir = node_modules.join(package_name);
+        let folder = package_dir.join("folder");
+        let nested = package_dir.join("nested");
+        for directory in [&package_dir, &folder, &nested] {
+            std::fs::create_dir_all(directory).expect("create package directory");
+        }
+        std::fs::write(package_dir.join("package.json"), "{}")
+            .expect("write package manifest");
+        let extensionless = package_dir.join("extensionless.d.ts");
+        let explicit = package_dir.join("explicit.d.ts");
+        let folder_index = folder.join("index.d.ts");
+        for entry in [&extensionless, &explicit, &folder_index] {
+            std::fs::write(entry, "interface SubpathReference {}").expect("write type entry");
+        }
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{"types":"./entry.d.ts"}"#,
+        )
+        .expect("write nested package manifest");
+        let nested_entry = nested.join("entry.d.ts");
+        std::fs::write(&nested_entry, "interface NestedReference {}")
+            .expect("write nested type entry");
+
+        for (subpath, import_expected, require_expected) in [
+            ("extensionless", None, Some(extensionless.as_path())),
+            (
+                "explicit.js",
+                Some(explicit.as_path()),
+                Some(explicit.as_path()),
+            ),
+            ("folder", None, Some(folder_index.as_path())),
+            (
+                "nested",
+                Some(nested_entry.as_path()),
+                Some(nested_entry.as_path()),
+            ),
         ] {
-            assert_eq!(
-                resolve_vue3_type_reference_directive_with_mode(
-                    &filename,
-                    &filename,
-                    "primary-reference",
-                    Some(mode),
-                    &resolver,
-                ),
-                Some(legacy_entry.clone()),
+            assert_node_type_reference_modes(
+                &project,
+                &containing,
+                &format!("{package_name}/{subpath}"),
+                import_expected,
+                require_expected,
+            );
+        }
+
+        for (case, exports) in [("null", "null"), ("false", "false")] {
+            let package_name = format!("vuec-reference-subpath-{case}-exports");
+            let package_dir = node_modules.join(&package_name);
+            let nested = package_dir.join("nested");
+            std::fs::create_dir_all(&nested).expect("create nested package directory");
+            std::fs::write(
+                package_dir.join("package.json"),
+                format!(r#"{{"exports":{exports}}}"#),
+            )
+            .expect("write root package manifest");
+            std::fs::write(
+                nested.join("package.json"),
+                r#"{"types":"./entry.d.ts"}"#,
+            )
+            .expect("write nested package manifest");
+            std::fs::write(nested.join("entry.d.ts"), "interface NestedEntry {}")
+                .expect("write nested package entry");
+            let nested_index = nested.join("index.d.ts");
+            std::fs::write(&nested_index, "interface NestedIndex {}").expect("write nested index");
+
+            assert_node_type_reference_modes(
+                &project,
+                &containing,
+                &format!("{package_name}/nested"),
+                None,
+                Some(nested_index.as_path()),
+            );
+        }
+    }
+
+    #[test]
+    fn reference_types_node_esm_relative_names_match_typescript() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let source_dir = project_dir.join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        let project = project_dir.join("Comp.vue");
+        let containing = source_dir.join("ambient.d.ts");
+        std::fs::write(&containing, "export {};").expect("write containing declaration");
+
+        let extensionless = source_dir.join("extensionless.d.ts");
+        let explicit = source_dir.join("explicit.d.ts");
+        let folder = source_dir.join("folder");
+        let nested = source_dir.join("nested");
+        std::fs::create_dir_all(&folder).expect("create relative folder");
+        std::fs::create_dir_all(&nested).expect("create relative nested package");
+        std::fs::write(&extensionless, "interface RelativeExtensionless {}")
+            .expect("write relative extensionless entry");
+        std::fs::write(&explicit, "interface RelativeExplicit {}")
+            .expect("write relative explicit entry");
+        let folder_index = folder.join("index.d.ts");
+        std::fs::write(&folder_index, "interface RelativeIndex {}")
+            .expect("write relative index");
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{"types":"./entry.d.ts"}"#,
+        )
+        .expect("write relative package manifest");
+        let nested_entry = nested.join("entry.d.ts");
+        std::fs::write(&nested_entry, "interface RelativeNested {}")
+            .expect("write relative package entry");
+
+        for (type_name, import_expected, require_expected) in [
+            (
+                "./extensionless",
+                None,
+                Some(extensionless.as_path()),
+            ),
+            (
+                "./explicit.js",
+                Some(explicit.as_path()),
+                Some(explicit.as_path()),
+            ),
+            ("./folder", None, Some(folder_index.as_path())),
+            ("./nested", None, Some(nested_entry.as_path())),
+        ] {
+            assert_node_type_reference_modes(
+                &project,
+                &containing,
+                type_name,
+                import_expected,
+                require_expected,
             );
         }
     }
