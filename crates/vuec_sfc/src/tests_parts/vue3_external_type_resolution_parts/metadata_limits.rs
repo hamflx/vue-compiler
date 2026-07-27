@@ -1200,14 +1200,6 @@ fn vue3_non_null_package_exports_block_legacy_root_fallback() {
             "subpath-only",
             r#"{"types":"index.d.ts","exports":{"./feature":"./feature.d.ts"}}"#,
         ),
-        (
-            "mixed-export-keys",
-            r#"{"types":"index.d.ts","exports":{".":"./index.d.ts","types":"./index.d.ts"}}"#,
-        ),
-        (
-            "numeric-export-condition",
-            r#"{"types":"index.d.ts","exports":{"types":"./index.d.ts","0":"./index.d.ts"}}"#,
-        ),
     ] {
         let package_dir = dir.path().join(name);
         write_vue3_test_type_package(&package_dir, manifest);
@@ -1218,6 +1210,29 @@ fn vue3_non_null_package_exports_block_legacy_root_fallback() {
                 &Vue3TypeResolverContext::default(),
             ),
             Vue3PackageJsonTypeResolution::Blocked,
+            "{name}"
+        );
+    }
+
+    for (name, manifest) in [
+        (
+            "mixed-export-keys",
+            r#"{"types":"legacy.d.ts","exports":{".":"./index.d.ts","types":"./legacy.d.ts"}}"#,
+        ),
+        (
+            "numeric-export-condition",
+            r#"{"types":"legacy.d.ts","exports":{"types":"./index.d.ts","0":"./legacy.d.ts"}}"#,
+        ),
+    ] {
+        let package_dir = dir.path().join(name);
+        write_vue3_test_type_package(&package_dir, manifest);
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(
+                &package_dir,
+                None,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Vue3PackageJsonTypeResolution::Resolved(package_dir.join("index.d.ts")),
             "{name}"
         );
     }
@@ -2351,7 +2366,7 @@ fn vue3_metadata_fanout_semantic_miss_does_not_block() {
 }
 
 #[test]
-fn vue3_package_condition_validation_and_fallback_are_fanout_bounded() {
+fn vue3_package_condition_scanning_and_fallback_are_fanout_bounded() {
     let conditions = serde_json::json!({
         "unknown": "./inactive.d.ts",
         "types": "./valid.d.ts"
@@ -2372,7 +2387,7 @@ fn vue3_package_condition_validation_and_fallback_are_fanout_bounded() {
     for (target, limit, expected, blocked) in [
         (&conditions, 2, Some("./valid.d.ts"), false),
         (&conditions, 1, None, true),
-        (&invalid, 3, None, false),
+        (&invalid, 3, Some("./valid.d.ts"), false),
         (&invalid, 2, None, true),
         (&rejected_then_valid, 2, Some("./valid.d.ts"), false),
         (&rejected_then_valid, 1, None, true),
@@ -2510,9 +2525,6 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         serde_json::json!({ "imports": { "#alias": null } }),
         serde_json::json!({ "imports": { "#alias": [] } }),
         serde_json::json!({ "imports": { "#alias": [null] } }),
-        serde_json::json!({
-            "imports": { "#alias": { "types": "./ok.d.mts", "0": "./ok.d.mts" } }
-        }),
         serde_json::json!({ "imports": { "#alias": true } }),
         serde_json::json!({ "imports": { "#alias": 1 } }),
         serde_json::json!({ "imports": { "#alias": "../outside.d.mts" } }),
@@ -2541,6 +2553,9 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
     }
 
     for manifest in [
+        serde_json::json!({
+            "imports": { "#alias": { "types": "./ok.d.mts", "0": "./missing.d.mts" } }
+        }),
         serde_json::json!({
             "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
         }),

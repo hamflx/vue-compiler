@@ -462,14 +462,7 @@ enum Vue3PackageTargetVisit {
     Missing,
     NullTarget,
     Invalid,
-    InvalidConfiguration,
     Blocked,
-}
-
-#[derive(Clone, Copy)]
-enum Vue3PackageExportsObjectKind {
-    Conditions,
-    Subpaths,
 }
 
 #[derive(Clone, Copy)]
@@ -552,13 +545,19 @@ fn visit_vue3_package_exports_type_targets(
             Vue3PackageTargetVisit::Missing
         };
     };
-    let Some(object_kind) = vue3_package_exports_object_kind(object) else {
-        return Vue3PackageTargetVisit::InvalidConfiguration;
-    };
-    if matches!(object_kind, Vue3PackageExportsObjectKind::Conditions) {
-        return if key == "." {
+    if key == "." {
+        return if object.keys().all(|key| !key.starts_with('.')) {
             visit_vue3_package_target(
                 exports,
+                resolution_mode,
+                Vue3PackageTargetExpansion::Exact,
+                Vue3PackageTargetKind::Exports,
+                type_resolver,
+                visitor,
+            )
+        } else if let Some(target) = object.get(".") {
+            visit_vue3_package_target(
+                target,
                 resolution_mode,
                 Vue3PackageTargetExpansion::Exact,
                 Vue3PackageTargetKind::Exports,
@@ -568,6 +567,9 @@ fn visit_vue3_package_exports_type_targets(
         } else {
             Vue3PackageTargetVisit::Missing
         };
+    }
+    if !object.keys().all(|key| key.starts_with('.')) {
+        return Vue3PackageTargetVisit::Missing;
     }
     if let Some(target) = object.get(&key) {
         return visit_vue3_package_target(
@@ -579,10 +581,6 @@ fn visit_vue3_package_exports_type_targets(
             visitor,
         );
     }
-    if key == "." {
-        return Vue3PackageTargetVisit::Missing;
-    }
-
     let mut selected = None;
     for (pattern, target) in object {
         if !type_resolver
@@ -812,15 +810,12 @@ fn visit_vue3_package_target(
     let Some(conditions) = target.as_object() else {
         return Vue3PackageTargetVisit::Invalid;
     };
-    for condition in conditions.keys() {
+    for _ in conditions.keys() {
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
         {
             return Vue3PackageTargetVisit::Blocked;
-        }
-        if vue3_package_condition_is_array_index(condition) {
-            return Vue3PackageTargetVisit::InvalidConfiguration;
         }
     }
     for (condition, target) in conditions {
@@ -853,35 +848,6 @@ fn vue3_package_null_target_stops_fallback(
 ) -> bool {
     // TypeScript 6 made null a terminal empty SearchResult; older releases try the next target.
     type_resolver.typescript_version >= (6, 0, 0).into()
-}
-
-fn vue3_package_exports_object_kind(
-    object: &serde_json::Map<String, serde_json::Value>,
-) -> Option<Vue3PackageExportsObjectKind> {
-    let mut keys = object.keys();
-    let Some(first) = keys.next() else {
-        return Some(Vue3PackageExportsObjectKind::Subpaths);
-    };
-    let first_is_subpath = first.starts_with('.');
-    if keys.any(|key| key.starts_with('.') != first_is_subpath) {
-        return None;
-    }
-    Some(if first_is_subpath {
-        Vue3PackageExportsObjectKind::Subpaths
-    } else {
-        Vue3PackageExportsObjectKind::Conditions
-    })
-}
-
-fn vue3_package_condition_is_array_index(condition: &str) -> bool {
-    if condition == "0" {
-        return true;
-    }
-    !condition.starts_with('0')
-        && condition.bytes().all(|byte| byte.is_ascii_digit())
-        && condition
-            .parse::<u32>()
-            .is_ok_and(|index| index < u32::MAX)
 }
 
 fn vue3_package_target_is_safe(

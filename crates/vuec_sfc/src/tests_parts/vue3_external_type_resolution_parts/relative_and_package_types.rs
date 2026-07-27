@@ -2634,8 +2634,11 @@ defineProps<OutputProps & DeclarationProps>()
     }
 
     #[test]
-    fn vue3_package_exports_reject_invalid_object_shapes() {
-        let resolver = Vue3TypeResolverContext::default();
+    fn vue3_package_exports_follow_typescript_object_shape_fallbacks() {
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
         for mixed_keys in [
             serde_json::json!({
                 ".": "./root.d.ts",
@@ -2648,7 +2651,10 @@ defineProps<OutputProps & DeclarationProps>()
                 "./feature": "./feature.d.ts"
             }),
         ] {
-            assert!(vue3_package_exports_type_target(&mixed_keys, None, &resolver).is_none());
+            assert_eq!(
+                vue3_package_exports_type_target(&mixed_keys, None, &resolver).as_deref(),
+                Some("./root.d.ts")
+            );
             assert!(vue3_package_exports_type_target(
                 &mixed_keys,
                 Some("feature"),
@@ -2661,29 +2667,27 @@ defineProps<OutputProps & DeclarationProps>()
             "types": "./valid.d.ts",
             "0": "./invalid.d.ts"
         });
-        assert!(
-            vue3_package_exports_type_target(&numeric_condition, None, &resolver).is_none()
+        assert_eq!(
+            vue3_package_exports_type_target(&numeric_condition, None, &resolver).as_deref(),
+            Some("./valid.d.ts")
         );
         let nested_numeric_condition = serde_json::json!({
             "types": { "0": "./invalid.d.ts" },
             "default": "./fallback.d.ts"
         });
-        assert!(vue3_package_exports_type_target(
-            &nested_numeric_condition,
-            None,
-            &resolver,
-        )
-        .is_none());
+        assert_eq!(
+            vue3_package_exports_type_target(&nested_numeric_condition, None, &resolver).as_deref(),
+            Some("./fallback.d.ts")
+        );
         let numeric_condition_in_array = serde_json::json!([
             { "4294967294": "./invalid.d.ts" },
             "./fallback.d.ts"
         ]);
-        assert!(vue3_package_exports_type_target(
-            &numeric_condition_in_array,
-            None,
-            &resolver,
-        )
-        .is_none());
+        assert_eq!(
+            vue3_package_exports_type_target(&numeric_condition_in_array, None, &resolver)
+                .as_deref(),
+            Some("./fallback.d.ts")
+        );
 
         for condition in ["00", "-0", "4294967295", "1e0"] {
             let conditions = serde_json::json!({
