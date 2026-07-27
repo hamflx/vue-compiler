@@ -4052,6 +4052,38 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             Some(vec![import_entry.clone()]),
         );
 
+        for (version, expected) in [
+            ((5, 0, 0), &import_entry),
+            ((5, 2, 2), &import_entry),
+            ((5, 3, 0), &require_entry),
+        ] {
+            let bundler = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+                ..Vue3TypeResolverContext::default()
+            };
+            for source in [
+                r#"import type { Required } from 'conditional-module' assert { "resolution-mode": "require" }"#,
+                r#"type Required = import('conditional-module', { assert: { "resolution-mode": "require" } }).Required"#,
+            ] {
+                let roots = [Vue3InlineModuleSource {
+                    filename: &filename,
+                    source,
+                    source_type: oxc_span::SourceType::ts(),
+                }];
+                assert_eq!(
+                    vue3_reachable_global_augmentation_files(
+                        &filename,
+                        &[],
+                        &roots,
+                        &bundler,
+                    ),
+                    Some(vec![expected.clone()]),
+                    "TypeScript {version:?} source {source:?}",
+                );
+            }
+        }
+
         let dual_root = [Vue3InlineModuleSource {
             filename: &filename,
             source: "import Required = require('conditional-module')\nvoid import('conditional-module')",

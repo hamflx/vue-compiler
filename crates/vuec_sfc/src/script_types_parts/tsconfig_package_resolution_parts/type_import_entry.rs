@@ -49,6 +49,15 @@ fn resolve_vue3_type_import_with_request(
     explicit_mode: bool,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    // Bundler did not receive explicit resolution modes until TypeScript 5.3.
+    let resolution_mode = if explicit_mode
+        && type_resolver.typescript_version < (5, 3, 0).into()
+        && type_resolver.module_resolution == Vue3TypeModuleResolutionKind::Bundler
+    {
+        Vue3TypeResolutionMode::Import
+    } else {
+        resolution_mode
+    };
     let mut request_resolver = type_resolver.clone();
     request_resolver.active_package_json_features = Some(
         type_resolver.package_json_features_for_request(explicit_mode),

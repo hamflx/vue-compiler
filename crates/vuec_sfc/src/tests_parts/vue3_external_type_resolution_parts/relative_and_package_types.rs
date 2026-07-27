@@ -6,6 +6,16 @@
         .expect("write Bundler config");
     }
 
+    fn write_vue3_typescript_version(root: &Path, version: &str) {
+        let package = root.join("node_modules").join("typescript");
+        std::fs::create_dir_all(&package).expect("create TypeScript package directory");
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::json!({ "version": version }).to_string(),
+        )
+        .expect("write TypeScript package manifest");
+    }
+
     fn write_vue3_node_next_config(root: &Path) {
         std::fs::write(
             root.join("tsconfig.json"),
@@ -1325,6 +1335,7 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
     #[test]
     fn vue3_project_self_name_exports_map_emitted_targets_and_resolution_modes_to_sources() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_typescript_version(dir.path(), "5.3.0");
         let source_dir = dir.path().join("src");
         let output_dir = dir.path().join("dist");
         let declaration_dir = dir.path().join("declarations");
@@ -3195,6 +3206,7 @@ defineProps<OutputProps & DeclarationProps>()
     fn vue3_resolution_mode_attributes_drive_imported_and_re_exported_macro_types() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_vue3_bundler_config(dir.path());
+        write_vue3_typescript_version(dir.path(), "5.3.0");
         let package = dir
             .path()
             .join("node_modules")
