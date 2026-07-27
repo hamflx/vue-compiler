@@ -521,12 +521,16 @@ fn vue3_external_type_source_semantic_identity(
 }
 
 fn vue3_external_type_source_mode(path: &Path, format: Vue3ExternalTypeFormat) -> String {
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
-    {
-        return "vue".to_string();
+    let resolution = match format.resolution_mode {
+        Vue3TypeResolutionMode::Import => "import",
+        Vue3TypeResolutionMode::Require => "require",
+    };
+    let dynamic_resolution = match format.dynamic_resolution_mode {
+        Vue3TypeResolutionMode::Import => "dynamic-import",
+        Vue3TypeResolutionMode::Require => "dynamic-require",
+    };
+    if vue3_path_has_vue_extension(path) {
+        return format!("vue:{resolution}:{dynamic_resolution}");
     }
     let source_type = format.source_type;
     let language = if source_type.is_typescript_definition() {
@@ -543,14 +547,6 @@ fn vue3_external_type_source_mode(path: &Path, format: Vue3ExternalTypeFormat) -
         oxc_span::ModuleKind::CommonJS => "commonjs",
     };
     let variant = if source_type.is_jsx() { "jsx" } else { "plain" };
-    let resolution = match format.resolution_mode {
-        Vue3TypeResolutionMode::Import => "import",
-        Vue3TypeResolutionMode::Require => "require",
-    };
-    let dynamic_resolution = match format.dynamic_resolution_mode {
-        Vue3TypeResolutionMode::Import => "dynamic-import",
-        Vue3TypeResolutionMode::Require => "dynamic-require",
-    };
     format!("{language}:{module}:{variant}:{resolution}:{dynamic_resolution}")
 }
 
@@ -605,12 +601,8 @@ fn read_vue3_external_type_source(
         return None;
     }
     let source = String::from_utf8(bytes).ok()?;
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
-    {
-        return Some(vue3_external_vue_type_source(path, &source));
+    if vue3_path_has_vue_extension(path) {
+        return Some(vue3_external_vue_type_source(path, &source, format));
     }
     Some(Vue3ExternalTypeSource {
         source,
@@ -620,7 +612,11 @@ fn read_vue3_external_type_source(
     })
 }
 
-pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3ExternalTypeSource {
+fn vue3_external_vue_type_source(
+    path: &Path,
+    source: &str,
+    format: Vue3ExternalTypeFormat,
+) -> Vue3ExternalTypeSource {
     let mut sources = SourceMap::default();
     let source_file = sources.add_file(Some(path.to_path_buf()), source.to_string());
     let options = Vue3SfcParseOptions::default();
@@ -651,8 +647,8 @@ pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3Ex
     Vue3ExternalTypeSource {
         source: blocks.join("\n"),
         source_type,
-        resolution_mode: Vue3TypeResolutionMode::Import,
-        dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
+        resolution_mode: format.resolution_mode,
+        dynamic_resolution_mode: format.dynamic_resolution_mode,
     }
 }
 
@@ -677,8 +673,16 @@ fn vue3_external_type_format_with_resolver(
     let lexical_path = normalize_path_components(path.to_path_buf());
     let mut source_type = vue3_type_source_type(&normalize_path_string(&lexical_path));
     let effective_module = type_resolver.effective_module();
-    if !vue3_path_has_ambiguous_module_extension(&lexical_path)
-    {
+    if vue3_path_has_vue_extension(&lexical_path) {
+        let (resolution_mode, dynamic_resolution_mode) =
+            vue3_inline_type_resolution_modes(source_type, type_resolver);
+        return Some(Vue3ExternalTypeFormat {
+            source_type,
+            resolution_mode,
+            dynamic_resolution_mode,
+        });
+    }
+    if !vue3_path_has_ambiguous_module_extension(&lexical_path) {
         let resolution_mode = vue3_static_resolution_mode(source_type);
         return Some(Vue3ExternalTypeFormat {
             source_type,
@@ -753,15 +757,33 @@ fn vue3_import_syntax_affects_module_resolution(
     }
 }
 
+pub(crate) fn vue3_inline_type_resolution_modes(
+    source_type: oxc_span::SourceType,
+    type_resolver: &Vue3TypeResolverContext,
+) -> (Vue3TypeResolutionMode, Vue3TypeResolutionMode) {
+    if !vue3_import_syntax_affects_module_resolution(type_resolver) {
+        return (
+            vue3_static_resolution_mode(source_type),
+            Vue3TypeResolutionMode::Import,
+        );
+    }
+    let effective_module = type_resolver.effective_module();
+    let static_resolution_mode = vue3_module_fallback_resolution_mode(effective_module);
+    (
+        static_resolution_mode,
+        vue3_dynamic_resolution_mode(effective_module, static_resolution_mode),
+    )
+}
+
 fn vue3_module_fallback_resolution_mode(
     module: Vue3TypeModuleKind,
 ) -> Vue3TypeResolutionMode {
     match module {
-        Vue3TypeModuleKind::CommonJs => Vue3TypeResolutionMode::Require,
+        Vue3TypeModuleKind::CommonJs
+        | Vue3TypeModuleKind::Node16
+        | Vue3TypeModuleKind::NodeNext => Vue3TypeResolutionMode::Require,
         Vue3TypeModuleKind::Classic
         | Vue3TypeModuleKind::EcmaScript
-        | Vue3TypeModuleKind::Node16
-        | Vue3TypeModuleKind::NodeNext
         | Vue3TypeModuleKind::Preserve => Vue3TypeResolutionMode::Import,
     }
 }
@@ -787,6 +809,12 @@ fn vue3_path_has_ambiguous_module_extension(path: &Path) -> bool {
                 .iter()
                 .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         })
+}
+
+fn vue3_path_has_vue_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
 }
 
 fn vue3_path_contains_node_modules(path: &Path) -> bool {

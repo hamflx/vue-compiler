@@ -90,7 +90,7 @@ const model = defineModel<ModelValue>()
     }
 
     #[test]
-    fn vue3_nodenext_imports_require_explicit_relative_extensions() {
+    fn vue3_nodenext_inline_commonjs_imports_allow_extensionless_paths() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("tsconfig.json"),
@@ -104,14 +104,14 @@ const model = defineModel<ModelValue>()
         .expect("write NodeNext config");
         std::fs::write(
             dir.path().join("extensionless.ts"),
-            "export interface ExtensionlessProps { forbiddenFile: string }",
+            "export interface ExtensionlessProps { extensionlessFile: string }",
         )
         .expect("write extensionless decoy");
         let directory = dir.path().join("directory");
         std::fs::create_dir_all(&directory).expect("create directory decoy");
         std::fs::write(
             directory.join("index.ts"),
-            "export interface DirectoryProps { forbiddenDirectory: number }",
+            "export interface DirectoryProps { directoryIndex: number }",
         )
         .expect("write directory decoy");
         let explicit = dir.path().join("explicit.ts");
@@ -132,26 +132,20 @@ defineProps<ExtensionlessProps & DirectoryProps & ExplicitProps>()
         let descriptor = compiler.parse(filename.to_string_lossy(), source);
         let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
 
-        assert!(
-            script
-                .errors
-                .iter()
-                .any(|error| error.contains("./extensionless")),
-            "{:?}",
-            script.errors
-        );
-        assert!(
-            script
-                .errors
-                .iter()
-                .any(|error| error.contains("./directory")),
-            "{:?}",
-            script.errors
-        );
-        assert!(!script.content.contains("forbiddenFile"));
-        assert!(!script.content.contains("forbiddenDirectory"));
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("extensionlessFile"));
+        assert!(script.content.contains("directoryIndex"));
         assert!(script.content.contains("explicitReplacement"));
-        assert_eq!(script.deps, vec![normalize_path_string(&explicit)]);
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                normalize_path_string(&dir.path().join("extensionless.ts")),
+                normalize_path_string(&directory.join("index.ts")),
+                normalize_path_string(&explicit),
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]
@@ -2660,6 +2654,246 @@ defineProps<DirectRequired & NamedRequired & AllRequired & CommonJsImported & Co
                 script.deps.contains(&normalize_path_string(&dependency)),
                 "missing dependency {}",
                 dependency.display()
+            );
+        }
+    }
+
+    #[test]
+    fn vue3_commonjs_bundler_inline_imports_use_require_conditions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let typescript = node_modules.join("typescript");
+        let package = node_modules.join("vuec-inline-commonjs-conditions");
+        let dynamic_package = node_modules.join("vuec-inline-commonjs-dynamic");
+        std::fs::create_dir_all(&typescript).expect("create TypeScript package");
+        std::fs::create_dir_all(&package).expect("create conditional package");
+        std::fs::create_dir_all(&dynamic_package).expect("create dynamic conditional package");
+        std::fs::write(
+            typescript.join("package.json"),
+            r#"{"name":"typescript","version":"6.0.3"}"#,
+        )
+        .expect("write TypeScript package manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "module": "CommonJS",
+                    "moduleResolution": "Bundler"
+                }
+            }"#,
+        )
+        .expect("write CommonJS Bundler config");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional package manifest");
+        std::fs::write(
+            dynamic_package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write dynamic conditional package manifest");
+        let import_entry = package.join("import.d.mts");
+        let require_entry = package.join("require.d.cts");
+        let dynamic_import_entry = dynamic_package.join("import.d.mts");
+        let dynamic_require_entry = dynamic_package.join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            r#"
+export interface StaticProps { wrongStaticImport: never }
+export interface DynamicProps { wrongDynamicImport: never }
+export interface NormalStaticProps { wrongNormalStaticImport: never }
+export interface NormalDynamicProps { wrongNormalDynamicImport: never }
+export interface ExternalVueLeafProps { wrongExternalVueImport: never }
+"#,
+        )
+        .expect("write import condition types");
+        std::fs::write(
+            &require_entry,
+            r#"
+export interface StaticProps { staticRequire: string }
+export interface DynamicProps { dynamicRequire: number }
+export interface NormalStaticProps { normalStaticRequire: boolean }
+export interface NormalDynamicProps { normalDynamicRequire: object }
+export interface ExternalVueLeafProps { externalVueRequire: string }
+"#,
+        )
+        .expect("write require condition types");
+        std::fs::write(
+            &dynamic_import_entry,
+            "declare global { interface DynamicGlobalProps { wrongRuntimeImport: never } } export {}",
+        )
+        .expect("write dynamic import condition types");
+        std::fs::write(
+            &dynamic_require_entry,
+            "declare global { interface DynamicGlobalProps { runtimeRequire: boolean } } export {}",
+        )
+        .expect("write dynamic require condition types");
+        let bridge = dir.path().join("Bridge.vue");
+        std::fs::write(
+            &bridge,
+            r#"<script lang="ts">
+import type { ExternalVueLeafProps } from 'vuec-inline-commonjs-conditions'
+export interface ExternalVueProps extends ExternalVueLeafProps {}
+</script>"#,
+        )
+        .expect("write imported SFC");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script lang="ts">
+import type { NormalStaticProps } from 'vuec-inline-commonjs-conditions'
+type NormalDynamicProps = import('vuec-inline-commonjs-conditions').NormalDynamicProps
+interface NormalProps extends NormalStaticProps, NormalDynamicProps {}
+</script>
+<script setup lang="ts">
+import type { StaticProps } from 'vuec-inline-commonjs-conditions'
+import type { ExternalVueProps } from './Bridge.vue'
+type DynamicProps = import('vuec-inline-commonjs-conditions').DynamicProps
+void import('vuec-inline-commonjs-dynamic')
+defineProps<StaticProps & DynamicProps & DynamicGlobalProps & NormalProps & ExternalVueProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("staticRequire: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("dynamicRequire: { type: Number, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongStaticImport"));
+        assert!(!script.content.contains("wrongDynamicImport"));
+        assert!(
+            script
+                .content
+                .contains("normalStaticRequire: { type: Boolean, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("normalDynamicRequire: { type: Object, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongNormalStaticImport"));
+        assert!(!script.content.contains("wrongNormalDynamicImport"));
+        assert!(
+            script
+                .content
+                .contains("externalVueRequire: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongExternalVueImport"));
+        assert!(
+            script
+                .content
+                .contains("runtimeRequire: { type: Boolean, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongRuntimeImport"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                normalize_path_string(&require_entry),
+                normalize_path_string(&dynamic_require_entry),
+                normalize_path_string(&bridge),
+            ]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(!script.deps.contains(&normalize_path_string(&import_entry)));
+        assert!(!script
+            .deps
+            .contains(&normalize_path_string(&dynamic_import_entry)));
+    }
+
+    #[test]
+    fn vue3_inline_resolution_modes_follow_effective_module_emit() {
+        let source_type = oxc_span::SourceType::ts();
+        for (module_resolution, module, expected) in [
+            (
+                Vue3TypeModuleResolutionKind::Bundler,
+                Vue3TypeModuleKind::CommonJs,
+                (
+                    Vue3TypeResolutionMode::Require,
+                    Vue3TypeResolutionMode::Require,
+                ),
+            ),
+            (
+                Vue3TypeModuleResolutionKind::Bundler,
+                Vue3TypeModuleKind::EcmaScript,
+                (
+                    Vue3TypeResolutionMode::Import,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+            (
+                Vue3TypeModuleResolutionKind::Bundler,
+                Vue3TypeModuleKind::Preserve,
+                (
+                    Vue3TypeResolutionMode::Import,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+            (
+                Vue3TypeModuleResolutionKind::Node16,
+                Vue3TypeModuleKind::Node16,
+                (
+                    Vue3TypeResolutionMode::Require,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+            (
+                Vue3TypeModuleResolutionKind::NodeNext,
+                Vue3TypeModuleKind::NodeNext,
+                (
+                    Vue3TypeResolutionMode::Require,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 3).into(),
+                module_resolution,
+                module: Some(module),
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                vue3_inline_type_resolution_modes(source_type, &resolver),
+                expected,
+                "{module_resolution:?} with {module:?}"
             );
         }
     }

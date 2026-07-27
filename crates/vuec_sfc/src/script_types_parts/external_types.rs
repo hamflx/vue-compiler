@@ -511,29 +511,16 @@ fn vue3_triple_slash_reference(comment: &str) -> Option<Vue3TripleSlashReference
     }
 }
 
+#[cfg(test)]
 fn vue3_module_dependencies_from_source(
     source: &str,
     source_type: oxc_span::SourceType,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<(bool, BTreeSet<Vue3ModuleDependency>)> {
-    vue3_module_dependencies_from_source_with_mode(
-        source,
-        source_type,
-        vue3_static_resolution_mode(source_type),
-        namespace_budget,
-    )
-}
-
-fn vue3_module_dependencies_from_source_with_mode(
-    source: &str,
-    source_type: oxc_span::SourceType,
-    static_resolution_mode: Vue3TypeResolutionMode,
-    namespace_budget: &mut Vue3NamespaceProjectionBudget,
-) -> Option<(bool, BTreeSet<Vue3ModuleDependency>)> {
     vue3_module_dependencies_from_source_with_modes(
         source,
         source_type,
-        static_resolution_mode,
+        vue3_static_resolution_mode(source_type),
         Vue3TypeResolutionMode::Import,
         namespace_budget,
     )
@@ -771,9 +758,13 @@ fn vue3_reachable_global_augmentation_files(
         )?;
     }
     for root in inline_module_sources {
-        let (_, dependencies) = vue3_module_dependencies_from_source(
+        let (static_resolution_mode, dynamic_resolution_mode) =
+            vue3_inline_type_resolution_modes(root.source_type, &type_resolver);
+        let (_, dependencies) = vue3_module_dependencies_from_source_with_modes(
             root.source,
             root.source_type,
+            static_resolution_mode,
+            dynamic_resolution_mode,
             &mut namespace_budget,
         )?;
         enqueue_vue3_module_dependencies(
@@ -816,13 +807,13 @@ fn vue3_reachable_global_augmentation_files(
                 source: reference,
                 request,
             } => {
-                let resolution_mode = (request.explicit_mode
-                    || matches!(
+                let has_implicit_mode = matches!(
                         type_resolver.module_resolution,
                         Vue3TypeModuleResolutionKind::Node16
                             | Vue3TypeModuleResolutionKind::NodeNext
-                    ))
-                .then_some(request.mode);
+                    ) && !vue3_path_has_vue_extension(Path::new(&importer));
+                let resolution_mode = (request.explicit_mode || has_implicit_mode)
+                    .then_some(request.mode);
                 resolve_vue3_type_reference_directive_with_mode(
                     project_filename,
                     &importer,
@@ -951,11 +942,13 @@ pub(crate) fn extend_vue3_type_context_from_external_imports_with_seen(
     type_resolver: &Vue3TypeResolverContext,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> bool {
+    let (static_resolution_mode, _) =
+        vue3_inline_type_resolution_modes(source_type, type_resolver);
     extend_vue3_type_context_from_external_imports_with_seen_and_mode(
         filename,
         source,
         source_type,
-        vue3_static_resolution_mode(source_type),
+        static_resolution_mode,
         context,
         seen,
         type_resolver,
@@ -4061,8 +4054,8 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
 
         let dual_root = [Vue3InlineModuleSource {
             filename: &filename,
-            source: "import 'conditional-module'\nrequire('conditional-module')",
-            source_type: oxc_span::SourceType::unambiguous(),
+            source: "import Required = require('conditional-module')\nvoid import('conditional-module')",
+            source_type: oxc_span::SourceType::ts(),
         }];
         let exact = Vue3TypeResolverContext {
             module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
@@ -4441,6 +4434,64 @@ export {}"#;
             ),
             Some(vec![import_entry, require_entry]),
         );
+    }
+
+    #[test]
+    fn inline_vue_implicit_type_references_preserve_absent_resolution_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("conditional-types");
+        std::fs::create_dir_all(&package).expect("create package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "types": "./legacy.d.ts",
+                "exports": {
+                    ".": {
+                        "types": {
+                            "require": "./modern.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write package manifest");
+        let legacy = package.join("legacy.d.ts");
+        let modern = package.join("modern.d.cts");
+        std::fs::write(&legacy, "interface LegacyGlobal {}")
+            .expect("write legacy declaration");
+        std::fs::write(&modern, "interface ModernGlobal {}")
+            .expect("write modern declaration");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (5, 9, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            module: Some(Vue3TypeModuleKind::NodeNext),
+            resolve_package_json_exports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        for (source, expected) in [
+            (r#"/// <reference types="conditional-types" />"#, legacy),
+            (
+                r#"/// <reference types="conditional-types" resolution-mode="require" />"#,
+                modern,
+            ),
+        ] {
+            let roots = [Vue3InlineModuleSource {
+                filename: &filename,
+                source,
+                source_type: oxc_span::SourceType::ts(),
+            }];
+            assert_eq!(
+                vue3_reachable_global_augmentation_files(
+                    &filename,
+                    &[],
+                    &roots,
+                    &resolver,
+                ),
+                Some(vec![expected]),
+            );
+        }
     }
 
     #[test]

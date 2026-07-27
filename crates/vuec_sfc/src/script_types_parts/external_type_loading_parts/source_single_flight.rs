@@ -777,6 +777,93 @@ mod source_single_flight_tests {
     }
 
     #[test]
+    fn vue_source_cache_keys_inline_resolution_modes_independently() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("Imported.vue");
+        std::fs::write(
+            &path,
+            r#"<script lang="ts">export interface Props { value: string }</script>"#,
+        )
+        .expect("write imported SFC");
+        let session = Vue3ExternalTypeLoadSession::default();
+        let resolvers = [
+            (
+                Vue3TypeResolverContext {
+                    typescript_version: (6, 0, 3).into(),
+                    module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+                    module: Some(Vue3TypeModuleKind::CommonJs),
+                    external_type_session: session.clone(),
+                    ..Vue3TypeResolverContext::default()
+                },
+                (
+                    Vue3TypeResolutionMode::Require,
+                    Vue3TypeResolutionMode::Require,
+                ),
+            ),
+            (
+                Vue3TypeResolverContext {
+                    typescript_version: (6, 0, 3).into(),
+                    module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+                    module: Some(Vue3TypeModuleKind::Preserve),
+                    external_type_session: session.clone(),
+                    ..Vue3TypeResolverContext::default()
+                },
+                (
+                    Vue3TypeResolutionMode::Import,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+            (
+                Vue3TypeResolverContext {
+                    module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+                    module: Some(Vue3TypeModuleKind::NodeNext),
+                    external_type_session: session.clone(),
+                    ..Vue3TypeResolverContext::default()
+                },
+                (
+                    Vue3TypeResolutionMode::Require,
+                    Vue3TypeResolutionMode::Import,
+                ),
+            ),
+        ];
+        let mut sources = Vec::new();
+        for (resolver, expected) in &resolvers {
+            let source = session
+                .source_from_path_with_resolver(
+                    &path,
+                    Vue3ExternalTypeSourceKind::Import,
+                    resolver,
+                )
+                .expect("load imported SFC mode");
+            assert_eq!(
+                (source.resolution_mode, source.dynamic_resolution_mode),
+                *expected
+            );
+            sources.push(source);
+        }
+        for left in 0..sources.len() {
+            for right in left + 1..sources.len() {
+                assert!(!std::sync::Arc::ptr_eq(&sources[left], &sources[right]));
+            }
+        }
+        assert_eq!(session.stats().import_files_read, 3);
+        assert_eq!(session.stats().source_cache_hits, 0);
+
+        for ((resolver, _), source) in resolvers.iter().zip(&sources) {
+            let cached = session
+                .source_from_path_with_resolver(
+                    &path,
+                    Vue3ExternalTypeSourceKind::Import,
+                    resolver,
+                )
+                .expect("reuse imported SFC mode");
+            assert!(std::sync::Arc::ptr_eq(source, &cached));
+        }
+        assert_eq!(session.stats().import_files_read, 3);
+        assert_eq!(session.stats().source_cache_hits, 3);
+    }
+
+    #[test]
     fn package_scope_metadata_precedes_source_budget_and_is_cached() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir.path().join("node_modules").join("package");

@@ -9,12 +9,9 @@ pub(crate) fn vue3_resolve_type_projection(
         };
     };
     let source = script_setup.content.as_str();
+    let source_type = script_source_type_from_attrs(&script_setup.attrs);
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(
-        &allocator,
-        source,
-        script_source_type_from_attrs(&script_setup.attrs),
-    )
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
     .with_options(oxc_parser::ParseOptions {
         parse_regular_expression: true,
         ..oxc_parser::ParseOptions::default()
@@ -28,6 +25,8 @@ pub(crate) fn vue3_resolve_type_projection(
     }
 
     let type_resolver = vue3_type_resolver_context_for_filename(&descriptor.filename);
+    let (static_resolution_mode, _) =
+        vue3_inline_type_resolution_modes(source_type, &type_resolver);
     let normal_type_context =
         vue3_normal_script_type_context(descriptor, &options.global_type_files, &type_resolver);
     let normal_user_imports = vue3_normal_script_user_imports(descriptor);
@@ -35,7 +34,7 @@ pub(crate) fn vue3_resolve_type_projection(
     extend_vue3_type_context_from_external_imports(
         &descriptor.filename,
         source,
-        script_source_type_from_attrs(&script_setup.attrs),
+        source_type,
         &mut type_context,
         &type_resolver,
     );
@@ -79,6 +78,7 @@ pub(crate) fn vue3_resolve_type_projection(
         unresolved_import_sources: type_context.unresolved_import_sources,
         silent_unresolved_type_names: type_context.silent_unresolved_type_names,
         type_filename: Some(descriptor.filename.clone()),
+        type_resolution_mode: static_resolution_mode,
         type_resolver,
         ..Vue3ScriptSetupAnalysis::default()
     };

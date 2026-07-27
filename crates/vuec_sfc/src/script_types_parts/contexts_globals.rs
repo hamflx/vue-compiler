@@ -78,10 +78,13 @@ pub(crate) fn vue3_normal_script_type_context(
     let Some(script) = descriptor.script.as_ref() else {
         return context;
     };
+    let source_type = script_source_type_from_attrs(&script.attrs);
+    let (static_resolution_mode, _) =
+        vue3_inline_type_resolution_modes(source_type, type_resolver);
     if !extend_vue3_type_context_from_external_imports(
         &descriptor.filename,
         script.content.as_str(),
-        script_source_type_from_attrs(&script.attrs),
+        source_type,
         &mut context,
         type_resolver,
     ) {
@@ -91,7 +94,7 @@ pub(crate) fn vue3_normal_script_type_context(
     let parsed = oxc_parser::Parser::new(
         &allocator,
         script.content.as_str(),
-        script_source_type_from_attrs(&script.attrs),
+        source_type,
     )
     .with_options(oxc_parser::ParseOptions {
         parse_regular_expression: true,
@@ -138,6 +141,7 @@ pub(crate) fn vue3_normal_script_type_context(
         unresolved_import_sources: context.unresolved_import_sources,
         silent_unresolved_type_names: context.silent_unresolved_type_names,
         type_filename: Some(descriptor.filename.clone()),
+        type_resolution_mode: static_resolution_mode,
         type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
