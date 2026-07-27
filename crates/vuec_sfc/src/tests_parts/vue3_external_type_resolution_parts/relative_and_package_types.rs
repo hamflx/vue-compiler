@@ -1162,6 +1162,99 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
     }
 
     #[test]
+    fn vue3_self_name_failures_only_block_outer_packages_for_terminal_null_targets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_name = "vuec-self-fallback-boundary";
+        let project = dir.path().join("project");
+        let source_dir = project.join("src");
+        let dependency = project.join("node_modules").join(package_name);
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        std::fs::create_dir_all(&dependency).expect("create outer same-name dependency");
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": "./outer.d.ts",
+                    "./feature": "./outer.d.ts"
+                }
+            }"#,
+        )
+        .expect("write outer same-name manifest");
+        let outer_target = dependency.join("outer.d.ts");
+        std::fs::write(
+            &outer_target,
+            "export interface OuterProps { outer: string }",
+        )
+        .expect("write outer same-name target");
+        let importer = source_dir.join("index.d.mts");
+        std::fs::write(&importer, "export {};").expect("write project importer");
+
+        let cases = [
+            (
+                (5, 9, 3),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./feature": null }),
+                Some(outer_target.clone()),
+            ),
+            (
+                (6, 0, 0),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./feature": null }),
+                None,
+            ),
+            (
+                (6, 0, 0),
+                package_name.to_string(),
+                serde_json::json!({ ".": null }),
+                Some(outer_target.clone()),
+            ),
+            (
+                (6, 0, 0),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./feature": "./missing.d.ts" }),
+                Some(outer_target.clone()),
+            ),
+            (
+                (6, 0, 0),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./feature": "../invalid.d.ts" }),
+                Some(outer_target.clone()),
+            ),
+            (
+                (6, 0, 0),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./feature": [] }),
+                Some(outer_target.clone()),
+            ),
+            (
+                (6, 0, 0),
+                format!("{package_name}/feature"),
+                serde_json::json!({ "./other": "./local.d.ts" }),
+                Some(outer_target.clone()),
+            ),
+        ];
+        for (version, source, exports, expected) in cases {
+            std::fs::write(
+                project.join("package.json"),
+                serde_json::json!({ "name": package_name, "exports": exports }).to_string(),
+            )
+            .expect("write project package manifest");
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+                ..Vue3TypeResolverContext::default()
+            };
+
+            assert_eq!(
+                resolve_vue3_type_import(&importer.to_string_lossy(), &source, &resolver),
+                expected,
+                "TypeScript {version:?}, source {source}, exports {exports}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
     fn vue3_bare_package_active_null_export_uses_typescript_fallback() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir
@@ -1466,12 +1559,14 @@ defineProps<RootProps & FeatureProps>()
         let fallback = dependency.join("feature.d.ts");
         std::fs::write(&fallback, "export interface Props { fallback: number }")
             .expect("write fallback dependency target");
-        for name in ["excluded.d.ts", "missing.d.ts"] {
+        let excluded_fallback = dependency.join("excluded.d.ts");
+        let missing_fallback = dependency.join("missing.d.ts");
+        for path in [&excluded_fallback, &missing_fallback] {
             std::fs::write(
-                dependency.join(name),
-                "export interface Props { wrongFallback: never }",
+                path,
+                "export interface Props { packageFallback: boolean }",
             )
-            .expect("write excluded fallback decoy");
+            .expect("write same-name package fallback");
         }
         let importer = source_dir.join("index.d.ts");
         std::fs::write(&importer, "export {};").expect("write project importer");
@@ -1496,11 +1591,13 @@ defineProps<RootProps & FeatureProps>()
             resolve_vue3_type_import(&importer, "vuec-versioned-self/feature", &current),
             Some(local)
         );
-        assert!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/excluded", &current).is_none()
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/excluded", &current),
+            Some(excluded_fallback)
         );
-        assert!(
-            resolve_vue3_type_import(&importer, "vuec-versioned-self/missing", &current).is_none()
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "vuec-versioned-self/missing", &current),
+            Some(missing_fallback)
         );
         assert!(!legacy.external_type_session.metadata_is_blocked());
         assert!(!current.external_type_session.metadata_is_blocked());

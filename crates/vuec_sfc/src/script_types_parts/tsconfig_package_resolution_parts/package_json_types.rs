@@ -460,7 +460,7 @@ pub(crate) fn vue3_package_exports_type_target_with_mode(
 enum Vue3PackageTargetVisit {
     Resolved,
     Missing,
-    Rejected,
+    NullTarget,
     Invalid,
     InvalidConfiguration,
     Blocked,
@@ -773,7 +773,7 @@ fn visit_vue3_package_target(
         return visitor(&expanded);
     }
     if target.is_null() {
-        return Vue3PackageTargetVisit::Rejected;
+        return Vue3PackageTargetVisit::NullTarget;
     }
     if let Some(targets) = target.as_array() {
         let mut fallback = if targets.is_empty() {
@@ -797,12 +797,12 @@ fn visit_vue3_package_target(
                 visitor,
             ) {
                 Vue3PackageTargetVisit::Missing => {}
-                Vue3PackageTargetVisit::Rejected
+                Vue3PackageTargetVisit::NullTarget
                     if vue3_package_null_target_stops_fallback(type_resolver) =>
                 {
-                    return Vue3PackageTargetVisit::Rejected;
+                    return Vue3PackageTargetVisit::NullTarget;
                 }
-                result @ (Vue3PackageTargetVisit::Rejected
+                result @ (Vue3PackageTargetVisit::NullTarget
                 | Vue3PackageTargetVisit::Invalid) => fallback = result,
                 result => return result,
             }
@@ -840,7 +840,7 @@ fn visit_vue3_package_target(
             visitor,
         ) {
             Vue3PackageTargetVisit::Missing | Vue3PackageTargetVisit::Invalid => {}
-            Vue3PackageTargetVisit::Rejected
+            Vue3PackageTargetVisit::NullTarget
                 if !vue3_package_null_target_stops_fallback(type_resolver) => {}
             result => return result,
         }

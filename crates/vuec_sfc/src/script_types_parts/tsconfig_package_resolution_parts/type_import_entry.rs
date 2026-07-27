@@ -330,6 +330,12 @@ fn resolve_vue3_package_self_reference_with_mode(
     else {
         return Vue3PackageSelfReferenceResolution::MetadataBlocked;
     };
+    // TypeScript treats a root `.` null as falsy before entering target traversal.
+    let root_null_target = subpath.is_none()
+        && exports
+            .as_object()
+            .and_then(|object| object.get("."))
+            .is_some_and(serde_json::Value::is_null);
 
     let mut resolved = None;
     let result = visit_vue3_package_exports_type_targets(
@@ -369,7 +375,12 @@ fn resolve_vue3_package_self_reference_with_mode(
         _ if type_resolver.external_type_session.metadata_is_blocked() => {
             Vue3PackageSelfReferenceResolution::MetadataBlocked
         }
-        _ => Vue3PackageSelfReferenceResolution::Rejected,
+        (Vue3PackageTargetVisit::NullTarget, _)
+            if vue3_package_null_target_stops_fallback(type_resolver) && !root_null_target =>
+        {
+            Vue3PackageSelfReferenceResolution::Rejected
+        }
+        _ => Vue3PackageSelfReferenceResolution::NotApplicable,
     }
 }
 
