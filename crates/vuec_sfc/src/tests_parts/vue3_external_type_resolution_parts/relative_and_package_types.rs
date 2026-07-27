@@ -2896,6 +2896,97 @@ defineProps<StaticProps & DynamicProps & DynamicGlobalProps & NormalProps & Exte
                 "{module_resolution:?} with {module:?}"
             );
         }
+
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            module: Some(Vue3TypeModuleKind::CommonJs),
+            resolve_package_json_exports: Some(false),
+            resolve_package_json_imports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert!(resolver.package_json_features().self_name);
+        assert_eq!(
+            vue3_inline_type_resolution_modes(source_type, &resolver),
+            (
+                Vue3TypeResolutionMode::Import,
+                Vue3TypeResolutionMode::Import,
+            )
+        );
+    }
+
+    #[test]
+    fn vue3_bundler_disabled_package_maps_self_references_use_import_conditions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let typescript = dir.path().join("node_modules").join("typescript");
+        std::fs::create_dir_all(&typescript).expect("create TypeScript package");
+        std::fs::write(
+            typescript.join("package.json"),
+            r#"{"name":"typescript","version":"6.0.3"}"#,
+        )
+        .expect("write TypeScript package manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "module": "CommonJS",
+                    "moduleResolution": "Bundler",
+                    "resolvePackageJsonExports": false,
+                    "resolvePackageJsonImports": false
+                }
+            }"#,
+        )
+        .expect("write CommonJS Bundler config");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "vuec-self-mode-disabled",
+                "exports": {
+                    "./feature": {
+                        "types": {
+                            "import": "./import.d.mts",
+                            "require": "./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write project package manifest");
+        let import_entry = dir.path().join("import.d.mts");
+        let require_entry = dir.path().join("require.d.cts");
+        std::fs::write(
+            &import_entry,
+            "export interface SelfProps { selfImport: string }",
+        )
+        .expect("write import self-reference target");
+        std::fs::write(
+            &require_entry,
+            "export interface SelfProps { wrongSelfRequire: never }",
+        )
+        .expect("write require self-reference decoy");
+
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        let filename = source_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { SelfProps } from 'vuec-self-mode-disabled/feature'
+defineProps<SelfProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("selfImport: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(!script.content.contains("wrongSelfRequire"));
+        assert_eq!(script.deps, vec![normalize_path_string(&import_entry)]);
+        assert!(!script.deps.contains(&normalize_path_string(&require_entry)));
     }
 
     #[test]
