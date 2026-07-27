@@ -723,6 +723,7 @@ fn vue3_reachable_global_augmentation_files(
         module_resolution: type_resolver.module_resolution,
         module: type_resolver.module,
         allow_js: type_resolver.allow_js,
+        custom_conditions: type_resolver.custom_conditions.clone(),
         resolve_package_json_exports: type_resolver.resolve_package_json_exports,
         resolve_package_json_imports: type_resolver.resolve_package_json_imports,
         active_package_json_features: type_resolver.active_package_json_features,

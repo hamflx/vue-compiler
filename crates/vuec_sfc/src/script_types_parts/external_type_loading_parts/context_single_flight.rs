@@ -345,6 +345,7 @@ mod context_single_flight_tests {
                 module_resolution: Vue3TypeModuleResolutionKind::Node10,
                 module: Vue3TypeModuleKind::CommonJs,
                 allow_js: false,
+                custom_conditions: Vue3CustomConditionSet::default(),
                 package_json_features: Vue3PackageJsonResolutionFeatures::default(),
                 type_reference_package_json_features:
                     Vue3PackageJsonResolutionFeatures::default(),
@@ -359,6 +360,22 @@ mod context_single_flight_tests {
             .declared_types
             .insert(marker.into(), vec!["string".into()]);
         context
+    }
+
+    #[test]
+    fn resolver_identity_charges_custom_condition_payload() {
+        let default = key("entry");
+        let mut configured = default.clone();
+        configured.resolver.custom_conditions = Vue3CustomConditionSet::from_strings(vec![
+            "browser".to_string(),
+            "worker".to_string(),
+        ]);
+
+        assert_ne!(default, configured);
+        assert_eq!(
+            configured.resolver.payload_weight() - default.resolver.payload_weight(),
+            std::mem::size_of::<String>() * 2 + "browser".len() + "worker".len(),
+        );
     }
 
     fn start(

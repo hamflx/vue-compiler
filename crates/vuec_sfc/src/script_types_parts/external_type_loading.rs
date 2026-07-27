@@ -166,6 +166,7 @@ struct Vue3TypeResolverCacheIdentity {
     module_resolution: Vue3TypeModuleResolutionKind,
     module: Vue3TypeModuleKind,
     allow_js: bool,
+    custom_conditions: Vue3CustomConditionSet,
     package_json_features: Vue3PackageJsonResolutionFeatures,
     type_reference_package_json_features: Vue3PackageJsonResolutionFeatures,
     module_suffixes: std::sync::Arc<[String]>,
@@ -178,6 +179,7 @@ impl Vue3TypeResolverCacheIdentity {
             module_resolution: type_resolver.module_resolution,
             module: type_resolver.effective_module(),
             allow_js: type_resolver.allow_js,
+            custom_conditions: type_resolver.custom_conditions.clone(),
             package_json_features: type_resolver.package_json_features(),
             type_reference_package_json_features: type_resolver
                 .package_json_features_for_type_reference(false),
@@ -186,19 +188,21 @@ impl Vue3TypeResolverCacheIdentity {
     }
 
     fn payload_weight(&self) -> usize {
-        self.module_suffixes.iter().fold(
-            self.typescript_version
-                .len()
-                .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>())
-                .saturating_add(std::mem::size_of::<Vue3TypeModuleKind>())
-                .saturating_add(std::mem::size_of::<bool>())
-                .saturating_add(std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2),
-            |weight, suffix| {
+        let base_weight = self
+            .typescript_version
+            .len()
+            .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>())
+            .saturating_add(std::mem::size_of::<Vue3TypeModuleKind>())
+            .saturating_add(std::mem::size_of::<bool>())
+            .saturating_add(std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2);
+        self.module_suffixes
+            .iter()
+            .chain(self.custom_conditions.iter())
+            .fold(base_weight, |weight, value| {
                 weight
                     .saturating_add(std::mem::size_of::<String>())
-                    .saturating_add(suffix.len())
-            },
-        )
+                    .saturating_add(value.len())
+            })
     }
 }
 

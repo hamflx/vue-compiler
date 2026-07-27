@@ -60,6 +60,8 @@ struct Vue3TsconfigInheritedResolverOptions {
     module_suffixes: Option<std::sync::Arc<[String]>>,
     allow_js: Option<bool>,
     check_js: Option<bool>,
+    custom_conditions: Option<Vue3CustomConditionSet>,
+    custom_conditions_is_declared: bool,
     resolve_package_json_exports: Option<bool>,
     resolve_package_json_imports: Option<bool>,
     target: Option<Vue3TsconfigTargetKind>,
@@ -81,6 +83,10 @@ impl Vue3TsconfigInheritedResolverOptions {
         }
         if inherited.check_js.is_some() {
             self.check_js = inherited.check_js;
+        }
+        if inherited.custom_conditions_is_declared {
+            self.custom_conditions = inherited.custom_conditions;
+            self.custom_conditions_is_declared = true;
         }
         if inherited.resolve_package_json_exports.is_some() {
             self.resolve_package_json_exports = inherited.resolve_package_json_exports;
@@ -143,6 +149,7 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
     pub(crate) module: Vue3TypeModuleKind,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
     pub(crate) allow_js: bool,
+    pub(crate) custom_conditions: Vue3CustomConditionSet,
     pub(crate) resolve_package_json_exports: Option<bool>,
     pub(crate) resolve_package_json_imports: Option<bool>,
 }
@@ -1131,7 +1138,8 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
         module_resolution,
         Vue3TypeModuleResolutionKind::Classic | Vue3TypeModuleResolutionKind::Node10
     ) && (configured.resolve_package_json_exports == Some(true)
-        || configured.resolve_package_json_imports == Some(true))
+        || configured.resolve_package_json_imports == Some(true)
+        || configured.custom_conditions.is_some())
     {
         type_resolver.external_type_session.block_metadata();
         return None;
@@ -1139,6 +1147,9 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
     let resolve_package_json_exports = configured.resolve_package_json_exports;
     let resolve_package_json_imports = configured.resolve_package_json_imports;
     let allow_js = configured.allow_js.unwrap_or(configured.check_js.unwrap_or(false));
+    let custom_conditions = configured
+        .custom_conditions
+        .unwrap_or_default();
     let module_suffixes = match configured.module_suffixes {
         Some(suffixes) if !suffixes.is_empty() => suffixes,
         Some(_) | None => vue3_default_module_suffixes(),
@@ -1148,6 +1159,7 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
         module,
         module_suffixes,
         allow_js,
+        custom_conditions,
         resolve_package_json_exports,
         resolve_package_json_imports,
     })
@@ -1256,6 +1268,15 @@ fn vue3_tsconfig_type_resolver_options_from_config(
                     Some(vue3_tsconfig_direct_bool(value, type_resolver)?);
             }
         }
+        if let Some(value) = compiler_options.and_then(|options| options.get("customConditions")) {
+            if type_resolver.typescript_version < (5, 0, 0).into() {
+                type_resolver.external_type_session.block_metadata();
+                return None;
+            }
+            configured.custom_conditions =
+                vue3_tsconfig_direct_custom_conditions(value, type_resolver)?;
+            configured.custom_conditions_is_declared = true;
+        }
         if let Some(target) = compiler_options.and_then(|options| options.get("target")) {
             configured.target = Some(vue3_tsconfig_direct_target_kind(target, type_resolver)?);
         }
@@ -1308,6 +1329,39 @@ fn vue3_tsconfig_direct_module_suffixes(
         suffixes.push(suffix.to_string());
     }
     Some(std::sync::Arc::from(suffixes))
+}
+
+fn vue3_tsconfig_direct_custom_conditions(
+    value: &serde_json::Value,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Option<Vue3CustomConditionSet>> {
+    if value.is_null() {
+        return Some(None);
+    }
+    let Some(values) = value.as_array() else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let mut conditions = Vec::new();
+    for value in values {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        if value.is_null() {
+            continue;
+        }
+        let Some(condition) = value.as_str() else {
+            type_resolver.external_type_session.block_metadata();
+            return None;
+        };
+        if !condition.is_empty() {
+            conditions.push(condition.to_string());
+        }
+    }
+    Some(Some(Vue3CustomConditionSet::from_strings(conditions)))
 }
 
 fn vue3_tsconfig_direct_module_kind(
@@ -4751,6 +4805,320 @@ mod vue3_module_suffix_config_tests {
 
             assert!(vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none());
             assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn custom_conditions_inherit_replace_empty_and_null_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("base.json"),
+            r#"{
+                "compilerOptions":{
+                    "module":"ESNext",
+                    "customConditions":["browser","development"]
+                }
+            }"#,
+        )
+        .expect("write inherited custom conditions");
+        let cases = [
+            (
+                "inherited",
+                r#"{"extends":"../base.json","compilerOptions":{"moduleResolution":"Bundler"}}"#,
+                vec!["browser".to_string(), "development".to_string()],
+            ),
+            (
+                "replaced",
+                r#"{
+                    "extends":"../base.json",
+                    "compilerOptions":{
+                        "moduleResolution":"Bundler",
+                        "customConditions":["worker"]
+                    }
+                }"#,
+                vec!["worker".to_string()],
+            ),
+            (
+                "empty-array",
+                r#"{
+                    "extends":"../base.json",
+                    "compilerOptions":{
+                        "moduleResolution":"Bundler",
+                        "customConditions":[]
+                    }
+                }"#,
+                Vec::new(),
+            ),
+            (
+                "cleared-with-null",
+                r#"{
+                    "extends":"../base.json",
+                    "compilerOptions":{
+                        "moduleResolution":"Node10",
+                        "customConditions":null
+                    }
+                }"#,
+                Vec::new(),
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let project = dir.path().join(name);
+            std::fs::create_dir_all(&project).expect("create custom condition project");
+            std::fs::write(project.join("tsconfig.json"), source)
+                .expect("write custom condition config");
+            let resolver = vue3_type_resolver_context_for_filename(
+                &project.join("Comp.vue").to_string_lossy(),
+            );
+
+            assert_eq!(
+                resolver.custom_conditions.iter().cloned().collect::<Vec<_>>(),
+                expected,
+                "{name}"
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked(), "{name}");
+        }
+    }
+
+    #[test]
+    fn custom_condition_config_is_versioned_validated_and_bounded() {
+        let invalid_sources = [
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","customConditions":"browser"}}"#,
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","customConditions":["browser",1]}}"#,
+        ];
+        for source in invalid_sources {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext::default();
+
+            assert!(vue3_tsconfig_type_resolver_options(&filename, &resolver).is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = write_config(
+            dir.path(),
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","customConditions":["worker",null,""," ","browser","worker"]}}"#,
+        );
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 6,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_type_resolver_options(&filename, &exact)
+                .expect("resolve bounded custom conditions")
+                .custom_conditions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                " ".to_string(),
+                "browser".to_string(),
+                "worker".to_string(),
+            ],
+        );
+        assert_eq!(exact.external_type_session.stats().metadata_fanout_entries, 6);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 5,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_type_resolver_options(&filename, &short).is_none());
+        assert!(short.external_type_session.metadata_is_blocked());
+
+        let version_cases = [
+            (
+                (4, 9, 5),
+                r#"{"compilerOptions":{"module":"Node16","moduleResolution":"Node16","customConditions":[]}}"#,
+                true,
+            ),
+            (
+                (5, 0, 4),
+                r#"{"compilerOptions":{"module":"CommonJS","moduleResolution":"Node10","customConditions":[]}}"#,
+                true,
+            ),
+            (
+                (5, 0, 4),
+                r#"{"compilerOptions":{"module":"CommonJS","moduleResolution":"Node10","customConditions":null}}"#,
+                false,
+            ),
+        ];
+        for (version, source, expected_blocked) in version_cases {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(dir.path(), source);
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+            let options = vue3_tsconfig_type_resolver_options(&filename, &resolver);
+
+            assert_eq!(options.is_none(), expected_blocked, "TypeScript {version:?}");
+            assert_eq!(
+                resolver.external_type_session.metadata_is_blocked(),
+                expected_blocked,
+                "TypeScript {version:?}",
+            );
+            if let Some(options) = options {
+                assert!(
+                    options.custom_conditions.iter().next().is_none(),
+                    "TypeScript {version:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn custom_conditions_select_package_branches_and_isolate_caches() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir
+            .path()
+            .join("node_modules")
+            .join("custom-condition-package");
+        std::fs::create_dir_all(&package).expect("create conditional package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "name":"custom-condition-package",
+                "exports":{
+                    ".":{
+                        "browser":"./browser.d.ts",
+                        "default":"./default.d.ts"
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional package manifest");
+        let browser = package.join("browser.d.ts");
+        let fallback = package.join("default.d.ts");
+        std::fs::write(&browser, "export interface Props { browser: string }")
+            .expect("write browser declaration");
+        std::fs::write(&fallback, "export interface Props { fallback: string }")
+            .expect("write fallback declaration");
+        let import_browser = dir.path().join("import-browser.d.ts");
+        let import_fallback = dir.path().join("import-default.d.ts");
+        std::fs::write(&import_browser, "export interface Imported { browser: string }")
+            .expect("write browser package import declaration");
+        std::fs::write(
+            &import_fallback,
+            "export interface Imported { fallback: string }",
+        )
+        .expect("write fallback package import declaration");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{
+                "name":"custom-condition-project",
+                "imports":{
+                    "#custom":{
+                        "browser":"./import-browser.d.ts",
+                        "default":"./import-default.d.ts"
+                    }
+                }
+            }"##,
+        )
+        .expect("write conditional package imports manifest");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions":{
+                    "module":"ESNext",
+                    "moduleResolution":"Bundler",
+                    "customConditions":["browser"]
+                }
+            }"#,
+        )
+        .expect("write project config");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let configured = vue3_type_resolver_context_for_filename(&filename);
+        let mut without_custom = configured.clone();
+        without_custom.custom_conditions = Vue3CustomConditionSet::default();
+
+        for _ in 0..2 {
+            assert_eq!(
+                resolve_vue3_type_import(
+                    &filename,
+                    "custom-condition-package",
+                    &configured,
+                ),
+                Some(browser.clone()),
+            );
+            assert_eq!(
+                resolve_vue3_type_import(
+                    &filename,
+                    "custom-condition-package",
+                    &without_custom,
+                ),
+                Some(fallback.clone()),
+            );
+            assert_eq!(
+                resolve_vue3_type_import(&filename, "#custom", &configured),
+                Some(import_browser.clone()),
+            );
+            assert_eq!(
+                resolve_vue3_type_import(&filename, "#custom", &without_custom),
+                Some(import_fallback.clone()),
+            );
+        }
+        assert_ne!(configured, without_custom);
+        assert_eq!(
+            configured
+                .external_type_session
+                .stats()
+                .resolution_cache_hits,
+            4,
+        );
+
+        let root = dir.path().join("root.ts");
+        std::fs::write(
+            &root,
+            "export { Props } from 'custom-condition-package'",
+        )
+        .expect("write condition-sensitive root");
+        let configured_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &configured,
+        )
+        .expect("load configured custom condition context");
+        let fallback_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &without_custom,
+        )
+        .expect("load fallback condition context");
+        assert_eq!(
+            configured_context.type_sources.get("Props"),
+            Some(&normalize_path_string(&browser)),
+        );
+        assert_eq!(
+            fallback_context.type_sources.get("Props"),
+            Some(&normalize_path_string(&fallback)),
+        );
+        assert!(!std::sync::Arc::ptr_eq(
+            &configured_context,
+            &fallback_context,
+        ));
+    }
+
+    #[test]
+    fn custom_condition_membership_overrides_builtin_condition_gates() {
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 3).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            custom_conditions: Vue3CustomConditionSet::from_strings(vec![
+                "node".to_string(),
+                "require".to_string(),
+                "types@>=999".to_string(),
+            ]),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        for condition in ["node", "require", "types@>=999"] {
+            assert!(vue3_package_export_condition_is_active(
+                condition,
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            ));
         }
     }
 

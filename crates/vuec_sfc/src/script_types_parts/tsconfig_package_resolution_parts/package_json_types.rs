@@ -1369,6 +1369,7 @@ fn vue3_package_export_condition_is_active(
             ("import", Vue3TypeResolutionMode::Import)
                 | ("require", Vue3TypeResolutionMode::Require)
         )
+        || type_resolver.custom_conditions.contains(condition)
         || condition.strip_prefix("types@").is_some_and(|selector| {
             vue3_package_types_version_selector_matches_version(
                 selector,

@@ -355,6 +355,7 @@ pub(crate) struct Vue3TypeResolverContext {
     pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
     pub(crate) module: Option<Vue3TypeModuleKind>,
     pub(crate) allow_js: bool,
+    pub(crate) custom_conditions: Vue3CustomConditionSet,
     pub(crate) resolve_package_json_exports: Option<bool>,
     pub(crate) resolve_package_json_imports: Option<bool>,
     pub(crate) active_package_json_features: Option<Vue3PackageJsonResolutionFeatures>,
@@ -448,6 +449,7 @@ impl PartialEq for Vue3TypeResolverContext {
             && self.module_resolution == other.module_resolution
             && self.effective_module() == other.effective_module()
             && self.allow_js == other.allow_js
+            && self.custom_conditions == other.custom_conditions
             && self.package_json_features() == other.package_json_features()
             && self.package_json_features_for_type_reference(false)
                 == other.package_json_features_for_type_reference(false)
@@ -462,6 +464,33 @@ pub(crate) fn vue3_default_module_suffixes() -> std::sync::Arc<[String]> {
     std::sync::Arc::from([String::new()])
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Vue3CustomConditionSet(std::sync::Arc<[String]>);
+
+impl Vue3CustomConditionSet {
+    pub(crate) fn from_strings(mut conditions: Vec<String>) -> Self {
+        conditions.sort_unstable();
+        conditions.dedup();
+        Self(std::sync::Arc::from(conditions))
+    }
+
+    pub(crate) fn contains(&self, condition: &str) -> bool {
+        self.0
+            .binary_search_by(|candidate| candidate.as_str().cmp(condition))
+            .is_ok()
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.0.iter()
+    }
+}
+
+impl Default for Vue3CustomConditionSet {
+    fn default() -> Self {
+        Self(std::sync::Arc::from(Vec::<String>::new()))
+    }
+}
+
 impl Default for Vue3TypeResolverContext {
     fn default() -> Self {
         Self {
@@ -469,6 +498,7 @@ impl Default for Vue3TypeResolverContext {
             module_resolution: Vue3TypeModuleResolutionKind::default(),
             module: None,
             allow_js: false,
+            custom_conditions: Vue3CustomConditionSet::default(),
             resolve_package_json_exports: None,
             resolve_package_json_imports: None,
             active_package_json_features: None,

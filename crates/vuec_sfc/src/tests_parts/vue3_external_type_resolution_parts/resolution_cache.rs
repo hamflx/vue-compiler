@@ -1170,6 +1170,7 @@
             module_resolution: Vue3TypeModuleResolutionKind::Node10,
             module: None,
             allow_js: false,
+            custom_conditions: Vue3CustomConditionSet::default(),
             resolve_package_json_exports: None,
             resolve_package_json_imports: None,
             active_package_json_features: None,
