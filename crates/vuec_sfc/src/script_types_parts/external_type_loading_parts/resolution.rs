@@ -7,9 +7,15 @@ pub(crate) enum Vue3TypeResolutionMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3TypeResolutionKind {
-    Module(Vue3TypeResolutionMode),
+    Module {
+        mode: Vue3TypeResolutionMode,
+        explicit_mode: bool,
+    },
     ReferencePath,
-    ReferenceTypes(Option<Vue3TypeResolutionMode>),
+    ReferenceTypes {
+        mode: Option<Vue3TypeResolutionMode>,
+        package_json_features: Vue3PackageJsonResolutionFeatures,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -282,7 +282,62 @@ pub(crate) enum Vue3TypeModuleResolutionKind {
     Bundler,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Vue3TypeModuleKind {
+    Classic,
+    #[default]
+    CommonJs,
+    EcmaScript,
+    Node16,
+    NodeNext,
+    Preserve,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Vue3PackageJsonResolutionFeatures {
+    pub(crate) imports: bool,
+    pub(crate) imports_pattern_root: bool,
+    pub(crate) self_name: bool,
+    pub(crate) exports: bool,
+}
+
+impl Vue3PackageJsonResolutionFeatures {
+    fn all(typescript_version: &nodejs_semver::Version) -> Self {
+        Self {
+            imports: true,
+            imports_pattern_root: typescript_version >= &(6, 0, 0).into(),
+            self_name: true,
+            exports: true,
+        }
+    }
+}
+
 impl Vue3TypeModuleResolutionKind {
+    fn default_package_json_features(
+        self,
+        typescript_version: &nodejs_semver::Version,
+    ) -> Vue3PackageJsonResolutionFeatures {
+        match self {
+            Self::Node16 if typescript_version >= &(4, 7, 0).into() => {
+                Vue3PackageJsonResolutionFeatures {
+                    imports: true,
+                    imports_pattern_root: false,
+                    self_name: true,
+                    exports: true,
+                }
+            }
+            Self::NodeNext if typescript_version >= &(4, 7, 0).into() => {
+                Vue3PackageJsonResolutionFeatures::all(typescript_version)
+            }
+            Self::Bundler if typescript_version >= &(5, 0, 0).into() => {
+                Vue3PackageJsonResolutionFeatures::all(typescript_version)
+            }
+            Self::Classic | Self::Node10 | Self::Node16 | Self::NodeNext | Self::Bundler => {
+                Vue3PackageJsonResolutionFeatures::default()
+            }
+        }
+    }
+
     pub(crate) fn uses_node_esm_specifier_rules(
         self,
         resolution_mode: Vue3TypeResolutionMode,
@@ -296,14 +351,107 @@ impl Vue3TypeModuleResolutionKind {
 pub(crate) struct Vue3TypeResolverContext {
     pub(crate) typescript_version: nodejs_semver::Version,
     pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
+    pub(crate) module: Option<Vue3TypeModuleKind>,
+    pub(crate) resolve_package_json_exports: Option<bool>,
+    pub(crate) resolve_package_json_imports: Option<bool>,
+    pub(crate) active_package_json_features: Option<Vue3PackageJsonResolutionFeatures>,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
     pub(crate) external_type_session: Vue3ExternalTypeLoadSession,
+}
+
+impl Vue3TypeResolverContext {
+    pub(crate) fn effective_module(&self) -> Vue3TypeModuleKind {
+        self.module.unwrap_or(match self.module_resolution {
+            Vue3TypeModuleResolutionKind::Classic => Vue3TypeModuleKind::Classic,
+            Vue3TypeModuleResolutionKind::Node10 => Vue3TypeModuleKind::CommonJs,
+            Vue3TypeModuleResolutionKind::Node16 => Vue3TypeModuleKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext => Vue3TypeModuleKind::NodeNext,
+            Vue3TypeModuleResolutionKind::Bundler => Vue3TypeModuleKind::Preserve,
+        })
+    }
+
+    fn configured_package_json_features(&self) -> Vue3PackageJsonResolutionFeatures {
+        let mut features = self
+            .module_resolution
+            .default_package_json_features(&self.typescript_version);
+        if self.typescript_version >= (5, 0, 0).into()
+            && matches!(
+                self.module_resolution,
+                Vue3TypeModuleResolutionKind::Node16
+                    | Vue3TypeModuleResolutionKind::NodeNext
+                    | Vue3TypeModuleResolutionKind::Bundler
+            )
+        {
+            if let Some(enabled) = self.resolve_package_json_exports {
+                features.exports = enabled;
+            }
+            if let Some(enabled) = self.resolve_package_json_imports {
+                features.imports = enabled;
+            }
+        }
+        features
+    }
+
+    fn type_reference_package_json_features(&self) -> Vue3PackageJsonResolutionFeatures {
+        let mut features = self
+            .module_resolution
+            .default_package_json_features(&self.typescript_version);
+        if self.typescript_version >= (5, 0, 0).into() {
+            if let Some(enabled) = self.resolve_package_json_exports {
+                features.exports = enabled;
+            }
+            if let Some(enabled) = self.resolve_package_json_imports {
+                features.imports = enabled;
+            }
+        }
+        features
+    }
+
+    pub(crate) fn package_json_features(&self) -> Vue3PackageJsonResolutionFeatures {
+        self.active_package_json_features
+            .unwrap_or_else(|| self.configured_package_json_features())
+    }
+
+    pub(crate) fn package_json_features_for_request(
+        &self,
+        explicit_mode: bool,
+    ) -> Vue3PackageJsonResolutionFeatures {
+        if let Some(features) = self.active_package_json_features {
+            return features;
+        }
+        if explicit_mode
+            && self.typescript_version >= (5, 3, 0).into()
+            && self.module_resolution == Vue3TypeModuleResolutionKind::Node10
+        {
+            Vue3PackageJsonResolutionFeatures::all(&self.typescript_version)
+        } else {
+            self.configured_package_json_features()
+        }
+    }
+
+    pub(crate) fn package_json_features_for_type_reference(
+        &self,
+        mode_present: bool,
+    ) -> Vue3PackageJsonResolutionFeatures {
+        if let Some(features) = self.active_package_json_features {
+            return features;
+        }
+        if mode_present && self.typescript_version >= (5, 3, 0).into() {
+            Vue3PackageJsonResolutionFeatures::all(&self.typescript_version)
+        } else {
+            self.type_reference_package_json_features()
+        }
+    }
 }
 
 impl PartialEq for Vue3TypeResolverContext {
     fn eq(&self, other: &Self) -> bool {
         self.typescript_version == other.typescript_version
             && self.module_resolution == other.module_resolution
+            && self.effective_module() == other.effective_module()
+            && self.package_json_features() == other.package_json_features()
+            && self.package_json_features_for_type_reference(false)
+                == other.package_json_features_for_type_reference(false)
             && self.module_suffixes == other.module_suffixes
             && self.external_type_session.limits() == other.external_type_session.limits()
     }
@@ -320,6 +468,10 @@ impl Default for Vue3TypeResolverContext {
         Self {
             typescript_version: vue3_package_typescript_baseline_version(),
             module_resolution: Vue3TypeModuleResolutionKind::default(),
+            module: None,
+            resolve_package_json_exports: None,
+            resolve_package_json_imports: None,
+            active_package_json_features: None,
             module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::default(),
         }

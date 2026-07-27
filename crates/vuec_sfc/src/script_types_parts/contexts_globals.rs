@@ -7735,17 +7735,13 @@ fn vue3_global_type_file_import_scope_identities_with_budget(
             continue;
         };
         let source = import.source.value.as_str();
-        let resolution_mode = vue3_declaration_resolution_mode(
+        let request = vue3_declaration_resolution_request(
             import.import_kind,
             import.with_clause.as_deref(),
             static_resolution_mode,
         );
-        let resolved = resolve_vue3_type_import_with_mode(
-            definition_key,
-            source,
-            resolution_mode,
-            type_resolver,
-        );
+        let resolved =
+            resolve_vue3_type_import_for_request(definition_key, source, request, type_resolver);
         let source_key = match resolved {
             Some(resolved) => {
                 if !namespace_budget.reserve(

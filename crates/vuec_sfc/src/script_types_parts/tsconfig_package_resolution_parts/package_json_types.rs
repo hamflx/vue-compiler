@@ -23,6 +23,7 @@ pub(crate) struct Vue3PackageJsonTypeManifest {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Vue3PackageModuleType {
     #[default]
+    Unspecified,
     CommonJs,
     Module,
 }
@@ -64,7 +65,7 @@ impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
                             manifest.module_type = match value.as_str() {
                                 Some("module") => Vue3PackageModuleType::Module,
                                 Some("commonjs") => Vue3PackageModuleType::CommonJs,
-                                _ => Vue3PackageModuleType::CommonJs,
+                                _ => Vue3PackageModuleType::Unspecified,
                             };
                         }
                         "typesVersions" => manifest.types_versions = map.next_value()?,
@@ -234,11 +235,13 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
-    resolve_vue3_package_json_type_entry_with_mode(
+    resolve_vue3_package_json_type_entry_with_exports(
         package_dir,
         subpath,
-        Vue3TypeResolutionMode::Import,
         type_resolver,
+        Some(Vue3TypeResolutionMode::Import),
+        false,
+        true,
     )
 }
 
@@ -254,6 +257,22 @@ pub(crate) fn resolve_vue3_package_json_type_entry_with_mode(
         type_resolver,
         Some(resolution_mode),
         false,
+        type_resolver.package_json_features().exports,
+    )
+}
+
+pub(crate) fn resolve_vue3_package_json_directory_type_entry_with_mode(
+    package_dir: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageJsonTypeResolution {
+    resolve_vue3_package_json_type_entry_with_exports(
+        package_dir,
+        None,
+        type_resolver,
+        Some(resolution_mode),
+        false,
+        false,
     )
 }
 
@@ -263,12 +282,23 @@ pub(crate) fn resolve_vue3_package_json_type_reference_entry(
     resolution_mode: Option<Vue3TypeResolutionMode>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
+    let enable_exports = type_resolver
+        .package_json_features_for_type_reference(resolution_mode.is_some())
+        .exports;
+    let exports_mode = resolution_mode.or(match type_resolver.module_resolution {
+        Vue3TypeModuleResolutionKind::Bundler => Some(Vue3TypeResolutionMode::Import),
+        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext => {
+            Some(Vue3TypeResolutionMode::Require)
+        }
+        Vue3TypeModuleResolutionKind::Classic | Vue3TypeModuleResolutionKind::Node10 => None,
+    });
     resolve_vue3_package_json_type_entry_with_exports(
         package_dir,
         subpath,
         type_resolver,
-        resolution_mode,
+        exports_mode,
         true,
+        enable_exports,
     )
 }
 
@@ -278,6 +308,7 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     type_resolver: &Vue3TypeResolverContext,
     exports_mode: Option<Vue3TypeResolutionMode>,
     declaration_only_exports: bool,
+    enable_exports: bool,
 ) -> Vue3PackageJsonTypeResolution {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vue3PackageJsonTypeResolution::Blocked;
@@ -299,20 +330,22 @@ fn resolve_vue3_package_json_type_entry_with_exports(
             Vue3PackageJsonTypeResolution::NoPackageJson
         };
     };
-    if let Some((exports, resolution_mode)) = manifest
-        .exports
-        .as_ref()
-        .zip(exports_mode)
-        .filter(|(exports, _)| !exports.is_null())
-    {
-        return resolve_vue3_package_exports_type_path(
-            package_dir,
-            exports,
-            subpath,
-            resolution_mode,
-            declaration_only_exports,
-            type_resolver,
-        );
+    if enable_exports {
+        if let Some((exports, resolution_mode)) = manifest
+            .exports
+            .as_ref()
+            .zip(exports_mode)
+            .filter(|(exports, _)| !exports.is_null())
+        {
+            return resolve_vue3_package_exports_type_path(
+                package_dir,
+                exports,
+                subpath,
+                resolution_mode,
+                declaration_only_exports,
+                type_resolver,
+            );
+        }
     }
     let root_type_target = if subpath.is_none() {
         manifest
@@ -596,7 +629,9 @@ fn visit_vue3_package_imports_type_targets(
     type_resolver: &Vue3TypeResolverContext,
     visitor: &mut impl FnMut(&str) -> Vue3PackageTargetVisit,
 ) -> Vue3PackageTargetVisit {
-    if source.contains('*') || !vue3_package_import_specifier_is_safe(source) {
+    if source.contains('*')
+        || !vue3_package_import_specifier_is_safe_for_resolver(source, type_resolver)
+    {
         return Vue3PackageTargetVisit::Invalid;
     }
     let Some(object) = imports.as_object() else {
@@ -621,7 +656,7 @@ fn visit_vue3_package_imports_type_targets(
         {
             return Vue3PackageTargetVisit::Blocked;
         }
-        if !vue3_package_import_expansion_key_is_safe(pattern) {
+        if !vue3_package_import_expansion_key_is_safe(pattern, type_resolver) {
             continue;
         }
         let expansion = if pattern.contains('*') {
@@ -676,7 +711,12 @@ fn visit_vue3_package_target(
         };
         let target = target.as_ref();
         let prefix_expansion = matches!(expansion, Vue3PackageTargetExpansion::Prefix(_));
-        if !vue3_package_target_is_safe(target, target_kind, prefix_expansion) {
+        if !vue3_package_target_is_safe(
+            target,
+            target_kind,
+            prefix_expansion,
+            type_resolver,
+        ) {
             return Vue3PackageTargetVisit::Invalid;
         }
         let expanded = match expansion {
@@ -720,7 +760,7 @@ fn visit_vue3_package_target(
             }
         };
         if vue3_package_export_contains_encoded_separator(&expanded)
-            || !vue3_package_target_is_safe(&expanded, target_kind, false)
+            || !vue3_package_target_is_safe(&expanded, target_kind, false, type_resolver)
         {
             return Vue3PackageTargetVisit::Invalid;
         }
@@ -782,7 +822,7 @@ fn visit_vue3_package_target(
         if !vue3_package_export_condition_is_active(
             condition,
             resolution_mode,
-            &type_resolver.typescript_version,
+            type_resolver,
         ) {
             continue;
         }
@@ -836,6 +876,7 @@ fn vue3_package_target_is_safe(
     target: &str,
     target_kind: Vue3PackageTargetKind,
     allow_trailing_slash: bool,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> bool {
     match target_kind {
         Vue3PackageTargetKind::Exports => vue3_package_export_target_is_safe(target),
@@ -846,6 +887,7 @@ fn vue3_package_target_is_safe(
                 vue3_package_import_specifier_is_safe_with_trailing_slash(
                     target,
                     allow_trailing_slash,
+                    type_resolver.package_json_features().imports_pattern_root,
                 )
             } else {
                 vue3_package_import_external_target_is_safe_with_trailing_slash(
@@ -878,13 +920,26 @@ fn vue3_package_import_external_target_is_safe_with_trailing_slash(
         })
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_package_import_specifier_is_safe(source: &str) -> bool {
-    vue3_package_import_specifier_is_safe_with_trailing_slash(source, false)
+    vue3_package_import_specifier_is_safe_with_trailing_slash(source, false, false)
+}
+
+fn vue3_package_import_specifier_is_safe_for_resolver(
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    vue3_package_import_specifier_is_safe_with_trailing_slash(
+        source,
+        false,
+        type_resolver.package_json_features().imports_pattern_root,
+    )
 }
 
 fn vue3_package_import_specifier_is_safe_with_trailing_slash(
     source: &str,
     allow_trailing_slash: bool,
+    allow_pattern_root: bool,
 ) -> bool {
     let source = if allow_trailing_slash {
         source.strip_suffix('/').unwrap_or(source)
@@ -893,23 +948,34 @@ fn vue3_package_import_specifier_is_safe_with_trailing_slash(
     };
     if source == "#"
         || !source.starts_with('#')
-        || source.starts_with("#/")
+        || (source.starts_with("#/") && !allow_pattern_root)
         || source.ends_with('/')
         || source.contains('\\')
         || vue3_package_export_contains_encoded_separator(source)
     {
         return false;
     }
-    let body = &source[1..];
+    let body = if allow_pattern_root {
+        source.strip_prefix("#/").unwrap_or(&source[1..])
+    } else {
+        &source[1..]
+    };
     !body.is_empty()
         && body
             .split('/')
             .all(|segment| !segment.is_empty() && !vue3_package_export_segment_is_forbidden(segment))
 }
 
-fn vue3_package_import_expansion_key_is_safe(key: &str) -> bool {
+fn vue3_package_import_expansion_key_is_safe(
+    key: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
     key.bytes().filter(|byte| *byte == b'*').count() <= 1
-        && vue3_package_import_specifier_is_safe_with_trailing_slash(key, true)
+        && vue3_package_import_specifier_is_safe_with_trailing_slash(
+            key,
+            true,
+            type_resolver.package_json_features().imports_pattern_root,
+        )
 }
 
 fn vue3_package_expansion_specificity(key: &str) -> (usize, bool, usize) {
@@ -924,10 +990,11 @@ fn vue3_package_expansion_specificity(key: &str) -> (usize, bool, usize) {
 fn vue3_package_export_condition_is_active(
     condition: &str,
     resolution_mode: Vue3TypeResolutionMode,
-    typescript_version: &nodejs_semver::Version,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> bool {
     condition == "types"
-        || condition == "node"
+        || (condition == "node"
+            && type_resolver.module_resolution != Vue3TypeModuleResolutionKind::Bundler)
         || condition == "default"
         || matches!(
             (condition, resolution_mode),
@@ -935,7 +1002,10 @@ fn vue3_package_export_condition_is_active(
                 | ("require", Vue3TypeResolutionMode::Require)
         )
         || condition.strip_prefix("types@").is_some_and(|selector| {
-            vue3_package_types_version_selector_matches_version(selector, typescript_version)
+            vue3_package_types_version_selector_matches_version(
+                selector,
+                &type_resolver.typescript_version,
+            )
         })
 }
 

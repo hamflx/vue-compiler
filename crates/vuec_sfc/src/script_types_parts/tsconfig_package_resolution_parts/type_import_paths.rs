@@ -340,9 +340,8 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         return resolved;
     }
     if probe_mode.is_dir(candidate, type_resolver)? {
-        match resolve_vue3_package_json_type_entry_with_mode(
+        match resolve_vue3_package_json_directory_type_entry_with_mode(
             candidate,
-            None,
             resolution_mode,
             type_resolver,
         ) {
@@ -664,12 +663,17 @@ mod vue3_type_import_candidate_tests {
         std::fs::create_dir_all(&package_dir).expect("create package directory");
         std::fs::write(
             package_dir.join("package.json"),
-            r#"{"types":"types.d.ts"}"#,
+            r#"{"types":"types.d.ts","exports":{".":"./exports.d.ts"}}"#,
         )
         .expect("write directory package manifest");
         let package_entry = package_dir.join("types.d.ts");
         std::fs::write(&package_entry, "export interface PackageProps {}")
             .expect("write directory package entry");
+        std::fs::write(
+            package_dir.join("exports.d.ts"),
+            "export interface WrongPackageProps {}",
+        )
+        .expect("write package exports decoy");
         let index_dir = dir.path().join("index-dir");
         std::fs::create_dir_all(&index_dir).expect("create index directory");
         let index_entry = index_dir.join("index.ts");

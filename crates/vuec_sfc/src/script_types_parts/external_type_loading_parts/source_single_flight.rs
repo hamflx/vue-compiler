@@ -312,6 +312,7 @@ mod source_single_flight_tests {
             source: value.into(),
             source_type: oxc_span::SourceType::ts(),
             resolution_mode: Vue3TypeResolutionMode::Import,
+            dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
         }
     }
 
@@ -360,6 +361,7 @@ mod source_single_flight_tests {
                 Vue3ExternalTypeFormat {
                     source_type: oxc_span::SourceType::ts(),
                     resolution_mode: Vue3TypeResolutionMode::Import,
+                    dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
                 },
             ),
             vue3_external_type_source_cache_key(
@@ -368,6 +370,7 @@ mod source_single_flight_tests {
                 Vue3ExternalTypeFormat {
                     source_type: oxc_span::SourceType::ts(),
                     resolution_mode: Vue3TypeResolutionMode::Import,
+                    dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
                 },
             )
         );
@@ -382,6 +385,7 @@ mod source_single_flight_tests {
                 Vue3ExternalTypeFormat {
                     source_type: oxc_span::SourceType::ts(),
                     resolution_mode: Vue3TypeResolutionMode::Import,
+                    dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
                 },
             ),
             vue3_external_type_source_cache_key(
@@ -390,6 +394,7 @@ mod source_single_flight_tests {
                 Vue3ExternalTypeFormat {
                     source_type: oxc_span::SourceType::ts(),
                     resolution_mode: Vue3TypeResolutionMode::Import,
+                    dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
                 },
             )
         );
@@ -453,7 +458,7 @@ mod source_single_flight_tests {
         let nested_ts = vue3_external_type_format(&nested_package.join("index.ts"), &session)
             .expect("nested default CommonJS format");
         assert!(nested_ts.source_type.is_unambiguous());
-        assert_eq!(nested_ts.resolution_mode, Vue3TypeResolutionMode::Require);
+        assert_eq!(nested_ts.resolution_mode, Vue3TypeResolutionMode::Import);
 
         let explicit_commonjs =
             vue3_external_type_format(&module_package.join("index.d.cts"), &session)
@@ -483,8 +488,164 @@ mod source_single_flight_tests {
         assert!(manifestless_ts.source_type.is_unambiguous());
         assert_eq!(
             manifestless_ts.resolution_mode,
-            Vue3TypeResolutionMode::Require
+            Vue3TypeResolutionMode::Import
         );
+    }
+
+    #[test]
+    fn source_formats_follow_effective_module_and_explicit_package_type() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let local = dir.path().join("local");
+        let local_module = dir.path().join("local-module");
+        let node_modules = dir.path().join("node_modules");
+        let unspecified = node_modules.join("unspecified");
+        let commonjs = node_modules.join("commonjs");
+        let module = node_modules.join("module");
+        for path in [&local, &local_module, &unspecified, &commonjs, &module] {
+            std::fs::create_dir_all(path).expect("create format fixture");
+        }
+        std::fs::write(local_module.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write local module manifest");
+        std::fs::write(unspecified.join("package.json"), "{}")
+            .expect("write unspecified manifest");
+        std::fs::write(commonjs.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write CommonJS manifest");
+        std::fs::write(module.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write module manifest");
+        let local_plain = local.join("index.d.ts");
+        let local_module_plain = local_module.join("index.d.ts");
+        let unspecified_plain = unspecified.join("index.d.ts");
+        let commonjs_plain = commonjs.join("index.d.ts");
+        let module_plain = module.join("index.d.ts");
+        let explicit_commonjs = unspecified.join("index.d.cts");
+        let explicit_module = unspecified.join("index.d.mts");
+        let session = Vue3ExternalTypeLoadSession::default();
+
+        let format = |path: &Path,
+                      module_resolution: Vue3TypeModuleResolutionKind,
+                      module_kind: Vue3TypeModuleKind| {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 0).into(),
+                module_resolution,
+                module: Some(module_kind),
+                external_type_session: session.clone(),
+                ..Vue3TypeResolverContext::default()
+            };
+            vue3_external_type_format_with_resolver(path, &resolver).expect("source format")
+        };
+
+        for (module_kind, expected) in [
+            (
+                Vue3TypeModuleKind::CommonJs,
+                Vue3TypeResolutionMode::Require,
+            ),
+            (
+                Vue3TypeModuleKind::EcmaScript,
+                Vue3TypeResolutionMode::Import,
+            ),
+            (
+                Vue3TypeModuleKind::Preserve,
+                Vue3TypeResolutionMode::Import,
+            ),
+        ] {
+            assert_eq!(
+                format(
+                    &local_plain,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                    module_kind,
+                )
+                .resolution_mode,
+                expected,
+            );
+            assert_eq!(
+                format(
+                    &unspecified_plain,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                    module_kind,
+                )
+                .resolution_mode,
+                expected,
+            );
+        }
+
+        for module_kind in [
+            Vue3TypeModuleKind::CommonJs,
+            Vue3TypeModuleKind::EcmaScript,
+            Vue3TypeModuleKind::Preserve,
+        ] {
+            assert_eq!(
+                format(
+                    &commonjs_plain,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                    module_kind,
+                )
+                .resolution_mode,
+                Vue3TypeResolutionMode::Require,
+            );
+            assert_eq!(
+                format(
+                    &module_plain,
+                    Vue3TypeModuleResolutionKind::Bundler,
+                    module_kind,
+                )
+                .resolution_mode,
+                Vue3TypeResolutionMode::Import,
+            );
+        }
+
+        for module_kind in [Vue3TypeModuleKind::Node16, Vue3TypeModuleKind::NodeNext] {
+            let module_resolution = if module_kind == Vue3TypeModuleKind::Node16 {
+                Vue3TypeModuleResolutionKind::Node16
+            } else {
+                Vue3TypeModuleResolutionKind::NodeNext
+            };
+            assert_eq!(
+                format(&local_plain, module_resolution, module_kind).resolution_mode,
+                Vue3TypeResolutionMode::Require,
+            );
+            assert_eq!(
+                format(&local_module_plain, module_resolution, module_kind).resolution_mode,
+                Vue3TypeResolutionMode::Import,
+            );
+        }
+
+        for (module_kind, expected_dynamic) in [
+            (
+                Vue3TypeModuleKind::CommonJs,
+                Vue3TypeResolutionMode::Require,
+            ),
+            (
+                Vue3TypeModuleKind::EcmaScript,
+                Vue3TypeResolutionMode::Require,
+            ),
+            (
+                Vue3TypeModuleKind::Preserve,
+                Vue3TypeResolutionMode::Import,
+            ),
+            (
+                Vue3TypeModuleKind::NodeNext,
+                Vue3TypeResolutionMode::Import,
+            ),
+        ] {
+            let module_resolution = if module_kind == Vue3TypeModuleKind::NodeNext {
+                Vue3TypeModuleResolutionKind::NodeNext
+            } else {
+                Vue3TypeModuleResolutionKind::Bundler
+            };
+            let commonjs_format = format(&explicit_commonjs, module_resolution, module_kind);
+            assert_eq!(
+                commonjs_format.resolution_mode,
+                Vue3TypeResolutionMode::Require,
+            );
+            assert_eq!(commonjs_format.dynamic_resolution_mode, expected_dynamic);
+            let module_format = format(&explicit_module, module_resolution, module_kind);
+            assert_eq!(module_format.resolution_mode, Vue3TypeResolutionMode::Import);
+            assert_eq!(
+                module_format.dynamic_resolution_mode,
+                Vue3TypeResolutionMode::Import,
+            );
+        }
+        assert!(!session.metadata_is_blocked());
     }
 
     #[test]
@@ -601,7 +762,7 @@ mod source_single_flight_tests {
             )
             .expect("stop before node_modules boundary");
         assert!(source.source_type.is_unambiguous());
-        assert_eq!(source.resolution_mode, Vue3TypeResolutionMode::Require);
+        assert_eq!(source.resolution_mode, Vue3TypeResolutionMode::Import);
         assert_eq!(boundary.stats().ancestor_search_entries, 1);
         assert_eq!(boundary.stats().import_files_read, 1);
         assert!(!boundary.metadata_is_blocked());

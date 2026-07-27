@@ -480,13 +480,16 @@ mod project_package_input_target_tests {
         .expect("write package manifest");
         std::fs::write(
             package_dir.join("tsconfig.json"),
-            r#"{"compilerOptions":{"rootDir":"./src","outDir":"./dist"}}"#,
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","rootDir":"./src","outDir":"./dist"}}"#,
         )
         .expect("write project config");
         let leaf = source_dir.join("leaf.ts");
         std::fs::write(&leaf, "export interface Leaf {}").expect("write source target");
         let importer = source_dir.join("Comp.vue");
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import(&importer.to_string_lossy(), "#leaf", &resolver),

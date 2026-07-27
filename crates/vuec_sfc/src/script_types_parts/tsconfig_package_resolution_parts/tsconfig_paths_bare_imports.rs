@@ -579,7 +579,7 @@ fn vue3_package_module_type_for_path(
 ) -> Option<Vue3PackageModuleType> {
     match vue3_package_scope_for_path(path, session) {
         Vue3PackageScopeResolution::Found { manifest, .. } => Some(manifest.module_type),
-        Vue3PackageScopeResolution::Missing => Some(Vue3PackageModuleType::CommonJs),
+        Vue3PackageScopeResolution::Missing => Some(Vue3PackageModuleType::Unspecified),
         Vue3PackageScopeResolution::MetadataBlocked => None,
     }
 }
@@ -613,7 +613,10 @@ pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3Typ
     }
     if let Some(options) = vue3_tsconfig_type_resolver_options(filename, &type_resolver) {
         type_resolver.module_resolution = options.module_resolution;
+        type_resolver.module = Some(options.module);
         type_resolver.module_suffixes = options.module_suffixes;
+        type_resolver.resolve_package_json_exports = options.resolve_package_json_exports;
+        type_resolver.resolve_package_json_imports = options.resolve_package_json_imports;
     } else {
         type_resolver.module_suffixes = std::sync::Arc::from(Vec::<String>::new());
     }

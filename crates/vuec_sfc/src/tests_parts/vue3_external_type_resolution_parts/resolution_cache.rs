@@ -54,7 +54,10 @@
         std::fs::write(&require_entry, "export interface Required {}")
             .expect("write require entry");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import_with_mode(
@@ -106,7 +109,7 @@
     }
 
     #[test]
-    fn vue3_type_import_resolution_mode_reaches_tsconfig_directory_targets() {
+    fn vue3_tsconfig_directory_targets_ignore_package_exports() {
         let dir = tempfile::tempdir().expect("temp dir");
         let package = dir.path().join("node_modules").join("vuec-mode-alias");
         std::fs::create_dir_all(&package).expect("create package directory");
@@ -124,6 +127,7 @@
         std::fs::write(
             package.join("package.json"),
             r#"{
+                "types": "./legacy.d.ts",
                 "exports": {
                     ".": {
                         "types": {
@@ -137,12 +141,18 @@
         .expect("write package manifest");
         let import_entry = package.join("import.d.mts");
         let require_entry = package.join("require.d.cts");
+        let legacy_entry = package.join("legacy.d.ts");
         std::fs::write(&import_entry, "export interface Imported {}")
             .expect("write import entry");
         std::fs::write(&require_entry, "export interface Required {}")
             .expect("write require entry");
+        std::fs::write(&legacy_entry, "export interface Legacy {}")
+            .expect("write legacy entry");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import_with_mode(
@@ -151,7 +161,7 @@
                 Vue3TypeResolutionMode::Import,
                 &resolver,
             ),
-            Some(import_entry),
+            Some(legacy_entry.clone()),
         );
         assert_eq!(
             resolve_vue3_type_import_with_mode(
@@ -160,7 +170,7 @@
                 Vue3TypeResolutionMode::Require,
                 &resolver,
             ),
-            Some(require_entry),
+            Some(legacy_entry),
         );
     }
 
@@ -351,6 +361,307 @@
         assert_eq!(
             resolve_vue3_type_import(&filename, "./directory", &node10),
             Some(relative_directory.join("index.ts"))
+        );
+    }
+
+    #[test]
+    fn vue3_package_maps_follow_resolution_features_and_isolate_explicit_modes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r##"{
+                "name":"project-package",
+                "imports":{
+                    "#alias":"./src/alias.d.ts",
+                    "#/*":"./src/*.d.ts"
+                },
+                "exports":{"./self":"./src/self.d.ts"}
+            }"##,
+        )
+        .expect("write project package manifest");
+        let alias = source_dir.join("alias.d.ts");
+        let rooted_alias = source_dir.join("rooted.d.ts");
+        let self_target = source_dir.join("self.d.ts");
+        std::fs::write(&alias, "export interface AliasProps {}").expect("write imports target");
+        std::fs::write(&rooted_alias, "export interface RootedProps {}")
+            .expect("write rooted imports target");
+        std::fs::write(&self_target, "export interface SelfProps {}")
+            .expect("write self-reference target");
+
+        let package = dir.path().join("node_modules").join("mapped-package");
+        std::fs::create_dir_all(&package).expect("create mapped package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "types":"./legacy.d.ts",
+                "exports":{".":{"types":"./modern.d.ts"}}
+            }"#,
+        )
+        .expect("write mapped package manifest");
+        let legacy = package.join("legacy.d.ts");
+        let modern = package.join("modern.d.ts");
+        std::fs::write(&legacy, "export interface LegacyProps {}")
+            .expect("write legacy package target");
+        std::fs::write(&modern, "export interface ModernProps {}")
+            .expect("write modern package target");
+
+        let self_dependency = dir.path().join("node_modules").join("project-package");
+        std::fs::create_dir_all(&self_dependency).expect("create self-name dependency");
+        std::fs::write(
+            self_dependency.join("package.json"),
+            r#"{"types":"self.d.ts"}"#,
+        )
+        .expect("write self-name dependency manifest");
+        let legacy_self = self_dependency.join("self.d.ts");
+        std::fs::write(&legacy_self, "export interface LegacySelfProps {}")
+            .expect("write self-name dependency target");
+
+        let filename = source_dir.join("Comp.vue").to_string_lossy().to_string();
+        let node10 = Vue3TypeResolverContext {
+            typescript_version: (5, 3, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "mapped-package", &node10),
+            Some(legacy.clone())
+        );
+        assert!(resolve_vue3_type_import(&filename, "#alias", &node10).is_none());
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "project-package/self", &node10),
+            Some(legacy_self.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "mapped-package",
+                Vue3TypeResolutionMode::Import,
+                &node10,
+            ),
+            Some(modern.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "#alias",
+                Vue3TypeResolutionMode::Import,
+                &node10,
+            ),
+            Some(alias.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "project-package/self",
+                Vue3TypeResolutionMode::Import,
+                &node10,
+            ),
+            Some(self_target.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "mapped-package", &node10),
+            Some(legacy.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "mapped-package",
+                Vue3TypeResolutionMode::Import,
+                &node10,
+            ),
+            Some(modern.clone())
+        );
+        let node10_stats = node10.external_type_session.stats();
+        assert_eq!(node10_stats.resolution_lookups, 8);
+        assert_eq!(node10_stats.resolution_cache_hits, 2);
+
+        let node_next = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "mapped-package", &node_next),
+            Some(modern.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "#alias", &node_next),
+            Some(alias.clone())
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "project-package/self", &node_next),
+            Some(self_target.clone())
+        );
+
+        let typescript_5_2 = Vue3TypeResolverContext {
+            typescript_version: (5, 2, 2).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "mapped-package",
+                Vue3TypeResolutionMode::Import,
+                &typescript_5_2,
+            ),
+            Some(legacy.clone())
+        );
+        let typescript_5_3 = Vue3TypeResolverContext {
+            typescript_version: (5, 3, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import_with_explicit_mode(
+                &filename,
+                "mapped-package",
+                Vue3TypeResolutionMode::Import,
+                &typescript_5_3,
+            ),
+            Some(modern.clone())
+        );
+
+        for (version, module_resolution, explicit_mode, expected) in [
+            (
+                (5, 9, 0),
+                Vue3TypeModuleResolutionKind::NodeNext,
+                false,
+                None,
+            ),
+            (
+                (6, 0, 0),
+                Vue3TypeModuleResolutionKind::Node16,
+                false,
+                None,
+            ),
+            (
+                (6, 0, 0),
+                Vue3TypeModuleResolutionKind::NodeNext,
+                false,
+                Some(rooted_alias.clone()),
+            ),
+            (
+                (6, 0, 0),
+                Vue3TypeModuleResolutionKind::Bundler,
+                false,
+                Some(rooted_alias.clone()),
+            ),
+            (
+                (6, 0, 0),
+                Vue3TypeModuleResolutionKind::Node10,
+                false,
+                None,
+            ),
+            (
+                (6, 0, 0),
+                Vue3TypeModuleResolutionKind::Node10,
+                true,
+                Some(rooted_alias.clone()),
+            ),
+        ] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                module_resolution,
+                ..Vue3TypeResolverContext::default()
+            };
+            let actual = if explicit_mode {
+                resolve_vue3_type_import_with_explicit_mode(
+                    &filename,
+                    "#/rooted",
+                    Vue3TypeResolutionMode::Import,
+                    &resolver,
+                )
+            } else {
+                resolve_vue3_type_import(&filename, "#/rooted", &resolver)
+            };
+            assert_eq!(actual, expected, "TypeScript {version:?} {module_resolution:?}");
+        }
+
+        let bundler_maps_disabled = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            resolve_package_json_exports: Some(false),
+            resolve_package_json_imports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "mapped-package", &bundler_maps_disabled),
+            Some(legacy.clone())
+        );
+        assert!(resolve_vue3_type_import(&filename, "#alias", &bundler_maps_disabled).is_none());
+        assert_eq!(
+            resolve_vue3_type_import(
+                &filename,
+                "project-package/self",
+                &bundler_maps_disabled,
+            ),
+            Some(self_target.clone())
+        );
+
+        for module_resolution in [
+            Vue3TypeModuleResolutionKind::Node16,
+            Vue3TypeModuleResolutionKind::NodeNext,
+        ] {
+            let node_maps_disabled = Vue3TypeResolverContext {
+                module_resolution,
+                resolve_package_json_exports: Some(false),
+                resolve_package_json_imports: Some(false),
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_import(&filename, "mapped-package", &node_maps_disabled),
+                Some(legacy.clone()),
+                "{module_resolution:?} should disable exports"
+            );
+            assert!(
+                resolve_vue3_type_import(&filename, "#alias", &node_maps_disabled).is_none(),
+                "{module_resolution:?} should disable imports"
+            );
+            assert_eq!(
+                resolve_vue3_type_import(
+                    &filename,
+                    "project-package/self",
+                    &node_maps_disabled,
+                ),
+                Some(self_target.clone()),
+                "{module_resolution:?} should preserve self-name resolution"
+            );
+        }
+
+        let conditional = dir.path().join("node_modules").join("conditional-package");
+        std::fs::create_dir_all(&conditional).expect("create conditional package");
+        std::fs::write(
+            conditional.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "node": "./node.d.ts",
+                        "import": "./import.d.ts",
+                        "default": "./default.d.ts"
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional package manifest");
+        let node_entry = conditional.join("node.d.ts");
+        let import_entry = conditional.join("import.d.ts");
+        std::fs::write(&node_entry, "export interface NodeProps {}")
+            .expect("write node condition target");
+        std::fs::write(&import_entry, "export interface ImportProps {}")
+            .expect("write import condition target");
+
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "conditional-package", &node_next),
+            Some(node_entry)
+        );
+        let bundler = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&filename, "conditional-package", &bundler),
+            Some(import_entry)
         );
     }
 
@@ -630,7 +941,7 @@
         let target = dir.path().join("types.ts");
         std::fs::write(&target, "export interface Props { value: string }")
             .expect("write resolution target");
-        let root = dir.path().join("root.ts");
+        let root = dir.path().join("root.mts");
         std::fs::write(&root, "export { Props } from './types'")
             .expect("write resolution-sensitive root");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
@@ -689,6 +1000,89 @@
     }
 
     #[test]
+    fn vue3_context_caches_key_effective_module_and_source_modes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("conditional-module");
+        std::fs::create_dir_all(&package).expect("create conditional package");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "exports": {
+                    ".": {
+                        "types": {
+                            "import": "./import.d.ts",
+                            "require": "./require.d.ts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conditional manifest");
+        let import_entry = package.join("import.d.ts");
+        let require_entry = package.join("require.d.ts");
+        std::fs::write(&import_entry, "export interface Props { imported: string }")
+            .expect("write import branch");
+        std::fs::write(&require_entry, "export interface Props { required: string }")
+            .expect("write require branch");
+        let root = dir.path().join("root.d.ts");
+        std::fs::write(&root, "export { Props } from 'conditional-module'")
+            .expect("write mode-sensitive root");
+
+        for esm_first in [false, true] {
+            let session = Vue3ExternalTypeLoadSession::default();
+            let commonjs = Vue3TypeResolverContext {
+                typescript_version: (6, 0, 0).into(),
+                module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+                module: Some(Vue3TypeModuleKind::CommonJs),
+                external_type_session: session.clone(),
+                ..Vue3TypeResolverContext::default()
+            };
+            let esnext = Vue3TypeResolverContext {
+                module: Some(Vue3TypeModuleKind::EcmaScript),
+                ..commonjs.clone()
+            };
+            assert_ne!(commonjs, esnext);
+
+            let load = |resolver: &Vue3TypeResolverContext| {
+                vue3_external_type_context_from_path(
+                    &root,
+                    &mut BTreeSet::new(),
+                    resolver,
+                )
+                .expect("load mode-sensitive context")
+            };
+            let (commonjs_context, esnext_context) = if esm_first {
+                let esnext_context = load(&esnext);
+                let commonjs_context = load(&commonjs);
+                (commonjs_context, esnext_context)
+            } else {
+                let commonjs_context = load(&commonjs);
+                let esnext_context = load(&esnext);
+                (commonjs_context, esnext_context)
+            };
+
+            assert_eq!(
+                commonjs_context.type_sources.get("Props"),
+                Some(&normalize_path_string(&require_entry)),
+            );
+            assert_eq!(
+                esnext_context.type_sources.get("Props"),
+                Some(&normalize_path_string(&import_entry)),
+            );
+            assert!(!std::sync::Arc::ptr_eq(
+                &commonjs_context,
+                &esnext_context,
+            ));
+            assert_eq!(session.stats().context_builds, 4);
+            assert_eq!(session.stats().context_cache_hits, 0);
+
+            assert!(std::sync::Arc::ptr_eq(&commonjs_context, &load(&commonjs)));
+            assert!(std::sync::Arc::ptr_eq(&esnext_context, &load(&esnext)));
+            assert_eq!(session.stats().context_cache_hits, 2);
+        }
+    }
+
+    #[test]
     fn vue3_external_type_context_cache_charges_key_payload() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_path = dir.path().join("empty.ts");
@@ -703,6 +1097,8 @@
         let expected_key_weight = source_path.as_os_str().as_encoded_bytes().len()
             + measuring.typescript_version.to_string().len()
             + std::mem::size_of::<Vue3TypeModuleResolutionKind>()
+            + std::mem::size_of::<Vue3TypeModuleKind>()
+            + std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2
             + measuring
                 .module_suffixes
                 .iter()
@@ -770,6 +1166,10 @@
             typescript_version: nodejs_semver::Version::parse(&version_text)
                 .expect("parse long TypeScript version"),
             module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            module: None,
+            resolve_package_json_exports: None,
+            resolve_package_json_imports: None,
+            active_package_json_features: None,
             module_suffixes: vue3_default_module_suffixes(),
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(
                 Vue3ExternalTypeLoadLimits {

@@ -312,6 +312,11 @@
         let types_dist = types_pkg.join("dist");
         std::fs::create_dir_all(&types_dist).expect("create types package");
         std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler"}}"#,
+        )
+        .expect("write package map config");
+        std::fs::write(
             types_pkg.join("package.json"),
             r#"{"types":"dist/index.d.ts"}"#,
         )

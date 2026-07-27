@@ -1,3 +1,19 @@
+    fn write_vue3_bundler_config(root: &Path) {
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler"}}"#,
+        )
+        .expect("write Bundler config");
+    }
+
+    fn write_vue3_node_next_config(root: &Path) {
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"module":"NodeNext","moduleResolution":"NodeNext"}}"#,
+        )
+        .expect("write NodeNext config");
+    }
+
     #[test]
     fn vue3_compile_script_resolves_relative_imported_macro_types_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -775,6 +791,7 @@ defineProps<LegacyProps>()
     #[test]
     fn vue3_compile_script_resolves_bare_package_macro_types_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_bundler_config(dir.path());
         let node_modules = dir.path().join("node_modules");
         let types_pkg = node_modules.join("vuec-types-pkg");
         let types_dist = types_pkg.join("dist");
@@ -912,6 +929,7 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
     #[test]
     fn vue3_dependency_packages_resolve_self_name_imports_with_their_own_mode() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_node_next_config(dir.path());
         let node_modules = dir.path().join("node_modules");
         let module_package = node_modules.join("@vuec").join("self-module");
         let commonjs_package = node_modules.join("vuec-self-commonjs");
@@ -1119,7 +1137,10 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             "export interface PrivateProps { selfLeak: string }",
         )
         .expect("write self fallback target");
-        let outside_resolver = Vue3TypeResolverContext::default();
+        let outside_resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
         assert_eq!(
             resolve_vue3_type_import(
                 &dir.path().join("outside.ts").to_string_lossy(),
@@ -1128,7 +1149,10 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             ),
             Some(outer_package.join("private.d.ts"))
         );
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import(
@@ -1165,7 +1189,10 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             "export interface PrivateProps { leaked: string }",
         )
         .expect("write fallback target");
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import(
@@ -1239,6 +1266,8 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
             dir.path().join("tsconfig.json"),
             r#"{
                 "compilerOptions": {
+                    "module": "ESNext",
+                    "moduleResolution": "Bundler",
                     "rootDir": "./src",
                     "outDir": "./dist",
                     "declarationDir": "./declarations"
@@ -1349,6 +1378,8 @@ defineProps<ImportRootProps & ImportFeatureProps & RequireRootProps & RequireFea
             dir.path().join("tsconfig.json"),
             r#"{
                 "compilerOptions": {
+                    "module": "ESNext",
+                    "moduleResolution": "Bundler",
                     "rootDir": ".\\src",
                     "outDir": ".\\dist",
                     "declarationDir": ".\\declarations"
@@ -1453,10 +1484,12 @@ defineProps<RootProps & FeatureProps>()
 
         let legacy = Vue3TypeResolverContext {
             typescript_version: (4, 6, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
             ..Vue3TypeResolverContext::default()
         };
         let current = Vue3TypeResolverContext {
             typescript_version: (4, 7, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
             ..Vue3TypeResolverContext::default()
         };
         let importer = importer.to_string_lossy();
@@ -1568,6 +1601,7 @@ defineProps<ProjectProps>()
     #[test]
     fn vue3_dependency_package_imports_resolve_modes_patterns_external_targets_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_bundler_config(dir.path());
         let package = dir.path().join("node_modules").join("vuec-imports-package");
         let deep = package.join("deep");
         let import_types = package.join("types").join("import");
@@ -1741,6 +1775,7 @@ defineProps<ModuleProps & CommonJsProps>()
     #[test]
     fn vue3_project_package_imports_resolve_direct_source_targets_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_bundler_config(dir.path());
         let source_dir = dir.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("create project source directory");
         std::fs::write(
@@ -1924,6 +1959,8 @@ defineProps<ChoiceProps & SelfChoiceProps>()
             dir.path().join("tsconfig.json"),
             r#"{
                 "compilerOptions": {
+                    "module": "ESNext",
+                    "moduleResolution": "Bundler",
                     "rootDir": "./src",
                     "outDir": "./dist",
                     "declarationDir": "./declarations"
@@ -2032,6 +2069,8 @@ defineProps<JavaScriptProps & DeclarationProps & ModuleProps & CommonJsProps>()
                     "./configs/declarations.json"
                 ],
                 "compilerOptions": {
+                    "module": "ESNext",
+                    "moduleResolution": "Bundler",
                     "outDir": "./dist"
                 }
             }"#,
@@ -2118,7 +2157,10 @@ defineProps<OutputProps & DeclarationProps>()
 
     #[test]
     fn vue3_package_relative_targets_normalize_windows_separators() {
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
         assert_eq!(
             vue3_package_exports_type_target(
                 &serde_json::json!({ "types": "./types\\index.d.ts" }),
@@ -2501,6 +2543,7 @@ defineProps<OutputProps & DeclarationProps>()
     #[test]
     fn vue3_resolution_mode_attributes_drive_imported_and_re_exported_macro_types() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_bundler_config(dir.path());
         let package = dir
             .path()
             .join("node_modules")
@@ -2624,6 +2667,7 @@ defineProps<DirectRequired & NamedRequired & AllRequired & CommonJsImported & Co
     #[test]
     fn vue3_package_type_drives_transitive_resolution_modes() {
         let dir = tempfile::tempdir().expect("temp dir");
+        write_vue3_node_next_config(dir.path());
         let node_modules = dir.path().join("node_modules");
         let conditional = node_modules.join("vuec-package-type-conditional");
         std::fs::create_dir_all(&conditional).expect("create conditional package");

@@ -3,12 +3,14 @@ pub(crate) struct Vue3ExternalTypeSource {
     pub(crate) source: String,
     pub(crate) source_type: oxc_span::SourceType,
     pub(crate) resolution_mode: Vue3TypeResolutionMode,
+    pub(crate) dynamic_resolution_mode: Vue3TypeResolutionMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Vue3ExternalTypeFormat {
     source_type: oxc_span::SourceType,
     resolution_mode: Vue3TypeResolutionMode,
+    dynamic_resolution_mode: Vue3TypeResolutionMode,
 }
 
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES: usize = 64;
@@ -162,6 +164,9 @@ enum Vue3ExternalTypeContextCacheEntry {
 struct Vue3TypeResolverCacheIdentity {
     typescript_version: String,
     module_resolution: Vue3TypeModuleResolutionKind,
+    module: Vue3TypeModuleKind,
+    package_json_features: Vue3PackageJsonResolutionFeatures,
+    type_reference_package_json_features: Vue3PackageJsonResolutionFeatures,
     module_suffixes: std::sync::Arc<[String]>,
 }
 
@@ -170,6 +175,10 @@ impl Vue3TypeResolverCacheIdentity {
         Self {
             typescript_version: type_resolver.typescript_version.to_string(),
             module_resolution: type_resolver.module_resolution,
+            module: type_resolver.effective_module(),
+            package_json_features: type_resolver.package_json_features(),
+            type_reference_package_json_features: type_resolver
+                .package_json_features_for_type_reference(false),
             module_suffixes: type_resolver.module_suffixes.clone(),
         }
     }
@@ -178,7 +187,9 @@ impl Vue3TypeResolverCacheIdentity {
         self.module_suffixes.iter().fold(
             self.typescript_version
                 .len()
-                .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>()),
+                .saturating_add(std::mem::size_of::<Vue3TypeModuleResolutionKind>())
+                .saturating_add(std::mem::size_of::<Vue3TypeModuleKind>())
+                .saturating_add(std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2),
             |weight, suffix| {
                 weight
                     .saturating_add(std::mem::size_of::<String>())
@@ -324,12 +335,13 @@ impl Vue3ExternalTypeLoadSession {
         self.lock().failure_epoch
     }
 
-    fn source_from_path(
+    fn source_from_path_with_resolver(
         &self,
         path: &Path,
         kind: Vue3ExternalTypeSourceKind,
+        type_resolver: &Vue3TypeResolverContext,
     ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
-        let format = vue3_external_type_format(path, self)?;
+        let format = vue3_external_type_format_with_resolver(path, type_resolver)?;
         let cache_key = vue3_external_type_source_cache_key(path, kind, format);
         match self.begin_source_load(cache_key) {
             Vue3ExternalTypeSourceLoad::Ready(source) => Some(source),
@@ -340,6 +352,21 @@ impl Vue3ExternalTypeLoadSession {
             }
             Vue3ExternalTypeSourceLoad::Failed => None,
         }
+    }
+
+    #[cfg(test)]
+    fn source_from_path(
+        &self,
+        path: &Path,
+        kind: Vue3ExternalTypeSourceKind,
+    ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
+        let type_resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            module: Some(Vue3TypeModuleKind::EcmaScript),
+            external_type_session: self.clone(),
+            ..Vue3TypeResolverContext::default()
+        };
+        self.source_from_path_with_resolver(path, kind, &type_resolver)
     }
 
     fn record_context_failure(&self) {
@@ -488,6 +515,7 @@ fn vue3_external_type_source_semantic_identity(
         Vue3ExternalTypeFormat {
             source_type: source.source_type,
             resolution_mode: source.resolution_mode,
+            dynamic_resolution_mode: source.dynamic_resolution_mode,
         },
     )
 }
@@ -519,7 +547,11 @@ fn vue3_external_type_source_mode(path: &Path, format: Vue3ExternalTypeFormat) -
         Vue3TypeResolutionMode::Import => "import",
         Vue3TypeResolutionMode::Require => "require",
     };
-    format!("{language}:{module}:{variant}:{resolution}")
+    let dynamic_resolution = match format.dynamic_resolution_mode {
+        Vue3TypeResolutionMode::Import => "dynamic-import",
+        Vue3TypeResolutionMode::Require => "dynamic-require",
+    };
+    format!("{language}:{module}:{variant}:{resolution}:{dynamic_resolution}")
 }
 
 pub(crate) fn vue3_external_type_source_from_path(
@@ -528,7 +560,7 @@ pub(crate) fn vue3_external_type_source_from_path(
 ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
     type_resolver
         .external_type_session
-        .source_from_path(path, Vue3ExternalTypeSourceKind::Import)
+        .source_from_path_with_resolver(path, Vue3ExternalTypeSourceKind::Import, type_resolver)
 }
 
 pub(crate) fn vue3_external_global_type_source_from_path(
@@ -537,7 +569,7 @@ pub(crate) fn vue3_external_global_type_source_from_path(
 ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
     type_resolver
         .external_type_session
-        .source_from_path(path, Vue3ExternalTypeSourceKind::Global)
+        .source_from_path_with_resolver(path, Vue3ExternalTypeSourceKind::Global, type_resolver)
 }
 
 fn read_vue3_external_type_source(
@@ -584,6 +616,7 @@ fn read_vue3_external_type_source(
         source,
         source_type: format.source_type,
         resolution_mode: format.resolution_mode,
+        dynamic_resolution_mode: format.dynamic_resolution_mode,
     })
 }
 
@@ -619,40 +652,131 @@ pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3Ex
         source: blocks.join("\n"),
         source_type,
         resolution_mode: Vue3TypeResolutionMode::Import,
+        dynamic_resolution_mode: Vue3TypeResolutionMode::Import,
     }
 }
 
+#[cfg(test)]
 fn vue3_external_type_format(
     path: &Path,
     session: &Vue3ExternalTypeLoadSession,
 ) -> Option<Vue3ExternalTypeFormat> {
+    let type_resolver = Vue3TypeResolverContext {
+        module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+        module: Some(Vue3TypeModuleKind::EcmaScript),
+        external_type_session: session.clone(),
+        ..Vue3TypeResolverContext::default()
+    };
+    vue3_external_type_format_with_resolver(path, &type_resolver)
+}
+
+fn vue3_external_type_format_with_resolver(
+    path: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3ExternalTypeFormat> {
     let lexical_path = normalize_path_components(path.to_path_buf());
     let mut source_type = vue3_type_source_type(&normalize_path_string(&lexical_path));
-    let mut resolution_mode = vue3_static_resolution_mode(source_type);
+    let effective_module = type_resolver.effective_module();
     if !vue3_path_has_ambiguous_module_extension(&lexical_path)
-        || !vue3_path_contains_node_modules(&lexical_path)
     {
+        let resolution_mode = vue3_static_resolution_mode(source_type);
         return Some(Vue3ExternalTypeFormat {
             source_type,
             resolution_mode,
+            dynamic_resolution_mode: if vue3_import_syntax_affects_module_resolution(
+                type_resolver,
+            ) {
+                vue3_dynamic_resolution_mode(effective_module, resolution_mode)
+            } else {
+                Vue3TypeResolutionMode::Import
+            },
         });
     }
 
-    match vue3_package_module_type_for_path(&lexical_path, session)? {
+    let should_lookup_package_scope = matches!(
+        type_resolver.module_resolution,
+        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext
+    ) || vue3_path_contains_node_modules(&lexical_path);
+    let package_module_type = if should_lookup_package_scope {
+        vue3_package_module_type_for_path(
+            &lexical_path,
+            &type_resolver.external_type_session,
+        )?
+    } else {
+        Vue3PackageModuleType::Unspecified
+    };
+    let package_implied_resolution_mode = match package_module_type {
         Vue3PackageModuleType::Module => {
-            resolution_mode = Vue3TypeResolutionMode::Import;
             if !source_type.is_typescript_definition() {
                 source_type = source_type.with_module(true);
             }
+            Vue3TypeResolutionMode::Import
         }
-        Vue3PackageModuleType::CommonJs => {
-            resolution_mode = Vue3TypeResolutionMode::Require;
+        Vue3PackageModuleType::CommonJs => Vue3TypeResolutionMode::Require,
+        Vue3PackageModuleType::Unspecified
+            if matches!(
+                effective_module,
+                Vue3TypeModuleKind::Node16 | Vue3TypeModuleKind::NodeNext
+            ) =>
+        {
+            Vue3TypeResolutionMode::Require
         }
-    }
+        Vue3PackageModuleType::Unspecified => {
+            vue3_module_fallback_resolution_mode(effective_module)
+        }
+    };
+    let resolution_mode = if vue3_import_syntax_affects_module_resolution(type_resolver) {
+        package_implied_resolution_mode
+    } else {
+        vue3_static_resolution_mode(source_type)
+    };
     Some(Vue3ExternalTypeFormat {
         source_type,
         resolution_mode,
+        dynamic_resolution_mode: if vue3_import_syntax_affects_module_resolution(type_resolver) {
+            vue3_dynamic_resolution_mode(effective_module, resolution_mode)
+        } else {
+            Vue3TypeResolutionMode::Import
+        },
     })
+}
+
+fn vue3_import_syntax_affects_module_resolution(
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    matches!(
+        type_resolver.module_resolution,
+        Vue3TypeModuleResolutionKind::Node16 | Vue3TypeModuleResolutionKind::NodeNext
+    ) || {
+        let features = type_resolver.package_json_features();
+        features.exports || features.imports
+    }
+}
+
+fn vue3_module_fallback_resolution_mode(
+    module: Vue3TypeModuleKind,
+) -> Vue3TypeResolutionMode {
+    match module {
+        Vue3TypeModuleKind::CommonJs => Vue3TypeResolutionMode::Require,
+        Vue3TypeModuleKind::Classic
+        | Vue3TypeModuleKind::EcmaScript
+        | Vue3TypeModuleKind::Node16
+        | Vue3TypeModuleKind::NodeNext
+        | Vue3TypeModuleKind::Preserve => Vue3TypeResolutionMode::Import,
+    }
+}
+
+fn vue3_dynamic_resolution_mode(
+    module: Vue3TypeModuleKind,
+    static_resolution_mode: Vue3TypeResolutionMode,
+) -> Vue3TypeResolutionMode {
+    match module {
+        Vue3TypeModuleKind::Node16
+        | Vue3TypeModuleKind::NodeNext
+        | Vue3TypeModuleKind::Preserve => Vue3TypeResolutionMode::Import,
+        Vue3TypeModuleKind::Classic => Vue3TypeResolutionMode::Require,
+        Vue3TypeModuleKind::CommonJs | Vue3TypeModuleKind::EcmaScript => static_resolution_mode,
+    }
 }
 
 fn vue3_path_has_ambiguous_module_extension(path: &Path) -> bool {

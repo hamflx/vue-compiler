@@ -731,11 +731,11 @@ mod metadata_parse_single_flight_tests {
         for (value, expected) in [
             (r#""module""#, Vue3PackageModuleType::Module),
             (r#""commonjs""#, Vue3PackageModuleType::CommonJs),
-            (r#""MODULE""#, Vue3PackageModuleType::CommonJs),
-            (r#""invalid""#, Vue3PackageModuleType::CommonJs),
-            ("true", Vue3PackageModuleType::CommonJs),
-            ("null", Vue3PackageModuleType::CommonJs),
-            (r#"{"nested":true}"#, Vue3PackageModuleType::CommonJs),
+            (r#""MODULE""#, Vue3PackageModuleType::Unspecified),
+            (r#""invalid""#, Vue3PackageModuleType::Unspecified),
+            ("true", Vue3PackageModuleType::Unspecified),
+            ("null", Vue3PackageModuleType::Unspecified),
+            (r#"{"nested":true}"#, Vue3PackageModuleType::Unspecified),
         ] {
             let source = format!(r#"{{"type":{value},"types":"index.d.ts"}}"#);
             let manifest = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source)

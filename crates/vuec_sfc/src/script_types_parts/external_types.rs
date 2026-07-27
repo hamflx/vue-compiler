@@ -4,16 +4,38 @@ struct Vue3InlineModuleSource<'a> {
     source_type: oxc_span::SourceType,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TypeResolutionRequest {
+    mode: Vue3TypeResolutionMode,
+    explicit_mode: bool,
+}
+
+impl Vue3TypeResolutionRequest {
+    fn inferred(mode: Vue3TypeResolutionMode) -> Self {
+        Self {
+            mode,
+            explicit_mode: false,
+        }
+    }
+
+    fn explicit(mode: Vue3TypeResolutionMode) -> Self {
+        Self {
+            mode,
+            explicit_mode: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3ModuleDependency {
     Module {
         source: String,
-        resolution_mode: Vue3TypeResolutionMode,
+        request: Vue3TypeResolutionRequest,
     },
     ReferencePath(String),
     ReferenceTypes {
         source: String,
-        resolution_mode: Vue3TypeResolutionMode,
+        request: Vue3TypeResolutionRequest,
     },
 }
 
@@ -21,7 +43,14 @@ impl Vue3ModuleDependency {
     fn module(source: &str, resolution_mode: Vue3TypeResolutionMode) -> Self {
         Self::Module {
             source: source.to_string(),
-            resolution_mode,
+            request: Vue3TypeResolutionRequest::inferred(resolution_mode),
+        }
+    }
+
+    fn module_with_request(source: &str, request: Vue3TypeResolutionRequest) -> Self {
+        Self::Module {
+            source: source.to_string(),
+            request,
         }
     }
 
@@ -41,6 +70,7 @@ struct Vue3ModuleDependencyCollector<'budget> {
     dependencies: BTreeSet<Vue3ModuleDependency>,
     collect_commonjs_requires: bool,
     static_resolution_mode: Vue3TypeResolutionMode,
+    dynamic_resolution_mode: Vue3TypeResolutionMode,
     namespace_budget: &'budget mut Vue3NamespaceProjectionBudget,
 }
 
@@ -64,6 +94,9 @@ impl Vue3ModuleDependencyCollector<'_> {
         self.insert(Vue3ModuleDependency::module(source, resolution_mode));
     }
 
+    fn insert_module_request(&mut self, source: &str, request: Vue3TypeResolutionRequest) {
+        self.insert(Vue3ModuleDependency::module_with_request(source, request));
+    }
 }
 
 fn vue3_resolution_mode_from_value(value: &str) -> Option<Vue3TypeResolutionMode> {
@@ -98,16 +131,17 @@ fn vue3_resolution_mode_from_with_clause(
     vue3_resolution_mode_from_value(attribute.value.value.as_str())
 }
 
-fn vue3_declaration_resolution_mode(
+fn vue3_declaration_resolution_request(
     kind: ImportOrExportKind,
     with_clause: Option<&WithClause<'_>>,
     default: Vue3TypeResolutionMode,
-) -> Vue3TypeResolutionMode {
+) -> Vue3TypeResolutionRequest {
     if kind == ImportOrExportKind::Type {
-        vue3_resolution_mode_from_with_clause(with_clause).unwrap_or(default)
-    } else {
-        default
+        if let Some(mode) = vue3_resolution_mode_from_with_clause(with_clause) {
+            return Vue3TypeResolutionRequest::explicit(mode);
+        }
     }
+    Vue3TypeResolutionRequest::inferred(default)
 }
 
 fn vue3_single_plain_object_property<'a>(
@@ -160,12 +194,31 @@ fn vue3_resolution_mode_from_ts_import_type_options(
     }
 }
 
-fn vue3_ts_import_type_resolution_mode(
+fn vue3_ts_import_type_resolution_request(
     import_type: &TSImportType<'_>,
     default: Vue3TypeResolutionMode,
-) -> Vue3TypeResolutionMode {
+) -> Vue3TypeResolutionRequest {
     vue3_resolution_mode_from_ts_import_type_options(import_type.options.as_deref())
-        .unwrap_or(default)
+        .map(Vue3TypeResolutionRequest::explicit)
+        .unwrap_or_else(|| Vue3TypeResolutionRequest::inferred(default))
+}
+
+fn resolve_vue3_type_import_for_request(
+    filename: &str,
+    source: &str,
+    request: Vue3TypeResolutionRequest,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if request.explicit_mode {
+        resolve_vue3_type_import_with_explicit_mode(
+            filename,
+            source,
+            request.mode,
+            type_resolver,
+        )
+    } else {
+        resolve_vue3_type_import_with_mode(filename, source, request.mode, type_resolver)
+    }
 }
 
 fn vue3_is_commonjs_require_call(call: &CallExpression<'_>) -> bool {
@@ -350,15 +403,15 @@ fn vue3_javascript_statements_have_commonjs_module_indicator(
 impl<'a> oxc_ast_visit::Visit<'a> for Vue3ModuleDependencyCollector<'_> {
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(source) = &expression.source {
-            self.insert_module(source.value.as_str(), Vue3TypeResolutionMode::Import);
+            self.insert_module(source.value.as_str(), self.dynamic_resolution_mode);
         }
         oxc_ast_visit::walk::walk_import_expression(self, expression);
     }
 
     fn visit_ts_import_type(&mut self, import: &TSImportType<'a>) {
-        self.insert_module(
+        self.insert_module_request(
             import.source.value.as_str(),
-            vue3_ts_import_type_resolution_mode(import, self.static_resolution_mode),
+            vue3_ts_import_type_resolution_request(import, self.static_resolution_mode),
         );
         oxc_ast_visit::walk::walk_ts_import_type(self, import);
     }
@@ -477,6 +530,22 @@ fn vue3_module_dependencies_from_source_with_mode(
     static_resolution_mode: Vue3TypeResolutionMode,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<(bool, BTreeSet<Vue3ModuleDependency>)> {
+    vue3_module_dependencies_from_source_with_modes(
+        source,
+        source_type,
+        static_resolution_mode,
+        Vue3TypeResolutionMode::Import,
+        namespace_budget,
+    )
+}
+
+fn vue3_module_dependencies_from_source_with_modes(
+    source: &str,
+    source_type: oxc_span::SourceType,
+    static_resolution_mode: Vue3TypeResolutionMode,
+    dynamic_resolution_mode: Vue3TypeResolutionMode,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<(bool, BTreeSet<Vue3ModuleDependency>)> {
     if !namespace_budget.reserve(source.len().saturating_add(1)) {
         return None;
     }
@@ -514,6 +583,7 @@ fn vue3_module_dependencies_from_source_with_mode(
         dependencies: BTreeSet::new(),
         collect_commonjs_requires: source_type.is_javascript(),
         static_resolution_mode,
+        dynamic_resolution_mode,
         namespace_budget,
     };
     let first_syntax_start = parsed
@@ -560,7 +630,11 @@ fn vue3_module_dependencies_from_source_with_mode(
             Some(Vue3TripleSlashReference::Types(types, resolution_mode)) => {
                 collector.insert(Vue3ModuleDependency::ReferenceTypes {
                     source: types.to_string(),
-                    resolution_mode: resolution_mode.unwrap_or(collector.static_resolution_mode),
+                    request: resolution_mode
+                        .map(Vue3TypeResolutionRequest::explicit)
+                        .unwrap_or_else(|| {
+                            Vue3TypeResolutionRequest::inferred(collector.static_resolution_mode)
+                        }),
                 });
             }
             Some(Vue3TripleSlashReference::Unsupported) => return None,
@@ -570,9 +644,9 @@ fn vue3_module_dependencies_from_source_with_mode(
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
-                collector.insert_module(
+                collector.insert_module_request(
                     import.source.value.as_str(),
-                    vue3_declaration_resolution_mode(
+                    vue3_declaration_resolution_request(
                         import.import_kind,
                         import.with_clause.as_deref(),
                         collector.static_resolution_mode,
@@ -581,9 +655,9 @@ fn vue3_module_dependencies_from_source_with_mode(
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(source) = &export.source {
-                    collector.insert_module(
+                    collector.insert_module_request(
                         source.value.as_str(),
-                        vue3_declaration_resolution_mode(
+                        vue3_declaration_resolution_request(
                             export.export_kind,
                             export.with_clause.as_deref(),
                             collector.static_resolution_mode,
@@ -592,9 +666,9 @@ fn vue3_module_dependencies_from_source_with_mode(
                 }
             }
             Statement::ExportAllDeclaration(export) => {
-                collector.insert_module(
+                collector.insert_module_request(
                     export.source.value.as_str(),
-                    vue3_declaration_resolution_mode(
+                    vue3_declaration_resolution_request(
                         export.export_kind,
                         export.with_clause.as_deref(),
                         collector.static_resolution_mode,
@@ -660,6 +734,10 @@ fn vue3_reachable_global_augmentation_files(
     let type_resolver = Vue3TypeResolverContext {
         typescript_version: type_resolver.typescript_version.clone(),
         module_resolution: type_resolver.module_resolution,
+        module: type_resolver.module,
+        resolve_package_json_exports: type_resolver.resolve_package_json_exports,
+        resolve_package_json_imports: type_resolver.resolve_package_json_imports,
+        active_package_json_features: type_resolver.active_package_json_features,
         module_suffixes: type_resolver.module_suffixes.clone(),
         external_type_session: Vue3ExternalTypeLoadSession::with_limits(
             type_resolver.external_type_session.limits(),
@@ -677,10 +755,11 @@ fn vue3_reachable_global_augmentation_files(
             return None;
         }
         seen.insert(identity);
-        let (_, dependencies) = vue3_module_dependencies_from_source_with_mode(
+        let (_, dependencies) = vue3_module_dependencies_from_source_with_modes(
             &file.source.source,
             file.source.source_type,
             file.source.resolution_mode,
+            file.source.dynamic_resolution_mode,
             &mut namespace_budget,
         )?;
         enqueue_vue3_module_dependencies(
@@ -723,11 +802,11 @@ fn vue3_reachable_global_augmentation_files(
         let resolved = match &dependency {
             Vue3ModuleDependency::Module {
                 source,
-                resolution_mode,
-            } => resolve_vue3_type_import_with_mode(
+                request,
+            } => resolve_vue3_type_import_for_request(
                 &importer,
                 source,
-                *resolution_mode,
+                *request,
                 &type_resolver,
             ),
             Vue3ModuleDependency::ReferencePath(reference) => {
@@ -735,14 +814,23 @@ fn vue3_reachable_global_augmentation_files(
             }
             Vue3ModuleDependency::ReferenceTypes {
                 source: reference,
-                resolution_mode,
-            } => resolve_vue3_type_reference_directive_with_mode(
-                project_filename,
-                &importer,
-                reference,
-                Some(*resolution_mode),
-                &type_resolver,
-            ),
+                request,
+            } => {
+                let resolution_mode = (request.explicit_mode
+                    || matches!(
+                        type_resolver.module_resolution,
+                        Vue3TypeModuleResolutionKind::Node16
+                            | Vue3TypeModuleResolutionKind::NodeNext
+                    ))
+                .then_some(request.mode);
+                resolve_vue3_type_reference_directive_with_mode(
+                    project_filename,
+                    &importer,
+                    reference,
+                    resolution_mode,
+                    &type_resolver,
+                )
+            }
         };
         let Some(resolved) = resolved else {
             if is_global_program_reference
@@ -773,10 +861,7 @@ fn vue3_reachable_global_augmentation_files(
             }
             continue;
         }
-        let format = vue3_external_type_format(
-            &resolved,
-            &type_resolver.external_type_session,
-        )?;
+        let format = vue3_external_type_format_with_resolver(&resolved, &type_resolver)?;
         let semantic_identity = vue3_external_type_semantic_identity(&resolved, format);
         if is_global_program_reference
             && !additional_global_paths.contains_key(&semantic_identity)
@@ -805,10 +890,11 @@ fn vue3_reachable_global_augmentation_files(
         scanned_import_files = scanned_import_files.saturating_add(1);
         let source = vue3_external_type_source_from_path(&resolved, &type_resolver)?;
         let (has_global_augmentation, dependencies) =
-            vue3_module_dependencies_from_source_with_mode(
+            vue3_module_dependencies_from_source_with_modes(
             &source.source,
             source.source_type,
             source.resolution_mode,
+            source.dynamic_resolution_mode,
             &mut namespace_budget,
         )?;
         if has_global_augmentation
@@ -909,17 +995,14 @@ fn extend_vue3_type_context_from_external_imports_with_seen_and_mode(
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let resolution_mode = vue3_declaration_resolution_mode(
+        let request = vue3_declaration_resolution_request(
             import.import_kind,
             import.with_clause.as_deref(),
             static_resolution_mode,
         );
-        let Some(resolved) = resolve_vue3_type_import_with_mode(
-            filename,
-            import_source,
-            resolution_mode,
-            type_resolver,
-        ) else {
+        let Some(resolved) =
+            resolve_vue3_type_import_for_request(filename, import_source, request, type_resolver)
+        else {
             if !clear_vue3_failed_import_bindings(
                 &mut working_context,
                 specifiers,
@@ -1342,7 +1425,7 @@ pub(crate) fn project_vue3_type_re_exports(
                     continue;
                 };
                 let import_source = source.value.as_str();
-                let resolution_mode = vue3_declaration_resolution_mode(
+                let request = vue3_declaration_resolution_request(
                     declaration.export_kind,
                     declaration.with_clause.as_deref(),
                     static_resolution_mode,
@@ -1350,7 +1433,7 @@ pub(crate) fn project_vue3_type_re_exports(
                 let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
-                    resolution_mode,
+                    request,
                     seen,
                     type_resolver,
                 ) else {
@@ -1376,7 +1459,7 @@ pub(crate) fn project_vue3_type_re_exports(
             }
             Statement::ExportAllDeclaration(declaration) => {
                 let import_source = declaration.source.value.as_str();
-                let resolution_mode = vue3_declaration_resolution_mode(
+                let request = vue3_declaration_resolution_request(
                     declaration.export_kind,
                     declaration.with_clause.as_deref(),
                     static_resolution_mode,
@@ -1384,7 +1467,7 @@ pub(crate) fn project_vue3_type_re_exports(
                 let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
-                    resolution_mode,
+                    request,
                     seen,
                     type_resolver,
                 ) else {
@@ -1409,15 +1492,14 @@ pub(crate) struct Vue3ResolvedExternalTypeContext {
     pub(crate) context: std::sync::Arc<Vue27TypeContext>,
 }
 
-pub(crate) fn vue3_external_type_context_from_source(
+fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
-    resolution_mode: Vue3TypeResolutionMode,
+    request: Vue3TypeResolutionRequest,
     seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue3ResolvedExternalTypeContext> {
-    let resolved =
-        resolve_vue3_type_import_with_mode(filename, source, resolution_mode, type_resolver)?;
+    let resolved = resolve_vue3_type_import_for_request(filename, source, request, type_resolver)?;
     let dependency = normalize_path_string(&resolved);
     let context = vue3_external_type_context_from_path(&resolved, seen, type_resolver)?;
     Some(Vue3ResolvedExternalTypeContext {
@@ -1483,14 +1565,14 @@ pub(crate) fn vue3_resolve_import_type(
     let source = import_type.source.value.as_str();
     let name = vue3_import_type_qualifier_key(import_type.qualifier.as_ref()?);
     let filename = analysis.type_filename.as_deref()?;
-    let resolution_mode = vue3_ts_import_type_resolution_mode(
+    let request = vue3_ts_import_type_resolution_request(
         import_type,
         analysis.type_resolution_mode,
     );
-    let resolved = resolve_vue3_type_import_with_mode(
+    let resolved = resolve_vue3_type_import_for_request(
         filename,
         source,
-        resolution_mode,
+        request,
         &analysis.type_resolver,
     )?;
     let dependency = normalize_path_string(&resolved);
@@ -3565,7 +3647,7 @@ declare global { interface Augmented { value: string } }
             Vue3ModuleDependency::ReferencePath("./reference-path".to_string()),
             Vue3ModuleDependency::ReferenceTypes {
                 source: "./reference-types".to_string(),
-                resolution_mode: Vue3TypeResolutionMode::Import,
+                request: Vue3TypeResolutionRequest::inferred(Vue3TypeResolutionMode::Import),
             },
         ]);
         let mut measured = budget(usize::MAX);
@@ -3577,6 +3659,22 @@ declare global { interface Augmented { value: string } }
         .expect("measure dependency scan");
         assert!(has_augmentation);
         assert_eq!(dependencies, expected);
+        let (_, require_dynamic_dependencies) = vue3_module_dependencies_from_source_with_modes(
+            source,
+            oxc_span::SourceType::ts(),
+            Vue3TypeResolutionMode::Import,
+            Vue3TypeResolutionMode::Require,
+            &mut budget(usize::MAX),
+        )
+        .expect("scan transformed dynamic import");
+        assert!(require_dynamic_dependencies.contains(&Vue3ModuleDependency::module(
+            "./dynamic",
+            Vue3TypeResolutionMode::Require,
+        )));
+        assert!(!require_dynamic_dependencies.contains(&Vue3ModuleDependency::module(
+            "./dynamic",
+            Vue3TypeResolutionMode::Import,
+        )));
         let required = usize::MAX - measured.remaining_work;
         assert!(required > source.len());
 
@@ -3719,21 +3817,39 @@ import type { Extra } from './extra-attribute' with { "resolution-mode": "requir
 import type { Invalid } from './invalid-value' with { "resolution-mode": "Require" }
 "#;
         let expected = BTreeSet::from([
-            Vue3ModuleDependency::module("./assert-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module_with_request(
+                "./assert-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
             Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
-            Vue3ModuleDependency::module("./export-all-required", Vue3TypeResolutionMode::Require),
-            Vue3ModuleDependency::module("./export-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module_with_request(
+                "./export-all-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
+            Vue3ModuleDependency::module_with_request(
+                "./export-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
             Vue3ModuleDependency::module(
                 "./export-specifier-only",
                 Vue3TypeResolutionMode::Import,
             ),
             Vue3ModuleDependency::module("./extra-attribute", Vue3TypeResolutionMode::Import),
-            Vue3ModuleDependency::module("./import-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module_with_request(
+                "./import-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
             Vue3ModuleDependency::module("./invalid-value", Vue3TypeResolutionMode::Import),
             Vue3ModuleDependency::module("./runtime-attribute", Vue3TypeResolutionMode::Import),
             Vue3ModuleDependency::module("./specifier-only", Vue3TypeResolutionMode::Import),
-            Vue3ModuleDependency::module("./template-required", Vue3TypeResolutionMode::Require),
-            Vue3ModuleDependency::module("./type-required", Vue3TypeResolutionMode::Require),
+            Vue3ModuleDependency::module_with_request(
+                "./template-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
+            Vue3ModuleDependency::module_with_request(
+                "./type-required",
+                Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
+            ),
         ]);
         let mut measured = budget(usize::MAX);
         let dependencies = vue3_module_dependencies_from_source(
@@ -3787,11 +3903,23 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             .map(|(_, dependencies)| dependencies),
             Some(BTreeSet::from([
                 Vue3ModuleDependency::module("./dynamic", Vue3TypeResolutionMode::Import),
-                Vue3ModuleDependency::module("./export-all-mode", Vue3TypeResolutionMode::Import),
-                Vue3ModuleDependency::module("./export-mode", Vue3TypeResolutionMode::Import),
-                Vue3ModuleDependency::module("./import-mode", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module_with_request(
+                    "./export-all-mode",
+                    Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Import),
+                ),
+                Vue3ModuleDependency::module_with_request(
+                    "./export-mode",
+                    Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Import),
+                ),
+                Vue3ModuleDependency::module_with_request(
+                    "./import-mode",
+                    Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Import),
+                ),
                 Vue3ModuleDependency::module("./specifier-only", Vue3TypeResolutionMode::Require),
-                Vue3ModuleDependency::module("./type-mode", Vue3TypeResolutionMode::Import),
+                Vue3ModuleDependency::module_with_request(
+                    "./type-mode",
+                    Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Import),
+                ),
             ])),
         );
     }
@@ -3880,6 +4008,10 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
         )
         .expect("write require entry");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         let require_root = [Vue3InlineModuleSource {
             filename: &filename,
@@ -3891,7 +4023,7 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
                 &filename,
                 &[],
                 &require_root,
-                &Vue3TypeResolverContext::default(),
+                &resolver,
             ),
             Some(vec![require_entry.clone()]),
         );
@@ -3906,7 +4038,7 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
                 &filename,
                 &[],
                 &attribute_require_root,
-                &Vue3TypeResolverContext::default(),
+                &resolver,
             ),
             Some(vec![require_entry.clone()]),
         );
@@ -3922,7 +4054,7 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
                 &filename,
                 &[],
                 &attribute_import_root,
-                &Vue3TypeResolverContext::default(),
+                &resolver,
             ),
             Some(vec![import_entry.clone()]),
         );
@@ -3932,19 +4064,25 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             source: "import 'conditional-module'\nrequire('conditional-module')",
             source_type: oxc_span::SourceType::unambiguous(),
         }];
-        let exact = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_import_files: 2,
-            ..Vue3ExternalTypeLoadLimits::default()
-        });
+        let exact = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+                max_import_files: 2,
+                ..Vue3ExternalTypeLoadLimits::default()
+            })
+        };
         assert_eq!(
             vue3_reachable_global_augmentation_files(&filename, &[], &dual_root, &exact),
             Some(vec![import_entry, require_entry]),
         );
 
-        let short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_import_files: 1,
-            ..Vue3ExternalTypeLoadLimits::default()
-        });
+        let short = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+                max_import_files: 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            })
+        };
         assert!(
             vue3_reachable_global_augmentation_files(&filename, &[], &dual_root, &short).is_none()
         );
@@ -3992,13 +4130,17 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             source: "import Required = require('conditional-outer')",
             source_type: oxc_span::SourceType::ts(),
         }];
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             vue3_reachable_global_augmentation_files(
                 &filename,
                 &[],
                 &roots,
-                &Vue3TypeResolverContext::default(),
+                &resolver,
             ),
             Some(vec![child_require]),
         );
@@ -4016,11 +4158,15 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
         }
         std::fs::write(
             conditional.join("package.json"),
-            r#"{"exports":{".":{"types":{"import":"./import.d.mts","require":"./require.d.cts"}}}}"#,
+            r#"{
+                "types":"./legacy.d.ts",
+                "exports":{".":{"types":{"import":"./import.d.mts","require":"./require.d.cts"}}}
+            }"#,
         )
         .expect("write conditional package manifest");
         let import_entry = conditional.join("import.d.mts");
         let require_entry = conditional.join("require.d.cts");
+        let legacy_entry = conditional.join("legacy.d.ts");
         std::fs::write(
             &import_entry,
             "declare global { interface ImportReferenceGlobal {} } export {}",
@@ -4031,6 +4177,11 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             "declare global { interface RequireReferenceGlobal {} } export {}",
         )
         .expect("write require reference entry");
+        std::fs::write(
+            &legacy_entry,
+            "declare global { interface LegacyReferenceGlobal {} } export {}",
+        )
+        .expect("write legacy reference entry");
         for (bridge, module_type) in [
             (&module_bridge, "module"),
             (&commonjs_bridge, "commonjs"),
@@ -4052,19 +4203,50 @@ const dynamic = import('./dynamic', { with: { "resolution-mode": "require" } })
             source: "import 'module-reference-bridge'; import 'commonjs-reference-bridge'",
             source_type: oxc_span::SourceType::ts(),
         }];
+        let node_next_5_2 = Vue3TypeResolverContext {
+            typescript_version: (5, 2, 2).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            resolve_package_json_exports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(
+                &filename,
+                &[],
+                &roots,
+                &node_next_5_2,
+            ),
+            Some(vec![legacy_entry]),
+        );
 
+        let node_next_5_3 = Vue3TypeResolverContext {
+            typescript_version: (5, 3, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            resolve_package_json_exports: Some(false),
+            ..Vue3TypeResolverContext::default()
+        };
         let augmentations = vue3_reachable_global_augmentation_files(
             &filename,
             &[],
             &roots,
-            &Vue3TypeResolverContext::default(),
+            &node_next_5_3,
         )
         .expect("resolve inherited reference modes")
         .into_iter()
         .collect::<BTreeSet<_>>();
         assert_eq!(
             augmentations,
-            BTreeSet::from([import_entry, require_entry])
+            BTreeSet::from([import_entry.clone(), require_entry])
+        );
+
+        let bundler = Vue3TypeResolverContext {
+            typescript_version: (5, 3, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &bundler),
+            Some(vec![import_entry]),
         );
     }
 
@@ -4183,11 +4365,11 @@ export {}"#;
                 Vue3ModuleDependency::ReferencePath("./path".to_string()),
                 Vue3ModuleDependency::ReferenceTypes {
                     source: "legacy".to_string(),
-                    resolution_mode: Vue3TypeResolutionMode::Import,
+                    request: Vue3TypeResolutionRequest::inferred(Vue3TypeResolutionMode::Import),
                 },
                 Vue3ModuleDependency::ReferenceTypes {
                     source: "mode-specific".to_string(),
-                    resolution_mode: Vue3TypeResolutionMode::Require,
+                    request: Vue3TypeResolutionRequest::explicit(Vue3TypeResolutionMode::Require),
                 },
             ])),
         );
@@ -4244,13 +4426,18 @@ export {}"#;
 /// <reference types="conditional-types" resolution-mode="require" />"#,
             source_type: oxc_span::SourceType::ts(),
         }];
+        let resolver = Vue3TypeResolverContext {
+            typescript_version: (5, 3, 0).into(),
+            module_resolution: Vue3TypeModuleResolutionKind::Node10,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             vue3_reachable_global_augmentation_files(
                 &filename,
                 &[],
                 &roots,
-                &Vue3TypeResolverContext::default(),
+                &resolver,
             ),
             Some(vec![import_entry, require_entry]),
         );

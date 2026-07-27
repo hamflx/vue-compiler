@@ -18,14 +18,52 @@ pub(crate) fn resolve_vue3_type_import_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    resolve_vue3_type_import_with_request(
+        filename,
+        source,
+        resolution_mode,
+        false,
+        type_resolver,
+    )
+}
+
+pub(crate) fn resolve_vue3_type_import_with_explicit_mode(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_type_import_with_request(
+        filename,
+        source,
+        resolution_mode,
+        true,
+        type_resolver,
+    )
+}
+
+fn resolve_vue3_type_import_with_request(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    explicit_mode: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let mut request_resolver = type_resolver.clone();
+    request_resolver.active_package_json_features = Some(
+        type_resolver.package_json_features_for_request(explicit_mode),
+    );
     let is_relative = vue3_type_import_source_is_relative(source);
-    match type_resolver
+    match request_resolver
         .external_type_session
         .begin_type_import_resolution(
-            Vue3TypeResolutionKind::Module(resolution_mode),
+            Vue3TypeResolutionKind::Module {
+                mode: resolution_mode,
+                explicit_mode,
+            },
             filename,
             source,
-            type_resolver,
+            &request_resolver,
             is_relative,
         )
     {
@@ -39,10 +77,10 @@ pub(crate) fn resolve_vue3_type_import_with_mode(
                 filename,
                 source,
                 resolution_mode,
-                type_resolver,
+                &request_resolver,
                 is_relative,
             );
-            type_resolver
+            request_resolver
                 .external_type_session
                 .finish_type_import_resolution(
                     cache_key,
@@ -85,28 +123,33 @@ fn resolve_vue3_type_import_uncached(
             type_resolver,
         );
     }
-    match resolve_vue3_package_imports_with_mode(
-        filename,
-        source,
-        resolution_mode,
-        type_resolver,
-    ) {
-        Vue3PackageImportsResolution::Resolved(path) => return Some(path),
-        Vue3PackageImportsResolution::Rejected | Vue3PackageImportsResolution::Blocked => {
-            return None;
+    let package_json_features = type_resolver.package_json_features();
+    if package_json_features.imports {
+        match resolve_vue3_package_imports_with_mode(
+            filename,
+            source,
+            resolution_mode,
+            type_resolver,
+        ) {
+            Vue3PackageImportsResolution::Resolved(path) => return Some(path),
+            Vue3PackageImportsResolution::Rejected | Vue3PackageImportsResolution::Blocked => {
+                return None;
+            }
+            Vue3PackageImportsResolution::NotApplicable => {}
         }
-        Vue3PackageImportsResolution::NotApplicable => {}
     }
-    match resolve_vue3_package_self_reference_with_mode(
-        filename,
-        source,
-        resolution_mode,
-        type_resolver,
-    ) {
-        Vue3PackageSelfReferenceResolution::Resolved(path) => return Some(path),
-        Vue3PackageSelfReferenceResolution::Rejected
-        | Vue3PackageSelfReferenceResolution::MetadataBlocked => return None,
-        Vue3PackageSelfReferenceResolution::NotApplicable => {}
+    if package_json_features.self_name {
+        match resolve_vue3_package_self_reference_with_mode(
+            filename,
+            source,
+            resolution_mode,
+            type_resolver,
+        ) {
+            Vue3PackageSelfReferenceResolution::Resolved(path) => return Some(path),
+            Vue3PackageSelfReferenceResolution::Rejected
+            | Vue3PackageSelfReferenceResolution::MetadataBlocked => return None,
+            Vue3PackageSelfReferenceResolution::NotApplicable => {}
+        }
     }
     resolve_vue3_bare_type_import_with_mode(filename, source, resolution_mode, type_resolver)
 }
@@ -131,7 +174,7 @@ fn resolve_vue3_package_imports_with_mode(
     if type_resolver.typescript_version < (4, 7, 0).into() {
         return Vue3PackageImportsResolution::Rejected;
     }
-    if !vue3_package_import_specifier_is_safe(source) {
+    if !vue3_package_import_specifier_is_safe_for_resolver(source, type_resolver) {
         return Vue3PackageImportsResolution::Rejected;
     }
     if !type_resolver

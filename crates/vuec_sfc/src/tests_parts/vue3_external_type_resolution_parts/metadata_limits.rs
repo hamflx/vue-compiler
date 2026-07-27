@@ -17,6 +17,23 @@ fn write_vue3_test_type_package(package_dir: &Path, manifest: &str) {
     .expect("write package types");
 }
 
+fn vue3_node_next_type_resolver() -> Vue3TypeResolverContext {
+    Vue3TypeResolverContext {
+        module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+        ..Vue3TypeResolverContext::default()
+    }
+}
+
+fn vue3_node_next_type_resolver_with_external_limits(
+    limits: Vue3ExternalTypeLoadLimits,
+) -> Vue3TypeResolverContext {
+    Vue3TypeResolverContext {
+        module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+        ..Vue3TypeResolverContext::default()
+    }
+}
+
 #[test]
 fn vue3_generated_metadata_paths_are_bounded_before_expansion() {
     assert_eq!(VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES, 64 * 1024);
@@ -2423,7 +2440,8 @@ fn vue3_package_self_references_honor_metadata_and_source_budgets() {
         vue3_external_type_context_from_path(&bridge, &mut BTreeSet::new(), resolver)
             .expect("load bounded self-reference bridge")
     };
-    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+    let accepted =
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_import_files: 2,
         max_metadata_fanout_entries: 1,
         ..Vue3ExternalTypeLoadLimits::default()
@@ -2436,7 +2454,8 @@ fn vue3_package_self_references_honor_metadata_and_source_budgets() {
     assert_eq!(stats.metadata_fanout_entries, 1);
     assert!(!accepted.external_type_session.metadata_is_blocked());
 
-    let no_metadata = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+    let no_metadata =
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_import_files: 2,
         max_metadata_files: 0,
         ..Vue3ExternalTypeLoadLimits::default()
@@ -2446,7 +2465,8 @@ fn vue3_package_self_references_honor_metadata_and_source_budgets() {
     assert_eq!(no_metadata.external_type_session.stats().import_files_read, 1);
     assert!(no_metadata.external_type_session.metadata_is_blocked());
 
-    let no_fanout = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+    let no_fanout =
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_import_files: 2,
         max_metadata_fanout_entries: 0,
         ..Vue3ExternalTypeLoadLimits::default()
@@ -2458,7 +2478,8 @@ fn vue3_package_self_references_honor_metadata_and_source_budgets() {
     assert_eq!(stats.metadata_fanout_entries, 0);
     assert!(no_fanout.external_type_session.metadata_is_blocked());
 
-    let source_limited = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+    let source_limited =
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_import_files: 1,
         max_metadata_fanout_entries: 1,
         ..Vue3ExternalTypeLoadLimits::default()
@@ -2506,7 +2527,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
     for manifest in rejected_manifests {
         std::fs::write(package.join("package.json"), manifest.to_string())
             .expect("write rejected imports manifest");
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = vue3_node_next_type_resolver();
         assert!(resolve_vue3_type_import(
             &importer.to_string_lossy(),
             "#alias",
@@ -2540,7 +2561,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
     ] {
         std::fs::write(package.join("package.json"), manifest.to_string())
             .expect("write conditional fallback imports manifest");
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = vue3_node_next_type_resolver();
         assert_eq!(
             resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
             Some(target.clone()),
@@ -2554,7 +2575,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         r##"{"imports":{"#alias":[null,"../outside.d.mts","./ok.d.mts"]}}"##,
     )
     .expect("write array fallback imports manifest");
-    let resolver = Vue3TypeResolverContext::default();
+    let resolver = vue3_node_next_type_resolver();
     assert_eq!(
         resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
         Some(target.clone())
@@ -2583,7 +2604,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         }"##,
     )
     .expect("write nested imports manifest");
-    let resolver = Vue3TypeResolverContext::default();
+    let resolver = vue3_node_next_type_resolver();
     assert_eq!(
         resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
         Some(paths_target)
@@ -2624,7 +2645,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
         .expect("write legacy imports prefix target");
     std::fs::write(&legacy_pattern, "export interface LegacyPattern {}")
         .expect("write legacy imports pattern target");
-    let resolver = Vue3TypeResolverContext::default();
+    let resolver = vue3_node_next_type_resolver();
     assert!(resolve_vue3_type_import(
         &importer.to_string_lossy(),
         "#feature/exact",
@@ -2677,7 +2698,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
     .is_none());
 
     let no_pattern_fanout =
-        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
             max_metadata_fanout_entries: 0,
             ..Vue3ExternalTypeLoadLimits::default()
         });
@@ -2700,7 +2721,7 @@ fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
     std::fs::create_dir_all(&inner).expect("create nested package scope");
     std::fs::write(inner.join("package.json"), "{}")
         .expect("write nested package scope manifest");
-    let resolver = Vue3TypeResolverContext::default();
+    let resolver = vue3_node_next_type_resolver();
     assert!(resolve_vue3_type_import(
         &inner.join("index.d.mts").to_string_lossy(),
         "#alias",
@@ -2774,6 +2795,7 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
 
     let legacy_typescript = Vue3TypeResolverContext {
         typescript_version: (4, 6, 0).into(),
+        module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
         ..Vue3TypeResolverContext::default()
     };
     let current_typescript = Vue3TypeResolverContext {
@@ -2786,7 +2808,8 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
         Some(leaf.clone())
     );
 
-    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+    let accepted =
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_package_resolution_depth: 2,
         ..Vue3ExternalTypeLoadLimits::default()
     });
@@ -2809,7 +2832,7 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
     assert_eq!(cached_stats.resolution_cache_hits, 1);
     assert!(!accepted.external_type_session.metadata_is_blocked());
 
-    let cycle = Vue3TypeResolverContext::default();
+    let cycle = vue3_node_next_type_resolver();
     assert!(resolve_vue3_type_import(&filename, "#cycle-a", &cycle).is_none());
     assert!(!cycle.external_type_session.metadata_is_blocked());
     assert!(resolve_vue3_type_import(&filename, "#cycle-a", &cycle).is_none());
@@ -2820,7 +2843,7 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
     );
 
     let depth_limited =
-        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
             max_package_resolution_depth: 1,
             ..Vue3ExternalTypeLoadLimits::default()
         });
@@ -2828,7 +2851,7 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
     assert!(depth_limited.external_type_session.metadata_is_blocked());
 
     let external_accepted =
-        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
             max_resolution_lookups: 2,
             ..Vue3ExternalTypeLoadLimits::default()
         });
@@ -2845,7 +2868,7 @@ fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
     );
 
     let lookup_limited =
-        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        vue3_node_next_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
             max_resolution_lookups: 1,
             ..Vue3ExternalTypeLoadLimits::default()
         });
