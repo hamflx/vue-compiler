@@ -224,6 +224,49 @@ pub(crate) fn resolve_vue3_metadata_legacy_package_field_path_with_mode(
     )
 }
 
+pub(crate) fn resolve_vue3_metadata_legacy_package_type_field_path_with_mode(
+    candidate: &Path,
+    resolution_mode: Vue3TypeResolutionMode,
+    policy: Vue3PackageTargetPathPolicy,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_type_import_path_with_probe_mode(
+        candidate,
+        resolution_mode,
+        type_resolver,
+        Vue3TypeImportPathProbeMode::Metadata,
+        Vue3TypeImportPathSemantics::LegacyPackageTypeField(policy),
+    )
+}
+
+pub(crate) fn resolve_vue3_metadata_legacy_package_javascript_field_path(
+    candidate: &Path,
+    policy: Vue3PackageTargetPathPolicy,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let probe_mode = Vue3TypeImportPathProbeMode::Metadata;
+    if !probe_mode.path_is_within_limit(candidate, type_resolver) {
+        return None;
+    }
+    let failure_epoch = type_resolver.external_type_session.failure_epoch();
+    let mut candidates = vue3_javascript_package_field_replacement_candidates(candidate);
+    if policy == Vue3PackageTargetPathPolicy::AllowImplicit {
+        candidates.extend(vue3_javascript_appended_resolution_candidates(candidate));
+    }
+    let resolved = resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
+    if resolved.is_some()
+        || policy == Vue3PackageTargetPathPolicy::RequireExplicitFileName
+        || type_resolver.external_type_session.failure_epoch() != failure_epoch
+    {
+        return resolved;
+    }
+    resolve_vue3_module_suffixed_file(
+        [candidate.join("index.js"), candidate.join("index.jsx")],
+        type_resolver,
+        probe_mode,
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Vue3PackageTargetPathPolicy {
     AllowImplicit,
@@ -260,6 +303,7 @@ enum Vue3TypeImportPathSemantics {
     ModuleSpecifier,
     PackageMapTarget,
     LegacyPackageField(Vue3PackageTargetPathPolicy),
+    LegacyPackageTypeField(Vue3PackageTargetPathPolicy),
     BarePackageFallback,
     BarePackageFallbackWithoutManifest,
 }
@@ -347,6 +391,7 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     let uses_node_esm_specifier_rules = !matches!(
         semantics,
         Vue3TypeImportPathSemantics::LegacyPackageField(_)
+            | Vue3TypeImportPathSemantics::LegacyPackageTypeField(_)
     )
         && type_resolver
             .module_resolution
@@ -355,6 +400,9 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         semantics,
         Vue3TypeImportPathSemantics::PackageMapTarget
             | Vue3TypeImportPathSemantics::LegacyPackageField(
+                Vue3PackageTargetPathPolicy::RequireExplicitFileName
+            )
+            | Vue3TypeImportPathSemantics::LegacyPackageTypeField(
                 Vue3PackageTargetPathPolicy::RequireExplicitFileName
             )
     );
@@ -366,6 +414,19 @@ fn resolve_vue3_type_import_path_with_probe_mode(
     let extension = vue3_typescript_path_extension(candidate);
     let mut candidates = Vec::new();
     if let Some(extension) = extension {
+        if matches!(
+            semantics,
+            Vue3TypeImportPathSemantics::LegacyPackageTypeField(_)
+        ) {
+            return resolve_vue3_module_suffixed_file(
+                vue3_package_type_field_resolution_candidates(
+                    candidate,
+                    allows_appended_extensions,
+                ),
+                type_resolver,
+                probe_mode,
+            );
+        }
         let has_supported_source_extension = matches!(
             extension,
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
@@ -383,12 +444,19 @@ fn resolve_vue3_type_import_path_with_probe_mode(
                 allows_appended_extensions,
             ));
         }
-        if !matches!(
-            semantics,
+        let allows_candidate_as_written = match semantics {
             Vue3TypeImportPathSemantics::PackageMapTarget
-                | Vue3TypeImportPathSemantics::LegacyPackageField(_)
-        ) || has_supported_source_extension
-        {
+            | Vue3TypeImportPathSemantics::LegacyPackageField(_) => {
+                has_supported_source_extension
+            }
+            Vue3TypeImportPathSemantics::LegacyPackageTypeField(_) => {
+                matches!(extension, "ts" | "tsx" | "mts" | "cts")
+            }
+            Vue3TypeImportPathSemantics::ModuleSpecifier
+            | Vue3TypeImportPathSemantics::BarePackageFallback
+            | Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest => true,
+        };
+        if allows_candidate_as_written {
             candidates.push(candidate.to_path_buf());
         }
         return resolve_vue3_module_suffixed_file(candidates, type_resolver, probe_mode);
@@ -421,6 +489,7 @@ fn resolve_vue3_type_import_path_with_probe_mode(
         semantics,
         Vue3TypeImportPathSemantics::BarePackageFallbackWithoutManifest
             | Vue3TypeImportPathSemantics::LegacyPackageField(_)
+            | Vue3TypeImportPathSemantics::LegacyPackageTypeField(_)
     );
     if allows_directory_manifest
         && probe_mode.is_dir(candidate, type_resolver)?
@@ -477,6 +546,115 @@ fn resolve_vue3_module_suffixed_file(
         }
     }
     None
+}
+
+fn vue3_javascript_package_field_replacement_candidates(candidate: &Path) -> Vec<PathBuf> {
+    let Some(file_name) = candidate.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let lowercase = file_name.to_ascii_lowercase();
+    let (suffix, replacements): (&str, &[&str]) = if lowercase.ends_with(".d.mts") {
+        (".d.mts", &[".mjs"])
+    } else if lowercase.ends_with(".d.cts") {
+        (".d.cts", &[".cjs"])
+    } else if lowercase.ends_with(".d.ts") {
+        (".d.ts", &[".js", ".jsx"])
+    } else if lowercase.ends_with(".mjs") || lowercase.ends_with(".mts") {
+        (&file_name[file_name.len() - 4..], &[".mjs"])
+    } else if lowercase.ends_with(".cjs") || lowercase.ends_with(".cts") {
+        (&file_name[file_name.len() - 4..], &[".cjs"])
+    } else if lowercase.ends_with(".jsx") || lowercase.ends_with(".tsx") {
+        (&file_name[file_name.len() - 4..], &[".jsx", ".js"])
+    } else if lowercase.ends_with(".js") || lowercase.ends_with(".ts") {
+        (&file_name[file_name.len() - 3..], &[".js", ".jsx"])
+    } else {
+        return Vec::new();
+    };
+    let stem = &file_name[..file_name.len() - suffix.len()];
+    replacements
+        .iter()
+        .map(|replacement| {
+            let mut path = candidate.to_path_buf();
+            path.set_file_name(format!("{stem}{replacement}"));
+            path
+        })
+        .collect()
+}
+
+fn vue3_javascript_appended_resolution_candidates(candidate: &Path) -> [PathBuf; 2] {
+    [
+        vue3_path_with_appended_typescript_extension(candidate, "js"),
+        vue3_path_with_appended_typescript_extension(candidate, "jsx"),
+    ]
+}
+
+fn vue3_package_type_field_resolution_candidates(
+    candidate: &Path,
+    include_appended: bool,
+) -> Vec<PathBuf> {
+    let Some(file_name) = candidate.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let lowercase = file_name.to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    let (suffix_len, replacements): (usize, &[&str]) = if lowercase.ends_with(".d.mts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (6, &[".mts", ".d.mts"])
+    } else if lowercase.ends_with(".d.cts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (6, &[".cts", ".d.cts"])
+    } else if lowercase.ends_with(".d.ts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (5, &[".ts", ".tsx", ".d.ts"])
+    } else if lowercase.ends_with(".mts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (4, &[".mts", ".d.mts"])
+    } else if lowercase.ends_with(".cts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (4, &[".cts", ".d.cts"])
+    } else if lowercase.ends_with(".tsx") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (4, &[".tsx", ".ts", ".d.ts"])
+    } else if lowercase.ends_with(".ts") {
+        push_unique_path(&mut candidates, candidate.to_path_buf());
+        (3, &[".ts", ".tsx", ".d.ts"])
+    } else if lowercase.ends_with(".mjs") {
+        (4, &[".mts", ".d.mts"])
+    } else if lowercase.ends_with(".cjs") {
+        (4, &[".cts", ".d.cts"])
+    } else if lowercase.ends_with(".jsx") {
+        (4, &[".tsx", ".ts", ".d.ts"])
+    } else if lowercase.ends_with(".js") {
+        (3, &[".ts", ".tsx", ".d.ts"])
+    } else {
+        let Some(dot) = file_name.rfind('.') else {
+            return candidates;
+        };
+        let extension = &file_name[dot + 1..];
+        candidates.push(arbitrary_extension_type_candidate(candidate, extension));
+        if include_appended {
+            candidates.extend(vue3_ts_appended_resolution_candidates(candidate));
+        }
+        return candidates;
+    };
+    let stem = &file_name[..file_name.len() - suffix_len];
+    for replacement in replacements {
+        let mut path = candidate.to_path_buf();
+        path.set_file_name(format!("{stem}{replacement}"));
+        push_unique_path(&mut candidates, path);
+    }
+    if include_appended {
+        for path in vue3_ts_appended_resolution_candidates(candidate) {
+            push_unique_path(&mut candidates, path);
+        }
+    }
+    candidates
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
 }
 
 fn vue3_path_with_module_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -716,6 +894,56 @@ mod vue3_type_import_candidate_tests {
                 "entry.cjs.tsx",
                 "entry.cjs.d.ts",
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_package_fields_keep_type_and_javascript_candidate_phases_separate() {
+        assert_eq!(
+            file_names(vue3_package_type_field_resolution_candidates(
+                Path::new("entry.js"),
+                true,
+            )),
+            [
+                "entry.ts",
+                "entry.tsx",
+                "entry.d.ts",
+                "entry.js.ts",
+                "entry.js.tsx",
+                "entry.js.d.ts",
+            ]
+        );
+        assert_eq!(
+            file_names(vue3_package_type_field_resolution_candidates(
+                Path::new("entry.ts"),
+                false,
+            )),
+            ["entry.ts", "entry.tsx", "entry.d.ts"]
+        );
+        assert_eq!(
+            file_names(vue3_package_type_field_resolution_candidates(
+                Path::new("entry.d.mts"),
+                false,
+            )),
+            ["entry.d.mts", "entry.mts"]
+        );
+        assert_eq!(
+            file_names(vue3_javascript_package_field_replacement_candidates(
+                Path::new("entry.ts"),
+            )),
+            ["entry.js", "entry.jsx"]
+        );
+        assert_eq!(
+            file_names(vue3_javascript_package_field_replacement_candidates(
+                Path::new("entry.jsx"),
+            )),
+            ["entry.jsx", "entry.js"]
+        );
+        assert_eq!(
+            file_names(vue3_javascript_appended_resolution_candidates(
+                Path::new("entry.css"),
+            )),
+            ["entry.css.js", "entry.css.jsx"]
         );
     }
 

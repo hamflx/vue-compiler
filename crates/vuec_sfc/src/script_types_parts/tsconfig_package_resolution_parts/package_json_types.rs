@@ -387,7 +387,7 @@ fn resolve_vue3_package_json_type_entry_with_exports(
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
     exports_mode: Option<Vue3TypeResolutionMode>,
-    declaration_only_exports: bool,
+    declaration_only: bool,
     enable_exports: bool,
     apply_bare_package_rules: bool,
 ) -> Vue3PackageJsonTypeResolution {
@@ -423,18 +423,22 @@ fn resolve_vue3_package_json_type_entry_with_exports(
                 exports,
                 subpath,
                 resolution_mode,
-                declaration_only_exports,
+                declaration_only,
                 type_resolver,
             );
         }
     }
-    let root_type_target = if subpath.is_none() {
+    let root_type_field_target = if subpath.is_none() {
         vue3_package_json_path_field(manifest.typings.as_ref())
             .or_else(|| vue3_package_json_path_field(manifest.types.as_ref()))
-            .or_else(|| vue3_package_json_path_field(manifest.main.as_ref()))
     } else {
         None
     };
+    let root_main_target = subpath
+        .is_none()
+        .then(|| vue3_package_json_path_field(manifest.main.as_ref()))
+        .flatten();
+    let root_type_target = root_type_field_target.or(root_main_target);
     let root_type_target = match root_type_target {
         Some(target) => {
             let Some(target) =
@@ -478,6 +482,31 @@ fn resolve_vue3_package_json_type_entry_with_exports(
                 package_dir,
                 target,
                 path_resolution_mode,
+                vue3_package_root_field_target_policy(
+                    manifest.module_type,
+                    path_resolution_mode,
+                    type_resolver,
+                ),
+                type_resolver,
+            );
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            }
+            if let Some(resolved) = resolved {
+                return Vue3PackageJsonTypeResolution::Resolved(resolved);
+            }
+        }
+        if let Some(target) = root_main_target.filter(|_| !declaration_only) {
+            let Some(target) = vue3_normalize_typescript_path_separators(target, type_resolver)
+            else {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            };
+            if !vue3_package_type_target_is_safe(&target) {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            }
+            let resolved = vue3_package_main_javascript_path(
+                package_dir,
+                &target,
                 vue3_package_root_field_target_policy(
                     manifest.module_type,
                     path_resolution_mode,
@@ -1462,10 +1491,26 @@ fn vue3_package_type_field_path_with_mode(
     if !vue3_package_type_target_is_safe(target) {
         return None;
     }
-    vue3_legacy_package_target_path_with_mode(
-        package_dir,
-        target.trim_start_matches("./"),
+    let candidate =
+        vue3_package_type_target_candidate(package_dir, target.trim_start_matches("./"), type_resolver)?;
+    resolve_vue3_metadata_legacy_package_type_field_path_with_mode(
+        &candidate,
         resolution_mode,
+        policy,
+        type_resolver,
+    )
+}
+
+fn vue3_package_main_javascript_path(
+    package_dir: &Path,
+    target: &str,
+    policy: Vue3PackageTargetPathPolicy,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let candidate =
+        vue3_package_type_target_candidate(package_dir, target.trim_start_matches("./"), type_resolver)?;
+    resolve_vue3_metadata_legacy_package_javascript_field_path(
+        &candidate,
         policy,
         type_resolver,
     )
@@ -1500,22 +1545,6 @@ pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
         }
     }
     has_normal
-}
-
-fn vue3_legacy_package_target_path_with_mode(
-    package_dir: &Path,
-    target: &str,
-    resolution_mode: Vue3TypeResolutionMode,
-    policy: Vue3PackageTargetPathPolicy,
-    type_resolver: &Vue3TypeResolverContext,
-) -> Option<PathBuf> {
-    let candidate = vue3_package_type_target_candidate(package_dir, target, type_resolver)?;
-    resolve_vue3_metadata_legacy_package_field_path_with_mode(
-        &candidate,
-        resolution_mode,
-        policy,
-        type_resolver,
-    )
 }
 
 fn vue3_package_map_target_path_with_mode(

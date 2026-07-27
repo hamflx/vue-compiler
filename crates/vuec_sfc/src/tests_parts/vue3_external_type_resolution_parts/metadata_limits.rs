@@ -1712,6 +1712,285 @@ fn vue3_package_root_fields_follow_package_format_path_rules() {
 }
 
 #[test]
+fn vue3_package_root_fields_separate_type_and_javascript_passes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cases = vec![
+        (
+            "types-raw",
+            serde_json::json!({"types":"types.js"}),
+            vec![("types.js", "export const implementation = true;")],
+            None,
+            None,
+            None,
+        ),
+        (
+            "types-raw-main",
+            serde_json::json!({"types":"types.js","main":"main.js"}),
+            vec![
+                ("types.js", "export const ignoredImplementation = true;"),
+                ("main.js", "export const implementation = true;"),
+            ],
+            Some("main.js"),
+            Some("main.js"),
+            None,
+        ),
+        (
+            "types-declaration-main",
+            serde_json::json!({"types":"types.js","main":"main.js"}),
+            vec![
+                ("types.d.ts", "export interface DeclaredProps {}"),
+                ("main.js", "export const implementation = true;"),
+            ],
+            Some("types.d.ts"),
+            Some("types.d.ts"),
+            Some("types.d.ts"),
+        ),
+        (
+            "types-typescript-to-declaration",
+            serde_json::json!({"types":"entry.ts"}),
+            vec![("entry.d.ts", "export interface DeclaredProps {}")],
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+        ),
+        (
+            "typings-shadow",
+            serde_json::json!({
+                "typings":"typings.js",
+                "types":"types.d.ts",
+                "main":"main.js"
+            }),
+            vec![
+                ("typings.js", "export const ignoredImplementation = true;"),
+                ("types.d.ts", "export interface IgnoredTypesProps {}"),
+                ("main.js", "export const implementation = true;"),
+            ],
+            Some("main.js"),
+            Some("main.js"),
+            None,
+        ),
+        (
+            "main-extensionless",
+            serde_json::json!({"main":"entry"}),
+            vec![("entry.js", "export const implementation = true;")],
+            Some("entry.js"),
+            None,
+            None,
+        ),
+        (
+            "main-directory",
+            serde_json::json!({"main":"directory"}),
+            vec![
+                ("directory/package.json", r#"{"types":"wrong.d.ts"}"#),
+                (
+                    "directory/wrong.d.ts",
+                    "export interface WrongNestedManifestProps {}",
+                ),
+                (
+                    "directory/index.js",
+                    "export const implementation = true;",
+                ),
+            ],
+            Some("directory/index.js"),
+            None,
+            None,
+        ),
+        (
+            "types-directory-javascript",
+            serde_json::json!({"types":"directory"}),
+            vec![(
+                "directory/index.js",
+                "export const ignoredImplementation = true;",
+            )],
+            None,
+            None,
+            None,
+        ),
+        (
+            "main-prefers-declaration",
+            serde_json::json!({"main":"entry.js"}),
+            vec![
+                ("entry.d.ts", "export interface DeclaredProps {}"),
+                ("entry.js", "export const implementation = true;"),
+            ],
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+        ),
+        (
+            "main-typescript-to-javascript",
+            serde_json::json!({"main":"entry.ts"}),
+            vec![("entry.js", "export const implementation = true;")],
+            Some("entry.js"),
+            Some("entry.js"),
+            None,
+        ),
+        (
+            "main-typescript-to-declaration",
+            serde_json::json!({"main":"entry.ts"}),
+            vec![("entry.d.ts", "export interface DeclaredProps {}")],
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+            Some("entry.d.ts"),
+        ),
+        (
+            "main-appended-javascript",
+            serde_json::json!({"main":"entry.css"}),
+            vec![("entry.css.js", "export const implementation = true;")],
+            Some("entry.css.js"),
+            None,
+            None,
+        ),
+    ];
+
+    for (case, base_manifest, files, permissive, strict, reference) in cases {
+        for (package_type_name, package_type) in [
+            ("unspecified", None),
+            ("commonjs", Some("commonjs")),
+            ("module", Some("module")),
+        ] {
+            let package_dir = dir.path().join(format!("{case}-{package_type_name}"));
+            std::fs::create_dir_all(&package_dir).expect("create two-phase package");
+            for (relative, source) in files.iter() {
+                let path = package_dir.join(relative);
+                std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                    .expect("create two-phase fixture parent");
+                std::fs::write(path, source).expect("write two-phase fixture");
+            }
+            let mut manifest = base_manifest
+                .as_object()
+                .expect("object package manifest")
+                .clone();
+            if let Some(package_type) = package_type {
+                manifest.insert("type".to_string(), serde_json::json!(package_type));
+            }
+            std::fs::write(
+                package_dir.join("package.json"),
+                serde_json::Value::Object(manifest).to_string(),
+            )
+            .expect("write two-phase package manifest");
+
+            for module_resolution in [
+                Vue3TypeModuleResolutionKind::Node10,
+                Vue3TypeModuleResolutionKind::Node16,
+                Vue3TypeModuleResolutionKind::NodeNext,
+                Vue3TypeModuleResolutionKind::Bundler,
+            ] {
+                for resolution_mode in [
+                    Vue3TypeResolutionMode::Import,
+                    Vue3TypeResolutionMode::Require,
+                ] {
+                    let resolver = Vue3TypeResolverContext {
+                        typescript_version: (6, 0, 3).into(),
+                        module_resolution,
+                        ..Vue3TypeResolverContext::default()
+                    };
+                    let uses_strict_package_target = package_type == Some("module")
+                        && resolution_mode == Vue3TypeResolutionMode::Import
+                        && matches!(
+                            module_resolution,
+                            Vue3TypeModuleResolutionKind::Node16
+                                | Vue3TypeModuleResolutionKind::NodeNext
+                        );
+                    let expected = if uses_strict_package_target {
+                        strict
+                    } else {
+                        permissive
+                    }
+                    .map(|relative| package_dir.join(relative));
+                    let actual = vue3_package_resolution_path(
+                        resolve_vue3_package_json_type_entry_with_mode(
+                            &package_dir,
+                            None,
+                            resolution_mode,
+                            &resolver,
+                        ),
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "{case} {package_type_name} {module_resolution:?} {resolution_mode:?}",
+                    );
+                    let reference_expected =
+                        reference.map(|relative| package_dir.join(relative));
+                    let reference_actual = vue3_package_resolution_path(
+                        resolve_vue3_package_json_type_reference_entry(
+                            &package_dir,
+                            None,
+                            Some(resolution_mode),
+                            &resolver,
+                        ),
+                    );
+                    assert_eq!(
+                        reference_actual, reference_expected,
+                        "type reference {case} {package_type_name} {module_resolution:?} {resolution_mode:?}",
+                    );
+                    assert_eq!(
+                        resolver.external_type_session.stats().metadata_files_read,
+                        1,
+                        "nested manifests must remain unread for {case} {package_type_name} {module_resolution:?} {resolution_mode:?}",
+                    );
+                    assert!(!resolver.external_type_session.metadata_is_blocked());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vue3_package_root_field_phase_transition_obeys_probe_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    std::fs::create_dir_all(&package_dir).expect("create two-phase budget package");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"types":"types.js","main":"main.js"}"#,
+    )
+    .expect("write two-phase budget manifest");
+    std::fs::write(
+        package_dir.join("types.js"),
+        "export const ignoredImplementation = true;",
+    )
+    .expect("write ignored type implementation");
+    let main = package_dir.join("main.js");
+    std::fs::write(&main, "export const implementation = true;")
+        .expect("write main implementation");
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 7,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &accepted),
+        Vue3PackageJsonTypeResolution::Resolved(main)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        7
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 6,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &rejected),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        6
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_types_versions_targets_follow_root_and_subpath_path_rules() {
     let dir = tempfile::tempdir().expect("temp dir");
     for (scope, subpath, mapping_source) in [
