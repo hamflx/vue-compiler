@@ -2013,6 +2013,7 @@ fn project_vue3_exported_type_specifiers_with_budget(
 }
 
 const VUE3_MAX_NAMESPACE_PROJECTION_DEPTH: usize = 64;
+const VUE3_MAX_NAMESPACE_IMPORT_ALIAS_EXPANSION_DEPTH: usize = 32;
 const VUE3_MAX_NAMESPACE_PROJECTION_WORK: usize = 16 * 1024 * 1024;
 
 pub(crate) struct Vue3NamespaceProjectionBudget {
@@ -2219,6 +2220,24 @@ fn sync_vue3_namespace_type_projection(
     target_name: &str,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> Option<bool> {
+    sync_vue3_namespace_type_projection_with_max_depth(
+        target,
+        source,
+        source_name,
+        target_name,
+        None,
+        namespace_budget,
+    )
+}
+
+fn sync_vue3_namespace_type_projection_with_max_depth(
+    target: &mut Vue3ScriptSetupAnalysis,
+    source: &Vue3ScriptSetupAnalysis,
+    source_name: &str,
+    target_name: &str,
+    max_depth: Option<usize>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<bool> {
     let source_names =
         vue3_analysis_projection_names_with_budget(source, Some(source_name), namespace_budget)?;
     let target_names =
@@ -2233,6 +2252,15 @@ fn sync_vue3_namespace_type_projection(
                 .strip_prefix(source_name)
                 .expect("projection members retain their root prefix")
         };
+        let target_member_depth = target_name
+            .bytes()
+            .filter(|byte| *byte == b'.')
+            .count()
+            .saturating_add(suffix.bytes().filter(|byte| *byte == b'.').count())
+            .saturating_add(1);
+        if !suffix.is_empty() && max_depth.is_some_and(|limit| target_member_depth > limit) {
+            continue;
+        }
         let target_member_len = target_name.len().saturating_add(suffix.len());
         if !namespace_budget.reserve(target_member_len.saturating_add(1)) {
             return None;
@@ -2264,7 +2292,15 @@ fn sync_vue3_namespace_type_projection(
         let mut source_member = String::with_capacity(source_member_len);
         source_member.push_str(source_name);
         source_member.push_str(suffix);
-        if !source_names.contains(&source_member) {
+        let target_member_depth = target_member
+            .bytes()
+            .filter(|byte| *byte == b'.')
+            .count()
+            .saturating_add(1);
+        if (target_member != target_name
+            && max_depth.is_some_and(|limit| target_member_depth > limit))
+            || !source_names.contains(&source_member)
+        {
             sync_work = sync_work.saturating_add(vue3_type_alias_projection_work(
                 target,
                 &target_member,
@@ -2373,11 +2409,12 @@ fn project_vue3_internal_import_equals_aliases_from_statement_groups_once_with_b
             }
             let source_projection =
                 vue3_type_projection_subtree_with_budget(analysis, &source_name, namespace_budget)?;
-            changed |= sync_vue3_namespace_type_projection(
+            changed |= sync_vue3_namespace_type_projection_with_max_depth(
                 analysis,
                 &source_projection,
                 &source_name,
                 declaration.id.name.as_str(),
+                Some(VUE3_MAX_NAMESPACE_IMPORT_ALIAS_EXPANSION_DEPTH),
                 namespace_budget,
             )?;
         }
@@ -3510,13 +3547,16 @@ fn count_vue3_namespace_projection_steps(statements: &[Statement<'_>]) -> usize 
 fn vue3_namespace_projection_statement_step_bound(statement: &Statement<'_>) -> usize {
     match statement {
         Statement::VariableDeclaration(declaration) => declaration.declarations.len(),
-        Statement::ExportNamedDeclaration(export) => export.declaration.as_ref().map_or(0, |decl| {
-            if let Declaration::VariableDeclaration(declaration) = decl {
-                declaration.declarations.len()
-            } else {
-                1
-            }
-        }),
+        Statement::ExportNamedDeclaration(export) =>
+            export.declaration.as_ref().map_or(0, |decl| match decl {
+                Declaration::VariableDeclaration(declaration) => declaration.declarations.len(),
+                Declaration::TSImportEqualsDeclaration(declaration)
+                    if vue3_internal_import_equals_target_name(declaration).is_some() =>
+                {
+                    VUE3_MAX_NAMESPACE_IMPORT_ALIAS_EXPANSION_DEPTH
+                }
+                _ => 1,
+            }),
         Statement::TSInterfaceDeclaration(_)
         | Statement::TSTypeAliasDeclaration(_)
         | Statement::TSEnumDeclaration(_)
@@ -3525,7 +3565,7 @@ fn vue3_namespace_projection_statement_step_bound(statement: &Statement<'_>) -> 
         Statement::TSImportEqualsDeclaration(declaration)
             if vue3_internal_import_equals_target_name(declaration).is_some() =>
         {
-            1
+            VUE3_MAX_NAMESPACE_IMPORT_ALIAS_EXPANSION_DEPTH
         }
         _ => 0,
     }
@@ -5258,11 +5298,52 @@ import './referenced.d.ts'"#,
     }
 
     #[test]
+    fn recursive_namespace_import_aliases_converge_at_the_depth_limit() {
+        const LIMIT: usize = VUE3_MAX_NAMESPACE_PROJECTION_WORK;
+        let source = r#"
+export namespace Source {
+  export interface Props { value: string }
+  export import Self = Source
+}
+"#;
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked && parsed.errors.is_empty());
+        let mut analysis = Vue3ScriptSetupAnalysis::default();
+        let mut namespace_budget = budget(LIMIT);
+
+        collect_vue3_declared_types_from_statements_with_namespace_budget(
+            source,
+            &parsed.program.body,
+            false,
+            0,
+            &mut analysis,
+            &mut namespace_budget,
+        );
+
+        assert!(
+            !namespace_budget.exhausted,
+            "recursive projection exhausted after {} work units",
+            LIMIT.saturating_sub(namespace_budget.remaining_work)
+        );
+        assert!(has_vue3_type_alias_projection(
+            &analysis,
+            "Source.Self.Self.Props"
+        ));
+        assert!(analysis
+            .declared_types
+            .keys()
+            .all(|name| name.split('.').count()
+                <= VUE3_MAX_NAMESPACE_IMPORT_ALIAS_EXPANSION_DEPTH.saturating_add(1)));
+    }
+
+    #[test]
     fn namespace_projection_depth_honors_exact_and_overflow_boundaries() {
         for (depth, expected) in [(64, true), (65, false)] {
+            let namespace = (0..depth).map(|_| "N").collect::<Vec<_>>().join(".");
             let source = format!(
                 "namespace {} {{ export interface Props {{ value: string }} }}",
-                (0..depth).map(|_| "N").collect::<Vec<_>>().join(".")
+                namespace
             );
             let allocator = oxc_allocator::Allocator::default();
             let parsed = oxc_parser::Parser::new(
@@ -5278,6 +5359,23 @@ import './referenced.d.ts'"#,
                 expected
             );
             assert_eq!(budget.exhausted, !expected);
+            if expected {
+                let mut analysis = Vue3ScriptSetupAnalysis::default();
+                let mut projection_budget = Vue3NamespaceProjectionBudget::default();
+                collect_vue3_declared_types_from_statements_with_namespace_budget(
+                    &source,
+                    &parsed.program.body,
+                    false,
+                    0,
+                    &mut analysis,
+                    &mut projection_budget,
+                );
+                assert!(!projection_budget.exhausted);
+                assert!(has_vue3_type_alias_projection(
+                    &analysis,
+                    &format!("{namespace}.Props")
+                ));
+            }
         }
     }
 

@@ -100,6 +100,70 @@ defineProps<Holder.Direct & Holder.API.Nested.Extra>()
 }
 
 #[test]
+fn vue3_namespace_self_import_aliases_resolve_without_unbounded_expansion() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export namespace Source {
+  export interface Props { selfValue: string }
+  export import Self = Source
+}
+"#,
+    )
+    .expect("write namespace self import alias");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Source } from './types'
+defineProps<Source.Self.Self.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("selfValue: { type: String, required: true }"));
+}
+
+#[test]
+fn vue3_mutually_recursive_namespace_import_aliases_stay_bounded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export namespace First {
+  export interface Props { firstValue: string }
+  export import Other = Second
+}
+export namespace Second {
+  export interface Props { secondValue: number }
+  export import Other = First
+}
+"#,
+    )
+    .expect("write mutually recursive namespace import aliases");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { First } from './types'
+defineProps<First.Other.Other.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("firstValue: { type: String, required: true }"));
+}
+
+#[test]
 fn vue3_namespace_import_aliases_keep_non_exported_bindings_block_local() {
     let dir = tempfile::tempdir().expect("temp dir");
     let types = dir.path().join("types.ts");
