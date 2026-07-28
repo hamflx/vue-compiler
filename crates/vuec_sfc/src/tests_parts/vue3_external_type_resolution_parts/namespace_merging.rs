@@ -1,4 +1,212 @@
 #[test]
+fn vue3_namespace_export_import_aliases_reach_forward_targets_and_preserve_deps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    let leaf = dir.path().join("leaf.ts");
+    std::fs::write(
+        &leaf,
+        "export interface Leaf { leafValue: string }",
+    )
+    .expect("write namespace import-alias leaf");
+    std::fs::write(
+        &types,
+        r#"
+import type { Leaf } from './leaf'
+export namespace Holder {
+  export import Props = Source.Props
+}
+export namespace Source {
+  export type Props = Leaf & { sourceValue: boolean }
+}
+"#,
+    )
+    .expect("write namespace import alias");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Holder } from './types'
+defineProps<Holder.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("leafValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("sourceValue: { type: Boolean, required: true }"));
+    assert_eq!(
+        script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+        [normalize_path_string(&types), normalize_path_string(&leaf)]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn vue3_namespace_import_aliases_project_namespace_descendants_and_alias_chains() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export namespace Holder {
+  export import API = Source
+  export import Direct = API.Props
+}
+export namespace Source {
+  export interface Props { directValue: string }
+  export namespace Nested {
+    export interface Extra { nestedValue: number }
+  }
+}
+"#,
+    )
+    .expect("write namespace import-alias chain");
+
+    let context = vue3_external_type_context_from_path(
+        &types,
+        &mut BTreeSet::new(),
+        &Vue3TypeResolverContext::default(),
+    )
+    .expect("load namespace import-alias chain");
+    for name in [
+        "Holder.API.Props",
+        "Holder.API.Nested.Extra",
+        "Holder.Direct",
+    ] {
+        assert!(vue3_type_context_has_name(&context, name), "missing {name}");
+    }
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Holder } from './types'
+defineProps<Holder.Direct & Holder.API.Nested.Extra>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("directValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("nestedValue: { type: Number, required: true }"));
+}
+
+#[test]
+fn vue3_namespace_import_aliases_keep_non_exported_bindings_block_local() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export namespace Holder {
+  import Local = Source.Props
+  export type Props = Local & { publicValue: boolean }
+}
+export namespace Source {
+  export interface Props { sourceValue: string }
+}
+"#,
+    )
+    .expect("write private namespace import alias");
+
+    let context = vue3_external_type_context_from_path(
+        &types,
+        &mut BTreeSet::new(),
+        &Vue3TypeResolverContext::default(),
+    )
+    .expect("load private namespace import alias");
+    assert!(vue3_type_context_has_name(&context, "Holder.Props"));
+    assert!(!vue3_type_context_has_name(&context, "Holder.Local"));
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Holder } from './types'
+defineProps<Holder.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("sourceValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("publicValue: { type: Boolean, required: true }"));
+}
+
+#[test]
+fn vue3_ambient_namespace_import_aliases_are_implicitly_exported() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.d.ts");
+    std::fs::write(
+        &types,
+        r#"
+export declare namespace Holder {
+  import Props = Source.Props
+}
+export declare namespace Source {
+  interface Props { ambientValue: string }
+}
+"#,
+    )
+    .expect("write ambient namespace import alias");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Holder } from './types'
+defineProps<Holder.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("ambientValue: { type: String, required: true }"));
+}
+
+#[test]
+fn vue3_top_level_export_import_aliases_follow_later_namespaces() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export import Props = Source.Props
+export namespace Source {
+  export interface Props { topLevelValue: Date }
+}
+"#,
+    )
+    .expect("write top-level export import alias");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("topLevelValue: { type: Date, required: true }"));
+}
+
+#[test]
 fn vue3_sibling_namespaces_reach_a_fixed_point_and_preserve_deps() {
     let dir = tempfile::tempdir().expect("temp dir");
     let types = dir.path().join("types.ts");

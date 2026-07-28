@@ -6900,7 +6900,12 @@ fn collect_vue3_global_types_from_statements_inner(
                 )?;
             }
         }
-        refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+        refresh_vue3_declared_type_declarations_and_import_aliases_with_budget(
+            source,
+            statements,
+            analysis,
+            namespace_budget,
+        );
         if !statements
             .iter()
             .any(vue3_statement_has_deferred_type_scope)
@@ -6939,7 +6944,12 @@ fn collect_vue3_global_types_from_statements_inner(
         if namespace_budget.is_exhausted() {
             return None;
         }
-        refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+        refresh_vue3_declared_type_declarations_and_import_aliases_with_budget(
+            source,
+            statements,
+            analysis,
+            namespace_budget,
+        );
         return Some((names, module_import_names));
     }
     let statement_groups = vue3_global_declaration_statement_groups_with_budget(
@@ -7839,15 +7849,20 @@ pub(crate) fn vue3_statement_is_declare_type(statement: &Statement<'_>) -> bool 
 }
 
 fn vue3_statement_is_implicit_ambient_type(statement: &Statement<'_>) -> bool {
-    matches!(
-        statement,
-        Statement::TSInterfaceDeclaration(_)
-            | Statement::TSTypeAliasDeclaration(_)
-            | Statement::TSEnumDeclaration(_)
-            | Statement::FunctionDeclaration(_)
-            | Statement::VariableDeclaration(_)
-            | Statement::ClassDeclaration(_)
-    )
+    match statement {
+        Statement::TSImportEqualsDeclaration(declaration) => {
+            vue3_internal_import_equals_target_name(declaration).is_some()
+        }
+        _ => matches!(
+            statement,
+            Statement::TSInterfaceDeclaration(_)
+                | Statement::TSTypeAliasDeclaration(_)
+                | Statement::TSEnumDeclaration(_)
+                | Statement::FunctionDeclaration(_)
+                | Statement::VariableDeclaration(_)
+                | Statement::ClassDeclaration(_)
+        ),
+    }
 }
 
 pub(crate) fn vue3_declared_type_names_from_statements_with_budget(
@@ -7948,6 +7963,15 @@ fn vue3_declared_type_names_from_statement_with_budget(
                 declaration,
                 namespace_budget,
             )?);
+        }
+        Statement::TSImportEqualsDeclaration(declaration)
+            if vue3_internal_import_equals_target_name(declaration).is_some() =>
+        {
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Statement::ExportNamedDeclaration(declaration) => {
             if let Some(declaration) = &declaration.declaration {
@@ -8061,6 +8085,15 @@ fn vue3_declared_type_names_from_declaration_with_budget(
                 declaration,
                 namespace_budget,
             )?);
+        }
+        Declaration::TSImportEqualsDeclaration(declaration)
+            if vue3_internal_import_equals_target_name(declaration).is_some() =>
+        {
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         _ => {}
     }

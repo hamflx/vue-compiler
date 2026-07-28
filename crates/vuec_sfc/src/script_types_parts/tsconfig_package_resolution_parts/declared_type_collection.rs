@@ -32,7 +32,12 @@ pub(crate) fn collect_vue3_declared_types_from_statements_with_namespace_budget(
             collect_vue3_declared_type_from_statement(source, statement, analysis);
         }
     }
-    refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+    refresh_vue3_declared_type_declarations_and_import_aliases_with_budget(
+        source,
+        statements,
+        analysis,
+        namespace_budget,
+    );
     if !statements
         .iter()
         .any(vue3_statement_has_deferred_type_scope)
@@ -288,6 +293,9 @@ fn collect_vue3_declared_type_deps_from_statement_into(
         Statement::VariableDeclaration(declaration) => {
             collect_vue3_projected_variable_type_deps_into(declaration, analysis, target);
         }
+        Statement::TSImportEqualsDeclaration(declaration) => {
+            collect_vue3_import_equals_type_deps_into(declaration, analysis, target);
+        }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(declaration) = &export.declaration {
                 collect_vue3_declared_type_deps_from_declaration_into(
@@ -335,8 +343,24 @@ fn collect_vue3_declared_type_deps_from_declaration_into(
         Declaration::VariableDeclaration(declaration) => {
             collect_vue3_projected_variable_type_deps_into(declaration, analysis, target);
         }
+        Declaration::TSImportEqualsDeclaration(declaration) => {
+            collect_vue3_import_equals_type_deps_into(declaration, analysis, target);
+        }
         _ => {}
     }
+}
+
+fn collect_vue3_import_equals_type_deps_into(
+    declaration: &TSImportEqualsDeclaration<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    target: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let Some(source_name) = vue3_internal_import_equals_target_name(declaration) else {
+        return;
+    };
+    let mut deps = BTreeSet::new();
+    collect_vue3_named_type_deps(&source_name, analysis, &mut deps);
+    insert_vue3_declared_type_deps_into(target, declaration.id.name.as_str(), deps);
 }
 
 fn collect_vue3_declared_variable_type_deps_into(
