@@ -72,6 +72,7 @@ fn resolve_vue3_type_import_with_request(
             },
             filename,
             source,
+            None,
             &request_resolver,
             is_relative,
         )

@@ -23,6 +23,7 @@ pub(crate) fn resolve_vue3_type_reference_path(
             Vue3TypeResolutionKind::ReferencePath,
             filename,
             reference,
+            None,
             type_resolver,
             true,
         )

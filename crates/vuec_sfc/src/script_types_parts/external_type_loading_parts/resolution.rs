@@ -22,6 +22,7 @@ enum Vue3TypeResolutionKind {
 struct Vue3TypeImportResolutionCacheKey {
     kind: Vue3TypeResolutionKind,
     importer: PathBuf,
+    reference_containing_file: Option<PathBuf>,
     relative_current_dir: Option<PathBuf>,
     source: String,
     resolver: Vue3TypeResolverCacheIdentity,
@@ -31,6 +32,11 @@ impl Vue3TypeImportResolutionCacheKey {
     fn weight(&self, entry: &Vue3TypeImportResolutionCacheEntry) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(self.importer.as_os_str().as_encoded_bytes().len())
+            .saturating_add(
+                self.reference_containing_file
+                    .as_ref()
+                    .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
+            )
             .saturating_add(
                 self.relative_current_dir
                     .as_ref()
@@ -87,9 +93,14 @@ impl Vue3ExternalTypeLoadSession {
         kind: Vue3TypeResolutionKind,
         filename: &str,
         source: &str,
+        reference_containing_filename: Option<&str>,
         type_resolver: &Vue3TypeResolverContext,
         is_relative: bool,
     ) -> Vue3TypeImportResolutionLoad {
+        debug_assert_eq!(
+            matches!(kind, Vue3TypeResolutionKind::ReferenceTypes { .. }),
+            reference_containing_filename.is_some(),
+        );
         let max_cache_entry_weight = {
             let mut state = self.lock();
             if state.stats.resolution_lookups >= state.limits.max_resolution_lookups {
@@ -103,7 +114,10 @@ impl Vue3ExternalTypeLoadSession {
             }
             state.limits.max_resolution_cache_entry_weight
         };
-        let relative_current_dir = if Path::new(filename).is_relative() {
+        let has_relative_path_context = Path::new(filename).is_relative()
+            || reference_containing_filename
+                .is_some_and(|filename| Path::new(filename).is_relative());
+        let relative_current_dir = if has_relative_path_context {
             std::env::current_dir().ok().map(|current_dir| {
                 vue3_external_type_path_key(normalize_path_components(current_dir))
             })
@@ -113,6 +127,9 @@ impl Vue3ExternalTypeLoadSession {
         let resolver = Vue3TypeResolverCacheIdentity::from_resolver(type_resolver);
         let minimum_weight = std::mem::size_of::<Vue3TypeImportResolutionCacheKey>()
             .saturating_add(filename.len())
+            .saturating_add(reference_containing_filename.map_or(0, |filename| {
+                Path::new(filename).as_os_str().as_encoded_bytes().len()
+            }))
             .saturating_add(
                 relative_current_dir
                     .as_ref()
@@ -125,6 +142,7 @@ impl Vue3ExternalTypeLoadSession {
             Vue3TypeImportResolutionCacheKey {
                 kind,
                 importer: PathBuf::from(filename),
+                reference_containing_file: reference_containing_filename.map(PathBuf::from),
                 relative_current_dir,
                 source: source.to_string(),
                 resolver,

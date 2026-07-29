@@ -1119,10 +1119,6 @@ fn resolve_vue3_type_reference_directive_with_mode(
     request_resolver.active_package_json_features = Some(
         type_resolver.package_json_features_for_type_reference(resolution_mode.is_some()),
     );
-    let cache_source = format!(
-        "{}:{containing_filename}{type_name}",
-        containing_filename.len()
-    );
     match request_resolver
         .external_type_session
         .begin_type_import_resolution(
@@ -1131,7 +1127,8 @@ fn resolve_vue3_type_reference_directive_with_mode(
                 package_json_features: request_resolver.package_json_features(),
             },
             project_filename,
-            &cache_source,
+            type_name,
+            Some(containing_filename),
             &request_resolver,
             false,
         ) {
@@ -4858,6 +4855,174 @@ mod vue3_type_reference_directive_tests {
             resolver.external_type_session.stats().resolution_cache_hits,
             1
         );
+    }
+
+    #[test]
+    fn reference_types_cache_is_containing_file_scoped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        for directory in [&project_dir, &first_dir, &second_dir] {
+            std::fs::create_dir_all(directory).expect("create reference directory");
+        }
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":[]}}"#,
+        )
+        .expect("write project config");
+        let first = first_dir.join("local.d.ts");
+        let second = second_dir.join("local.d.ts");
+        std::fs::write(&first, "interface FirstLocalReference {}")
+            .expect("write first local reference");
+        std::fs::write(&second, "interface SecondLocalReference {}")
+            .expect("write second local reference");
+        let project = project_dir.join("Comp.vue").to_string_lossy().into_owned();
+        let first_containing = first_dir
+            .join("ambient.d.ts")
+            .to_string_lossy()
+            .into_owned();
+        let second_containing = second_dir
+            .join("ambient.d.ts")
+            .to_string_lossy()
+            .into_owned();
+        let resolver = Vue3TypeResolverContext::default();
+
+        for (containing, expected) in [
+            (first_containing.as_str(), first.as_path()),
+            (second_containing.as_str(), second.as_path()),
+        ] {
+            assert_eq!(
+                resolve_vue3_type_reference_directive(
+                    &project,
+                    containing,
+                    "./local",
+                    &resolver,
+                ),
+                Some(expected.to_path_buf()),
+            );
+        }
+        assert_eq!(
+            resolver.external_type_session.stats().resolution_cache_hits,
+            0
+        );
+        for (containing, expected) in [
+            (first_containing.as_str(), first.as_path()),
+            (second_containing.as_str(), second.as_path()),
+        ] {
+            assert_eq!(
+                resolve_vue3_type_reference_directive(
+                    &project,
+                    containing,
+                    "./local",
+                    &resolver,
+                ),
+                Some(expected.to_path_buf()),
+            );
+        }
+        assert_eq!(
+            resolver.external_type_session.stats().resolution_cache_hits,
+            2
+        );
+    }
+
+    #[test]
+    fn reference_types_cache_charges_containing_file_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project");
+        let expected = write_type_package(&project_dir.join("types"), "weighted");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"types":[],"typeRoots":["./types"]}}"#,
+        )
+        .expect("write project config");
+        let project = project_dir.join("Comp.vue").to_string_lossy().into_owned();
+        let short_containing = project_dir
+            .join("ambient.d.ts")
+            .to_string_lossy()
+            .into_owned();
+        let long_containing = project_dir
+            .join("a-much-longer-containing-directory")
+            .join("ambient.d.ts")
+            .to_string_lossy()
+            .into_owned();
+        let measure_weight = |containing: &str| {
+            let resolver = Vue3TypeResolverContext::default();
+            assert_eq!(
+                resolve_vue3_type_reference_directive(
+                    &project,
+                    containing,
+                    "weighted",
+                    &resolver,
+                ),
+                Some(expected.clone()),
+            );
+            resolver
+                .external_type_session
+                .stats()
+                .cached_resolution_weight
+        };
+        let short_weight = measure_weight(&short_containing);
+        let long_weight = measure_weight(&long_containing);
+        let containing_payload_delta = Path::new(&long_containing)
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            - Path::new(&short_containing)
+                .as_os_str()
+                .as_encoded_bytes()
+                .len();
+        assert_eq!(long_weight - short_weight, containing_payload_delta);
+
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_resolution_cache_weight: long_weight,
+            max_resolution_cache_entry_weight: long_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        for _ in 0..2 {
+            assert_eq!(
+                resolve_vue3_type_reference_directive(
+                    &project,
+                    &long_containing,
+                    "weighted",
+                    &exact,
+                ),
+                Some(expected.clone()),
+            );
+        }
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.cached_resolution_weight, long_weight);
+        assert_eq!(stats.resolution_cache_hits, 1);
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_resolution_cache_weight: long_weight - 1,
+                max_resolution_cache_entry_weight: long_weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_resolution_cache_weight: long_weight,
+                max_resolution_cache_entry_weight: long_weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            for _ in 0..2 {
+                assert_eq!(
+                    resolve_vue3_type_reference_directive(
+                        &project,
+                        &long_containing,
+                        "weighted",
+                        &resolver,
+                    ),
+                    Some(expected.clone()),
+                );
+            }
+            let stats = resolver.external_type_session.stats();
+            assert_eq!(stats.cached_resolution_weight, 0);
+            assert_eq!(stats.resolution_cache_hits, 0);
+        }
     }
 
     #[test]
