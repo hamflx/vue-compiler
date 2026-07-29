@@ -285,7 +285,7 @@ struct Vue3ExternalTypeLoadState {
     tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
     tsconfig_module_resolution_cache: BTreeMap<
         Vue3TsconfigModuleResolutionCacheKey,
-        std::sync::Arc<Vue3TsconfigModuleResolutionSettings>,
+        Vue3TsconfigModuleResolutionCacheEntry,
     >,
     package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,

@@ -257,60 +257,362 @@ impl Vue3TsconfigModuleResolutionCacheKey {
     }
 }
 
-impl Vue3ExternalTypeLoadSession {
-    fn cached_tsconfig_module_resolution(
-        &self,
-        cache_key: &Vue3TsconfigModuleResolutionCacheKey,
-    ) -> Option<std::sync::Arc<Vue3TsconfigModuleResolutionSettings>> {
-        let mut state = self.lock();
-        if state.metadata_blocked {
-            return None;
-        }
-        let cached = state
-            .tsconfig_module_resolution_cache
-            .get(cache_key)
-            .cloned();
-        if cached.is_some() {
-            state.stats.tsconfig_settings_cache_hits += 1;
-        }
-        cached
-    }
+type Vue3TsconfigModuleResolutionFlight =
+    Vue3SingleFlight<Vue3TsconfigModuleResolutionSettings>;
 
-    fn cache_tsconfig_module_resolution(
-        &self,
-        cache_key: Vue3TsconfigModuleResolutionCacheKey,
-        settings: std::sync::Arc<Vue3TsconfigModuleResolutionSettings>,
-    ) -> std::sync::Arc<Vue3TsconfigModuleResolutionSettings> {
-        let cache_weight = cache_key
+#[derive(Clone, Debug)]
+enum Vue3TsconfigModuleResolutionCacheEntry {
+    Loading(std::sync::Arc<Vue3TsconfigModuleResolutionFlight>),
+    Ready(std::sync::Arc<Vue3TsconfigModuleResolutionSettings>),
+}
+
+enum Vue3TsconfigModuleResolutionLoad {
+    Ready(std::sync::Arc<Vue3TsconfigModuleResolutionSettings>),
+    Wait(Vue3TsconfigModuleResolutionWaiter),
+    Start(Vue3TsconfigModuleResolutionOwner),
+    Blocked,
+}
+
+struct Vue3TsconfigModuleResolutionWaiter {
+    session: Vue3ExternalTypeLoadSession,
+    flight: std::sync::Arc<Vue3TsconfigModuleResolutionFlight>,
+}
+
+impl Vue3TsconfigModuleResolutionWaiter {
+    fn wait(self) -> Option<std::sync::Arc<Vue3TsconfigModuleResolutionSettings>> {
+        match self.flight.wait() {
+            Vue3SingleFlightOutcome::Complete(Some(settings)) => {
+                let mut state = self.session.lock();
+                if state.metadata_blocked
+                    || state.metadata_generation != self.flight.generation
+                {
+                    state.failure_epoch += 1;
+                    return None;
+                }
+                state.stats.tsconfig_settings_cache_hits += 1;
+                Some(settings)
+            }
+            Vue3SingleFlightOutcome::Complete(None) | Vue3SingleFlightOutcome::Aborted => {
+                if !self.session.metadata_is_blocked() {
+                    self.session.block_metadata();
+                }
+                None
+            }
+        }
+    }
+}
+
+struct Vue3TsconfigModuleResolutionOwner {
+    session: Vue3ExternalTypeLoadSession,
+    cache_key: Vue3TsconfigModuleResolutionCacheKey,
+    flight: std::sync::Arc<Vue3TsconfigModuleResolutionFlight>,
+    active: bool,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Vue3TsconfigModuleResolutionOwner {
+    fn complete(
+        mut self,
+        settings: Vue3TsconfigModuleResolutionSettings,
+    ) -> Option<std::sync::Arc<Vue3TsconfigModuleResolutionSettings>> {
+        let settings = std::sync::Arc::new(settings);
+        let cache_weight = self
+            .cache_key
             .payload_weight()
             .saturating_add(settings.payload_weight());
-        let mut state = self.lock();
-        if state.metadata_blocked {
-            return settings;
+        let session = self.session.clone();
+        let mut state = session.lock();
+        let current = vue3_tsconfig_module_resolution_flight_matches(
+            state.tsconfig_module_resolution_cache.get(&self.cache_key),
+            self.flight.id,
+        );
+        let stale = state.metadata_blocked
+            || state.metadata_generation != self.flight.generation
+            || !current;
+        if stale {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            self.flight.abort();
+            self.active = false;
+            return None;
         }
-        if let Some(cached) = state
+
+        let ready_entries = state
             .tsconfig_module_resolution_cache
-            .get(&cache_key)
-            .cloned()
-        {
-            state.stats.tsconfig_settings_cache_hits += 1;
-            return cached;
-        }
+            .values()
+            .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Ready(_)))
+            .count();
         let remaining_weight = state
             .limits
             .max_tsconfig_settings_cache_weight
             .saturating_sub(state.stats.cached_tsconfig_settings_weight);
-        if state.tsconfig_module_resolution_cache.len()
-            < state.limits.max_tsconfig_settings_cache_entries
+        let retain = ready_entries < state.limits.max_tsconfig_settings_cache_entries
             && cache_weight <= state.limits.max_tsconfig_settings_cache_entry_weight
-            && cache_weight <= remaining_weight
-        {
+            && cache_weight <= remaining_weight;
+        if retain {
+            state.tsconfig_module_resolution_cache.insert(
+                self.cache_key.clone(),
+                Vue3TsconfigModuleResolutionCacheEntry::Ready(settings.clone()),
+            );
+            state.stats.cached_tsconfig_settings_weight += cache_weight;
+        } else {
             state
                 .tsconfig_module_resolution_cache
-                .insert(cache_key, settings.clone());
-            state.stats.cached_tsconfig_settings_weight += cache_weight;
+                .remove(&self.cache_key);
         }
-        settings
+        // Publish while holding the session lock so an unretained result still has
+        // one linear completion point for both current waiters and later callers.
+        self.flight.complete(Some(settings.clone()));
+        drop(state);
+        self.active = false;
+        Some(settings)
+    }
+}
+
+impl Drop for Vue3TsconfigModuleResolutionOwner {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let session = self.session.clone();
+        let mut state = session.lock();
+        let flights = vue3_block_metadata_state(&mut state);
+        drop(state);
+        vue3_abort_metadata_flights(flights);
+        self.flight.abort();
+        self.active = false;
+    }
+}
+
+impl Vue3ExternalTypeLoadSession {
+    fn begin_tsconfig_module_resolution_load(
+        &self,
+        cache_key: Vue3TsconfigModuleResolutionCacheKey,
+    ) -> Vue3TsconfigModuleResolutionLoad {
+        let owner = std::thread::current().id();
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            state.failure_epoch += 1;
+            return Vue3TsconfigModuleResolutionLoad::Blocked;
+        }
+        match state
+            .tsconfig_module_resolution_cache
+            .get(&cache_key)
+            .cloned()
+        {
+            Some(Vue3TsconfigModuleResolutionCacheEntry::Ready(settings)) => {
+                state.stats.tsconfig_settings_cache_hits += 1;
+                return Vue3TsconfigModuleResolutionLoad::Ready(settings);
+            }
+            Some(Vue3TsconfigModuleResolutionCacheEntry::Loading(flight)) => {
+                if flight.owner == owner {
+                    let flights = vue3_block_metadata_state(&mut state);
+                    drop(state);
+                    vue3_abort_metadata_flights(flights);
+                    return Vue3TsconfigModuleResolutionLoad::Blocked;
+                }
+                return Vue3TsconfigModuleResolutionLoad::Wait(
+                    Vue3TsconfigModuleResolutionWaiter {
+                        session: self.clone(),
+                        flight,
+                    },
+                );
+            }
+            None => {}
+        }
+
+        let loading_entries = state
+            .tsconfig_module_resolution_cache
+            .values()
+            .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Loading(_)))
+            .count();
+        if loading_entries >= state.limits.max_tsconfig_nodes {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return Vue3TsconfigModuleResolutionLoad::Blocked;
+        }
+        let flight_id = state.next_metadata_flight_id;
+        let Some(next_flight_id) = flight_id.checked_add(1) else {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return Vue3TsconfigModuleResolutionLoad::Blocked;
+        };
+        state.next_metadata_flight_id = next_flight_id;
+        let flight = std::sync::Arc::new(Vue3TsconfigModuleResolutionFlight::new(
+            flight_id,
+            owner,
+            state.metadata_generation,
+        ));
+        state.tsconfig_module_resolution_cache.insert(
+            cache_key.clone(),
+            Vue3TsconfigModuleResolutionCacheEntry::Loading(flight.clone()),
+        );
+        drop(state);
+        Vue3TsconfigModuleResolutionLoad::Start(Vue3TsconfigModuleResolutionOwner {
+            session: self.clone(),
+            cache_key,
+            flight,
+            active: true,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+}
+
+fn vue3_tsconfig_module_resolution_flight_matches(
+    entry: Option<&Vue3TsconfigModuleResolutionCacheEntry>,
+    flight_id: u64,
+) -> bool {
+    matches!(
+        entry,
+        Some(Vue3TsconfigModuleResolutionCacheEntry::Loading(flight))
+            if flight.id == flight_id
+    )
+}
+
+#[cfg(test)]
+mod vue3_tsconfig_module_resolution_single_flight_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn cache_key(name: &str) -> Vue3TsconfigModuleResolutionCacheKey {
+        Vue3TsconfigModuleResolutionCacheKey {
+            state: (
+                PathBuf::from(format!("/{name}/tsconfig.json")),
+                PathBuf::from(format!("/{name}")),
+                PathBuf::from(format!("/{name}")),
+            ),
+            typescript_version: "5.0.0".to_string(),
+        }
+    }
+
+    fn settings(name: &str) -> Vue3TsconfigModuleResolutionSettings {
+        Vue3TsconfigModuleResolutionSettings {
+            base_url: Some(PathBuf::from(format!("/{name}/src"))),
+            base_url_is_declared: true,
+            ..Vue3TsconfigModuleResolutionSettings::default()
+        }
+    }
+
+    fn start(
+        session: &Vue3ExternalTypeLoadSession,
+        key: Vue3TsconfigModuleResolutionCacheKey,
+    ) -> Vue3TsconfigModuleResolutionOwner {
+        match session.begin_tsconfig_module_resolution_load(key) {
+            Vue3TsconfigModuleResolutionLoad::Start(owner) => owner,
+            _ => panic!("expected tsconfig settings owner"),
+        }
+    }
+
+    #[test]
+    fn shares_owner_result_with_waiters_and_ready_cache_hits() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let key = cache_key("shared");
+        let owner = start(&session, key.clone());
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let worker_session = session.clone();
+        let worker_key = key.clone();
+        let worker = std::thread::spawn(move || {
+            let waiter = match worker_session.begin_tsconfig_module_resolution_load(worker_key) {
+                Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter,
+                _ => panic!("expected tsconfig settings waiter"),
+            };
+            waiting_tx.send(()).expect("announce waiter");
+            waiter.wait().expect("shared tsconfig settings")
+        });
+        waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("waiter registered");
+
+        let owned = owner.complete(settings("shared")).expect("owner result");
+        let waited = worker.join().expect("join waiter");
+        assert!(std::sync::Arc::ptr_eq(&owned, &waited));
+        let cached = match session.begin_tsconfig_module_resolution_load(key) {
+            Vue3TsconfigModuleResolutionLoad::Ready(cached) => cached,
+            _ => panic!("expected ready tsconfig settings"),
+        };
+        assert!(std::sync::Arc::ptr_eq(&owned, &cached));
+        assert_eq!(session.stats().tsconfig_settings_cache_hits, 2);
+        assert!(!session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn shares_in_flight_result_when_cache_retention_is_disabled() {
+        let session = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_settings_cache_entries: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let key = cache_key("unretained");
+        let owner = start(&session, key.clone());
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let worker_session = session.clone();
+        let worker_key = key.clone();
+        let worker = std::thread::spawn(move || {
+            let waiter = match worker_session.begin_tsconfig_module_resolution_load(worker_key) {
+                Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter,
+                _ => panic!("expected tsconfig settings waiter"),
+            };
+            waiting_tx.send(()).expect("announce waiter");
+            waiter.wait().expect("shared unretained settings")
+        });
+        waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("waiter registered");
+
+        let owned = owner
+            .complete(settings("unretained"))
+            .expect("owner result");
+        let waited = worker.join().expect("join waiter");
+        assert!(std::sync::Arc::ptr_eq(&owned, &waited));
+        assert!(session.lock().tsconfig_module_resolution_cache.is_empty());
+
+        let rebuilt = start(&session, key)
+            .complete(settings("rebuilt"))
+            .expect("rebuilt result");
+        assert!(!std::sync::Arc::ptr_eq(&owned, &rebuilt));
+        assert_eq!(session.stats().tsconfig_settings_cache_hits, 1);
+        assert!(!session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn same_thread_reentry_fails_closed_without_deadlocking() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let key = cache_key("reentrant");
+        let owner = start(&session, key.clone());
+
+        assert!(matches!(
+            session.begin_tsconfig_module_resolution_load(key),
+            Vue3TsconfigModuleResolutionLoad::Blocked
+        ));
+        assert!(owner.complete(settings("reentrant")).is_none());
+        assert!(session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn owner_drop_aborts_waiters_and_blocks_partial_metadata_state() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let key = cache_key("aborted");
+        let owner = start(&session, key.clone());
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            let waiter = match worker_session.begin_tsconfig_module_resolution_load(key) {
+                Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter,
+                _ => panic!("expected tsconfig settings waiter"),
+            };
+            waiting_tx.send(()).expect("announce waiter");
+            waiter.wait()
+        });
+        waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("waiter registered");
+
+        drop(owner);
+        assert!(worker.join().expect("join waiter").is_none());
+        assert!(session.metadata_is_blocked());
+        assert!(session.lock().tsconfig_module_resolution_cache.is_empty());
     }
 }
 
@@ -710,26 +1012,23 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         &config_dir,
         type_resolver,
     );
-    let settings = if let Some(cached) = type_resolver
+    let settings = match type_resolver
         .external_type_session
-        .cached_tsconfig_module_resolution(&cache_key)
+        .begin_tsconfig_module_resolution_load(cache_key)
     {
-        cached
-    } else {
-        let mut traversal = Vue3TsconfigGraphTraversal::default();
-        let settings = vue3_tsconfig_module_resolution_from_config(
-            &config_path,
-            &config_dir,
-            &mut traversal,
-            0,
-            type_resolver,
-        );
-        if type_resolver.external_type_session.metadata_is_blocked() {
-            return None;
+        Vue3TsconfigModuleResolutionLoad::Ready(settings) => settings,
+        Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter.wait()?,
+        Vue3TsconfigModuleResolutionLoad::Start(owner) => {
+            let mut traversal = Vue3TsconfigGraphTraversal::default();
+            owner.complete(vue3_tsconfig_module_resolution_from_config(
+                &config_path,
+                &config_dir,
+                &mut traversal,
+                0,
+                type_resolver,
+            ))?
         }
-        type_resolver
-            .external_type_session
-            .cache_tsconfig_module_resolution(cache_key, std::sync::Arc::new(settings))
+        Vue3TsconfigModuleResolutionLoad::Blocked => return None,
     };
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;

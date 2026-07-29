@@ -289,6 +289,7 @@ fn vue3_metadata_source_flight_matches(
 struct Vue3MetadataFlightsToAbort {
     sources: Vec<std::sync::Arc<Vue3MetadataSourceFlight>>,
     tsconfigs: Vec<std::sync::Arc<Vue3SingleFlight<serde_json::Value>>>,
+    tsconfig_settings: Vec<std::sync::Arc<Vue3TsconfigModuleResolutionFlight>>,
     package_jsons: Vec<std::sync::Arc<Vue3SingleFlight<Vue3PackageJsonTypeManifest>>>,
 }
 
@@ -318,12 +319,32 @@ fn vue3_block_metadata_state(
         })
         .collect();
     let tsconfigs = vue3_take_metadata_parse_flights(&mut state.tsconfig_cache);
+    let tsconfig_settings =
+        vue3_take_tsconfig_module_resolution_flights(&mut state.tsconfig_module_resolution_cache);
     let package_jsons = vue3_take_metadata_parse_flights(&mut state.package_json_cache);
     Vue3MetadataFlightsToAbort {
         sources,
         tsconfigs,
+        tsconfig_settings,
         package_jsons,
     }
+}
+
+fn vue3_take_tsconfig_module_resolution_flights(
+    cache: &mut BTreeMap<
+        Vue3TsconfigModuleResolutionCacheKey,
+        Vue3TsconfigModuleResolutionCacheEntry,
+    >,
+) -> Vec<std::sync::Arc<Vue3TsconfigModuleResolutionFlight>> {
+    let mut flights = Vec::new();
+    cache.retain(|_, entry| match entry {
+        Vue3TsconfigModuleResolutionCacheEntry::Loading(flight) => {
+            flights.push(flight.clone());
+            false
+        }
+        Vue3TsconfigModuleResolutionCacheEntry::Ready(_) => true,
+    });
+    flights
 }
 
 fn vue3_take_metadata_parse_flights<T>(
@@ -350,6 +371,9 @@ fn vue3_abort_metadata_flights(flights: Vue3MetadataFlightsToAbort) {
         flight.abort();
     }
     for flight in flights.tsconfigs {
+        flight.abort();
+    }
+    for flight in flights.tsconfig_settings {
         flight.abort();
     }
     for flight in flights.package_jsons {
