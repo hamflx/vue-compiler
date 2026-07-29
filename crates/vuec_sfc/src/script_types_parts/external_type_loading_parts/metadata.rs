@@ -287,6 +287,27 @@ impl Vue3ExternalTypeLoadSession {
         true
     }
 
+    pub(crate) fn claim_metadata_match_steps(&self, steps: usize) -> bool {
+        let steps = steps.max(1);
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        let remaining = state
+            .limits
+            .max_metadata_match_steps
+            .saturating_sub(state.stats.metadata_match_steps);
+        if steps > remaining {
+            state.stats.metadata_match_steps = state.limits.max_metadata_match_steps;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        state.stats.metadata_match_steps += steps;
+        true
+    }
+
     fn claim_metadata_resolution_path_probe(&self) -> bool {
         let mut state = self.lock();
         if state.metadata_blocked {

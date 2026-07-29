@@ -902,7 +902,20 @@ fn visit_vue3_package_exports_type_targets(
         };
     };
     if key == "." {
-        return if object.keys().all(|key| !key.starts_with('.')) {
+        let mut conditions_only = true;
+        for object_key in object.keys() {
+            if !type_resolver
+                .external_type_session
+                .claim_metadata_match_steps(object_key.len())
+            {
+                return Vue3PackageTargetVisit::Blocked;
+            }
+            if object_key.starts_with('.') {
+                conditions_only = false;
+                break;
+            }
+        }
+        return if conditions_only {
             visit_vue3_package_target(
                 exports,
                 resolution_mode,
@@ -924,8 +937,22 @@ fn visit_vue3_package_exports_type_targets(
             Vue3PackageTargetVisit::Missing
         };
     }
-    if !object.keys().all(|key| key.starts_with('.')) {
-        return Vue3PackageTargetVisit::Missing;
+    for object_key in object.keys() {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(object_key.len())
+        {
+            return Vue3PackageTargetVisit::Blocked;
+        }
+        if !object_key.starts_with('.') {
+            return Vue3PackageTargetVisit::Missing;
+        }
+    }
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_match_steps(key.len())
+    {
+        return Vue3PackageTargetVisit::Blocked;
     }
     if let Some(target) = object.get(&key) {
         return visit_vue3_package_target(
@@ -942,6 +969,12 @@ fn visit_vue3_package_exports_type_targets(
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
+        {
+            return Vue3PackageTargetVisit::Blocked;
+        }
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(pattern.len().saturating_add(key.len()))
         {
             return Vue3PackageTargetVisit::Blocked;
         }
@@ -991,6 +1024,12 @@ fn visit_vue3_package_imports_type_targets(
     let Some(object) = imports.as_object() else {
         return Vue3PackageTargetVisit::Invalid;
     };
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_match_steps(source.len())
+    {
+        return Vue3PackageTargetVisit::Blocked;
+    }
     if let Some(target) = object.get(source) {
         return visit_vue3_package_target(
             target,
@@ -1007,6 +1046,12 @@ fn visit_vue3_package_imports_type_targets(
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
+        {
+            return Vue3PackageTargetVisit::Blocked;
+        }
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(pattern.len().saturating_add(source.len()))
         {
             return Vue3PackageTargetVisit::Blocked;
         }
@@ -1166,10 +1211,16 @@ fn visit_vue3_package_target(
     let Some(conditions) = target.as_object() else {
         return Vue3PackageTargetVisit::Invalid;
     };
-    for _ in conditions.keys() {
+    for condition in conditions.keys() {
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
+        {
+            return Vue3PackageTargetVisit::Blocked;
+        }
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(condition.len())
         {
             return Vue3PackageTargetVisit::Blocked;
         }
@@ -1574,9 +1625,12 @@ fn vue3_package_types_versions_path(
     declaration_only: bool,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3TypesVersionsResolution {
-    let Some(mappings) = vue3_package_types_versions_mapping(types_versions, type_resolver)
-    else {
-        return Vue3TypesVersionsResolution::NotMatched;
+    let Some(mappings) = vue3_package_types_versions_mapping(types_versions, type_resolver) else {
+        return if type_resolver.external_type_session.metadata_is_blocked() {
+            Vue3TypesVersionsResolution::Blocked
+        } else {
+            Vue3TypesVersionsResolution::NotMatched
+        };
     };
     let Some((mapping_index, capture)) = vue3_typescript_best_path_pattern_match(
         mappings
@@ -1585,8 +1639,13 @@ fn vue3_package_types_versions_path(
             .enumerate()
             .map(|(index, (pattern, _))| (index, pattern.as_str())),
         source,
+        type_resolver,
     ) else {
-        return Vue3TypesVersionsResolution::NotMatched;
+        return if type_resolver.external_type_session.metadata_is_blocked() {
+            Vue3TypesVersionsResolution::Blocked
+        } else {
+            Vue3TypesVersionsResolution::NotMatched
+        };
     };
     let targets = &mappings.0[mapping_index].1;
     for target in vue3_tsconfig_path_target_values(targets) {
@@ -1769,19 +1828,24 @@ pub(crate) fn vue3_package_types_versions_mapping<'a>(
     types_versions: &'a Vue3PackageTypesVersions,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<&'a Vue3PackageTypesVersionMappings> {
-    let entry = types_versions
-        .0
-        .iter()
-        .find(|entry| {
-            vue3_package_types_version_selector_matches_version(
-                &entry.selector,
-                &type_resolver.typescript_version,
-            )
-        })?;
-    match &entry.value {
-        Vue3PackageTypesVersionValue::Unavailable => None,
-        Vue3PackageTypesVersionValue::Mappings(mappings) => Some(mappings),
+    for entry in &types_versions.0 {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(entry.selector.len())
+        {
+            return None;
+        }
+        if vue3_package_types_version_selector_matches_version(
+            &entry.selector,
+            &type_resolver.typescript_version,
+        ) {
+            return match &entry.value {
+                Vue3PackageTypesVersionValue::Unavailable => None,
+                Vue3PackageTypesVersionValue::Mappings(mappings) => Some(mappings),
+            };
+        }
     }
+    None
 }
 
 #[cfg(test)]

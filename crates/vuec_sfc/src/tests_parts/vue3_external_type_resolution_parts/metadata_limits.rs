@@ -3473,6 +3473,114 @@ fn vue3_metadata_fanout_entries_are_bounded_and_cached() {
 }
 
 #[test]
+fn vue3_metadata_match_steps_are_bounded_and_cached() {
+    assert_eq!(VUE3_EXTERNAL_TYPE_MAX_METADATA_MATCH_STEPS, 16 * 1024 * 1024);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("hit.ts");
+    std::fs::write(&target, "export interface BudgetProps { value: string }")
+        .expect("write metadata match target");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"paths":{"a*":["missing.ts"],"budget":["hit.ts"]}}}"#,
+    )
+    .expect("write metadata match tsconfig");
+    let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
+    let exact_steps = "a*".len()
+        + "budget".len()
+        + "budget".len()
+        + "budget".len();
+    assert_eq!(exact_steps, 20);
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "budget", &accepted),
+        Some(target.clone())
+    );
+    let first_stats = accepted.external_type_session.stats();
+    assert_eq!(first_stats.metadata_match_steps, exact_steps);
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "budget", &accepted),
+        Some(target)
+    );
+    let cached_stats = accepted.external_type_session.stats();
+    assert_eq!(cached_stats.metadata_match_steps, exact_steps);
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_type_import(&importer, "budget", &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_match_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_type_import(&importer, "budget", &zero).is_none());
+    assert_eq!(zero.external_type_session.stats().metadata_match_steps, 0);
+    assert!(zero.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_metadata_match_step_semantic_miss_does_not_block() {
+    let source = "missing";
+    let pattern = "known";
+    let exact_steps = source.len() + pattern.len();
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let mappings = vue3_tsconfig_direct_path_mappings(
+        &serde_json::json!({
+            "compilerOptions": { "paths": { pattern: ["missing.ts"] } }
+        }),
+        Path::new("."),
+        Path::new("."),
+        &resolver,
+    );
+
+    assert!(resolve_vue3_tsconfig_path_mappings(&mappings, source, &resolver).is_none());
+    assert_eq!(
+        resolver.external_type_session.stats().metadata_match_steps,
+        exact_steps
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_metadata_match_step_accounting_does_not_overflow() {
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: usize::MAX,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(resolver
+        .external_type_session
+        .claim_metadata_match_steps(usize::MAX));
+    assert_eq!(
+        resolver.external_type_session.stats().metadata_match_steps,
+        usize::MAX
+    );
+    assert!(!resolver
+        .external_type_session
+        .claim_metadata_match_steps(1));
+    assert_eq!(
+        resolver.external_type_session.stats().metadata_match_steps,
+        usize::MAX
+    );
+    assert!(resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_metadata_resolution_path_probes_are_bounded_before_success() {
     assert_eq!(
         VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES,
@@ -3754,6 +3862,64 @@ fn vue3_types_versions_repeated_targets_consume_fanout_budget() {
 }
 
 #[test]
+fn vue3_types_versions_selector_and_pattern_matching_are_bounded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    write_vue3_test_type_package(
+        &package_dir,
+        r#"{
+            "types":"index.d.ts",
+            "typesVersions":{
+                "<5.0":{"unused*":["wrong.d.ts"]},
+                "*":{"unused*":["wrong.d.ts"],"index.d.ts":["hit.d.ts"]}
+            }
+        }"#,
+    );
+    let hit = package_dir.join("hit.d.ts");
+    std::fs::write(&hit, "export interface VersionedProps {}")
+        .expect("write versioned target");
+    let source = "index.d.ts";
+    let exact_steps = "<5.0".len()
+        + "*".len()
+        + "unused*".len()
+        + source.len()
+        + source.len()
+        + source.len();
+    assert_eq!(exact_steps, 42);
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &accepted),
+        Vue3PackageJsonTypeResolution::Resolved(hit)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_match_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &short),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert_eq!(
+        short.external_type_session.stats().metadata_match_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_metadata_fanout_semantic_miss_does_not_block() {
     let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_metadata_fanout_entries: 1,
@@ -3840,6 +4006,84 @@ fn vue3_package_condition_scanning_and_fallback_are_fanout_bounded() {
     });
     assert!(vue3_package_exports_type_target(&blocked_then_valid, None, &resolver).is_none());
     assert!(resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_package_condition_and_pattern_matching_are_bounded() {
+    let conditions = serde_json::json!({
+        "unknown": "./inactive.d.ts",
+        "types": "./valid.d.ts"
+    });
+    let condition_steps = 2 * ("unknown".len() + "types".len());
+    assert_eq!(condition_steps, 24);
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: condition_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_package_exports_type_target(&conditions, None, &accepted).as_deref(),
+        Some("./valid.d.ts")
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_match_steps,
+        condition_steps
+    );
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: condition_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_package_exports_type_target(&conditions, None, &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_match_steps,
+        condition_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+
+    let exports = serde_json::json!({
+        "./unused/*": "./wrong/*.d.ts",
+        "./feature/*": "./types/*.d.ts"
+    });
+    let key = "./feature/item";
+    let pattern_steps = "./unused/*".len()
+        + "./feature/*".len()
+        + key.len()
+        + "./unused/*".len()
+        + key.len()
+        + "./feature/*".len()
+        + key.len();
+    assert_eq!(pattern_steps, 84);
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: pattern_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_package_exports_type_target(&exports, Some("feature/item"), &accepted).as_deref(),
+        Some("./types/item.d.ts")
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_match_steps,
+        pattern_steps
+    );
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_match_steps: pattern_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(
+        vue3_package_exports_type_target(&exports, Some("feature/item"), &short).is_none()
+    );
+    assert_eq!(
+        short.external_type_session.stats().metadata_match_steps,
+        pattern_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
 }
 
 #[test]

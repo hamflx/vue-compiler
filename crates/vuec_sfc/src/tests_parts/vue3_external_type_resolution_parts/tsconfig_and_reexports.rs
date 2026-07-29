@@ -1649,6 +1649,7 @@ defineProps<Leaf>()
                 metadata_source_cache_hits: 0,
                 metadata_parse_cache_hits: 0,
                 metadata_fanout_entries: 0,
+                metadata_match_steps: 0,
                 metadata_resolution_path_probes: 0,
                 tsconfig_nodes: 0,
                 tsconfig_discovery_entries: 0,

@@ -110,6 +110,7 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
             .enumerate()
             .map(|(index, mapping)| (index, mapping.pattern.as_str())),
         source,
+        type_resolver,
     )?;
     let mapping = &mappings[mapping_index];
     for target in &mapping.targets {
@@ -197,21 +198,27 @@ pub(crate) fn vue3_tsconfig_path_pattern_capture(
 fn vue3_typescript_best_path_pattern_match<'a>(
     patterns: impl IntoIterator<Item = (usize, &'a str)>,
     source: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<(usize, String)> {
-    patterns
-        .into_iter()
-        .filter_map(|(index, pattern)| {
-            vue3_tsconfig_path_pattern_capture(pattern, source)
-                .map(|(prefix_len, capture)| (prefix_len, index, capture))
-        })
-        .fold(
-            None,
-            |best: Option<(usize, usize, String)>, candidate| match best {
-                Some(best) if best.0 >= candidate.0 => Some(best),
-                _ => Some(candidate),
-            },
-        )
-        .map(|(_, index, capture)| (index, capture))
+    let mut best: Option<(usize, usize, String)> = None;
+    for (index, pattern) in patterns {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_match_steps(pattern.len().saturating_add(source.len()))
+        {
+            return None;
+        }
+        let Some((prefix_len, capture)) = vue3_tsconfig_path_pattern_capture(pattern, source) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(best_prefix_len, _, _)| prefix_len > *best_prefix_len)
+        {
+            best = Some((prefix_len, index, capture));
+        }
+    }
+    best.map(|(_, index, capture)| (index, capture))
 }
 
 pub(crate) fn vue3_tsconfig_target_path(
