@@ -3346,7 +3346,7 @@ fn vue3_tsconfig_bounded_sorted_dir_entries(
     {
         return None;
     }
-    paths.sort();
+    paths.sort_unstable();
     Some(paths)
 }
 
