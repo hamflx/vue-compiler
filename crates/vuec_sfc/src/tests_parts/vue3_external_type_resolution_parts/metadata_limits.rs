@@ -3350,6 +3350,92 @@ fn vue3_tsconfig_named_type_candidates_are_charged_before_package_resolution() {
     assert_eq!(stats.metadata_files_read, 1);
 }
 
+#[test]
+fn vue3_tsconfig_types_names_are_target_bounded_before_validation() {
+    let type_name = "x".repeat(4096);
+    let value = serde_json::json!({
+        "files": [],
+        "compilerOptions": { "types": [type_name], "typeRoots": [] }
+    });
+    let exact_steps = value["compilerOptions"]["types"][0]
+        .as_str()
+        .expect("type name")
+        .len();
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(vue3_tsconfig_direct_global_type_files(
+        &value,
+        Path::new("config"),
+        Path::new("config"),
+        &accepted,
+    )
+    .is_empty());
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_direct_global_type_files(
+        &value,
+        Path::new("config"),
+        Path::new("config"),
+        &short,
+    )
+    .is_empty());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_named_type_candidate_paths_are_target_bounded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let type_roots = [dir.path().join("first"), dir.path().join("second")];
+    let type_name = format!("@scope/{}", "x".repeat(4096));
+    let generated_steps = type_roots
+        .iter()
+        .map(|type_root| {
+            3 * (type_root.as_os_str().as_encoded_bytes().len() + 1 + type_name.len())
+        })
+        .sum::<usize>();
+    let exact_steps = type_name.len() + generated_steps;
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(
+        vue3_tsconfig_named_type_global_type_files(&type_roots, &type_name, &accepted).is_empty()
+    );
+    let accepted_stats = accepted.external_type_session.stats();
+    assert_eq!(accepted_stats.metadata_target_steps, exact_steps);
+    assert_eq!(accepted_stats.tsconfig_discovery_entries, 6);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_named_type_global_type_files(&type_roots, &type_name, &short).is_empty());
+    let short_stats = short.external_type_session.stats();
+    assert_eq!(short_stats.metadata_target_steps, exact_steps - 1);
+    assert_eq!(short_stats.tsconfig_discovery_entries, 3);
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
 #[cfg(unix)]
 #[test]
 fn vue3_tsconfig_graph_uses_canonical_symlink_identity() {

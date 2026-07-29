@@ -2015,11 +2015,32 @@ pub(crate) fn vue3_tsconfig_named_type_global_type_files(
     type_name: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(type_name.len())
+    {
+        return Vec::new();
+    }
     if !vue3_tsconfig_type_name_is_safe(type_name) {
         return Vec::new();
     }
+    let package_dir_count = vue3_tsconfig_type_name_package_dir_count(type_name);
     let mut files = Vec::new();
     for type_root in type_roots {
+        let generated_steps = package_dir_count.saturating_mul(
+            type_root
+                .as_os_str()
+                .as_encoded_bytes()
+                .len()
+                .saturating_add(1)
+                .saturating_add(type_name.len()),
+        );
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(generated_steps)
+        {
+            return Vec::new();
+        }
         for package_dir in vue3_tsconfig_type_name_package_dirs(type_root, type_name) {
             if !type_resolver
                 .external_type_session
@@ -2055,16 +2076,26 @@ pub(crate) fn vue3_tsconfig_type_name_package_dirs(
     type_name: &str,
 ) -> Vec<PathBuf> {
     if let Some(scoped) = type_name.strip_prefix('@') {
-        let parts = scoped.split('/').collect::<Vec<_>>();
-        if parts.len() == 2 {
+        if let Some((scope, package)) = scoped
+            .split_once('/')
+            .filter(|(_, package)| !package.contains('/'))
+        {
             return vec![
-                normalize_path_components(type_root.join(format!("@{}", parts[0])).join(parts[1])),
-                normalize_path_components(type_root.join(parts[0]).join(parts[1])),
-                normalize_path_components(type_root.join(format!("{}__{}", parts[0], parts[1]))),
+                normalize_path_components(type_root.join(format!("@{scope}")).join(package)),
+                normalize_path_components(type_root.join(scope).join(package)),
+                normalize_path_components(type_root.join(format!("{scope}__{package}"))),
             ];
         }
     }
     vec![normalize_path_components(type_root.join(type_name))]
+}
+
+fn vue3_tsconfig_type_name_package_dir_count(type_name: &str) -> usize {
+    type_name
+        .strip_prefix('@')
+        .and_then(|scoped| scoped.split_once('/'))
+        .filter(|(_, package)| !package.contains('/'))
+        .map_or(1, |_| 3)
 }
 
 pub(crate) fn vue3_tsconfig_all_type_root_global_type_files(
