@@ -3467,6 +3467,8 @@ fn vue3_tsconfig_named_type_candidate_paths_are_target_bounded() {
     let accepted_stats = accepted.external_type_session.stats();
     assert_eq!(accepted_stats.metadata_target_steps, exact_steps);
     assert_eq!(accepted_stats.tsconfig_discovery_entries, 6);
+    assert_eq!(accepted_stats.tsconfig_materialization_entries, 6);
+    assert!(accepted_stats.tsconfig_materialization_weight > 0);
     assert!(!accepted.external_type_session.metadata_is_blocked());
 
     let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
@@ -3478,6 +3480,61 @@ fn vue3_tsconfig_named_type_candidate_paths_are_target_bounded() {
     assert_eq!(short_stats.metadata_target_steps, exact_steps - 1);
     assert_eq!(short_stats.tsconfig_discovery_entries, 3);
     assert!(short.external_type_session.metadata_is_blocked());
+
+    let short_materialization_weight =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: exact_steps,
+            max_tsconfig_materialization_entries:
+                accepted_stats.tsconfig_materialization_entries,
+            max_tsconfig_materialization_weight:
+                accepted_stats.tsconfig_materialization_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(vue3_tsconfig_named_type_global_type_files(
+        &type_roots,
+        &type_name,
+        &short_materialization_weight,
+    )
+    .is_empty());
+    let short_weight_stats = short_materialization_weight.external_type_session.stats();
+    assert_eq!(short_weight_stats.metadata_target_steps, exact_steps);
+    assert_eq!(short_weight_stats.tsconfig_discovery_entries, 6);
+    assert_eq!(short_weight_stats.tsconfig_materialization_entries, 5);
+    assert_eq!(
+        short_weight_stats.tsconfig_materialization_weight,
+        accepted_stats.tsconfig_materialization_weight - 1
+    );
+    assert!(short_materialization_weight
+        .external_type_session
+        .metadata_is_blocked());
+
+    let short_materialization_entries =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: exact_steps,
+            max_tsconfig_materialization_entries:
+                accepted_stats.tsconfig_materialization_entries - 1,
+            max_tsconfig_materialization_weight:
+                accepted_stats.tsconfig_materialization_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(vue3_tsconfig_named_type_global_type_files(
+        &type_roots,
+        &type_name,
+        &short_materialization_entries,
+    )
+    .is_empty());
+    let short_entry_stats = short_materialization_entries.external_type_session.stats();
+    assert_eq!(short_entry_stats.metadata_target_steps, exact_steps);
+    assert_eq!(short_entry_stats.tsconfig_discovery_entries, 6);
+    assert_eq!(short_entry_stats.tsconfig_materialization_entries, 5);
+    assert!(short_entry_stats.tsconfig_materialization_weight > 0);
+    assert!(
+        short_entry_stats.tsconfig_materialization_weight
+            < accepted_stats.tsconfig_materialization_weight
+    );
+    assert!(short_materialization_entries
+        .external_type_session
+        .metadata_is_blocked());
 }
 
 #[cfg(unix)]
@@ -3918,6 +3975,74 @@ fn vue3_tsconfig_materialization_accounting_is_bounded_and_overflow_safe() {
     assert_eq!(overflow_stats.tsconfig_materialization_entries, 1);
     assert_eq!(overflow_stats.tsconfig_materialization_weight, usize::MAX);
     assert!(overflow.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_retained_paths_claim_materialization_before_construction() {
+    let base_dir = Path::new("config");
+    let target = "types";
+    let path_bytes = vue3_ancestor_search_candidate_weight(base_dir, target);
+    let materialization_weight = std::mem::size_of::<PathBuf>() + path_bytes;
+    let expected = normalize_path_components(base_dir.join(target));
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: target.len(),
+        max_generated_path_bytes: path_bytes,
+        max_tsconfig_materialization_entries: 1,
+        max_tsconfig_materialization_weight: materialization_weight,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_materialized_tsconfig_target_path(base_dir, base_dir, target, &exact),
+        Some(expected)
+    );
+    let exact_stats = exact.external_type_session.stats();
+    assert_eq!(exact_stats.metadata_target_steps, target.len());
+    assert_eq!(exact_stats.tsconfig_materialization_entries, 1);
+    assert_eq!(
+        exact_stats.tsconfig_materialization_weight,
+        materialization_weight
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    let short_weight = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: target.len(),
+        max_generated_path_bytes: path_bytes,
+        max_tsconfig_materialization_entries: 1,
+        max_tsconfig_materialization_weight: materialization_weight - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_materialized_tsconfig_target_path(
+        base_dir,
+        base_dir,
+        target,
+        &short_weight,
+    )
+    .is_none());
+    let short_weight_stats = short_weight.external_type_session.stats();
+    assert_eq!(short_weight_stats.tsconfig_materialization_entries, 0);
+    assert_eq!(
+        short_weight_stats.tsconfig_materialization_weight,
+        materialization_weight - 1
+    );
+    assert!(short_weight.external_type_session.metadata_is_blocked());
+
+    let short_path = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: target.len(),
+        max_generated_path_bytes: path_bytes - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_materialized_tsconfig_target_path(
+        base_dir,
+        base_dir,
+        target,
+        &short_path,
+    )
+    .is_none());
+    let short_path_stats = short_path.external_type_session.stats();
+    assert_eq!(short_path_stats.tsconfig_materialization_entries, 0);
+    assert_eq!(short_path_stats.tsconfig_materialization_weight, 0);
+    assert!(short_path.external_type_session.metadata_is_blocked());
 }
 
 #[test]

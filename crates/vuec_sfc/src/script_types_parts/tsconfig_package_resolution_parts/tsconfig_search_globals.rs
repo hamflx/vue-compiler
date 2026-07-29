@@ -1165,7 +1165,14 @@ fn resolve_vue3_type_reference_directive_uncached(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let normalized_type_name = type_name.replace('\\', "/");
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(type_name.len())
+    {
+        return None;
+    }
+    let normalized_type_name =
+        vue3_normalize_typescript_path_separators(type_name, type_resolver)?;
     let type_roots = vue3_tsconfig_effective_type_roots(project_filename, type_resolver)?;
     let primary = resolve_vue3_tsconfig_named_type_global_type_file(
         &type_roots,
@@ -1325,7 +1332,7 @@ fn vue3_tsconfig_type_roots_override_from_config(
                 {
                     return None;
                 }
-                let path = vue3_tsconfig_target_path(
+                let path = vue3_materialized_tsconfig_target_path(
                     config_dir,
                     template_config_dir,
                     target,
@@ -1362,6 +1369,14 @@ fn resolve_vue3_tsconfig_named_type_global_type_file(
         {
             return None;
         }
+        let path_bytes = vue3_ancestor_search_candidate_weight(type_root, type_name);
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(path_bytes)
+            || !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver)
+        {
+            return None;
+        }
         let scoped_default_name = if type_resolver.typescript_version >= (5, 1, 0).into()
             && vue3_type_root_uses_scoped_package_mangling(type_root)
         {
@@ -1371,6 +1386,7 @@ fn resolve_vue3_tsconfig_named_type_global_type_file(
         };
         let package_name = scoped_default_name.as_deref().unwrap_or(type_name);
         let package_dir = normalize_path_components(type_root.join(package_name));
+        debug_assert!(package_dir.as_os_str().as_encoded_bytes().len() <= path_bytes);
         let file = resolve_vue3_type_reference_package_candidate(
             &package_dir,
             None,
@@ -1984,7 +2000,7 @@ fn vue3_tsconfig_direct_root_dirs(
             type_resolver.external_type_session.block_metadata();
             return None;
         };
-        root_dirs.push(vue3_tsconfig_target_path(
+        root_dirs.push(vue3_materialized_tsconfig_target_path(
             config_dir,
             template_config_dir,
             root_dir,
@@ -2566,7 +2582,7 @@ fn vue3_tsconfig_global_type_package_files(
             {
                 return Vec::new();
             }
-            let Some(path) = vue3_tsconfig_target_path(
+            let Some(path) = vue3_materialized_tsconfig_target_path(
                 &type_roots.config_dir,
                 &type_roots.template_config_dir,
                 target,
@@ -2624,7 +2640,12 @@ pub(crate) fn vue3_tsconfig_default_type_roots(
         {
             return Vec::new();
         }
+        let path_bytes = vue3_ancestor_search_candidate_weight(&node_modules, "@types");
+        if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+            return Vec::new();
+        }
         let path = normalize_path_components(node_modules.join("@types"));
+        debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
         if path.is_dir() {
             type_roots.push(path);
         }
@@ -2663,13 +2684,22 @@ pub(crate) fn vue3_tsconfig_named_type_global_type_files(
         {
             return Vec::new();
         }
-        for package_dir in vue3_tsconfig_type_name_package_dirs(type_root, type_name) {
+        for candidate in vue3_tsconfig_type_name_package_dir_candidates(type_name)
+            .into_iter()
+            .flatten()
+        {
             if !type_resolver
                 .external_type_session
                 .claim_tsconfig_discovery_entry()
             {
                 return Vec::new();
             }
+            let path_bytes = candidate.path_bytes(type_root);
+            if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+                return Vec::new();
+            }
+            let package_dir = candidate.materialize(type_root);
+            debug_assert!(package_dir.as_os_str().as_encoded_bytes().len() <= path_bytes);
             if let Some(file) =
                 vue3_tsconfig_type_package_global_type_file(&package_dir, type_resolver)
             {
@@ -2693,23 +2723,83 @@ pub(crate) fn vue3_tsconfig_type_name_is_safe(type_name: &str) -> bool {
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
-pub(crate) fn vue3_tsconfig_type_name_package_dirs(
-    type_root: &Path,
+#[derive(Clone, Copy)]
+enum Vue3TsconfigTypeNamePackageDir<'a> {
+    Literal(&'a str),
+    Scoped {
+        scope: &'a str,
+        package: &'a str,
+    },
+    Mangled {
+        scope: &'a str,
+        package: &'a str,
+    },
+}
+
+impl Vue3TsconfigTypeNamePackageDir<'_> {
+    fn path_bytes(self, type_root: &Path) -> usize {
+        match self {
+            Self::Literal(type_name) => {
+                vue3_tsconfig_joined_path_bytes(type_root, &[type_name])
+            }
+            Self::Scoped { scope, package } => {
+                vue3_tsconfig_joined_path_bytes(type_root, &[scope, package])
+            }
+            Self::Mangled { scope, package } => type_root
+                .as_os_str()
+                .as_encoded_bytes()
+                .len()
+                .saturating_add(usize::from(!type_root.as_os_str().is_empty()))
+                .saturating_add(scope.len())
+                .saturating_add(2)
+                .saturating_add(package.len()),
+        }
+    }
+
+    fn materialize(self, type_root: &Path) -> PathBuf {
+        match self {
+            Self::Literal(type_name) => normalize_path_components(type_root.join(type_name)),
+            Self::Scoped { scope, package } => {
+                normalize_path_components(type_root.join(scope).join(package))
+            }
+            Self::Mangled { scope, package } => {
+                normalize_path_components(type_root.join(format!("{scope}__{package}")))
+            }
+        }
+    }
+}
+
+fn vue3_tsconfig_type_name_package_dir_candidates(
     type_name: &str,
-) -> Vec<PathBuf> {
+) -> [Option<Vue3TsconfigTypeNamePackageDir<'_>>; 3] {
     if let Some(scoped) = type_name.strip_prefix('@') {
         if let Some((scope, package)) = scoped
             .split_once('/')
             .filter(|(_, package)| !package.contains('/'))
         {
-            return vec![
-                normalize_path_components(type_root.join(format!("@{scope}")).join(package)),
-                normalize_path_components(type_root.join(scope).join(package)),
-                normalize_path_components(type_root.join(format!("{scope}__{package}"))),
+            return [
+                Some(Vue3TsconfigTypeNamePackageDir::Literal(type_name)),
+                Some(Vue3TsconfigTypeNamePackageDir::Scoped { scope, package }),
+                Some(Vue3TsconfigTypeNamePackageDir::Mangled { scope, package }),
             ];
         }
     }
-    vec![normalize_path_components(type_root.join(type_name))]
+    [
+        Some(Vue3TsconfigTypeNamePackageDir::Literal(type_name)),
+        None,
+        None,
+    ]
+}
+
+fn vue3_tsconfig_joined_path_bytes(type_root: &Path, components: &[&str]) -> usize {
+    components.iter().fold(
+        type_root.as_os_str().as_encoded_bytes().len(),
+        |bytes, component| {
+            bytes
+                .saturating_add(usize::from(bytes != 0))
+                .saturating_add(component.len())
+        },
+    )
 }
 
 fn vue3_tsconfig_type_name_package_dir_count(type_name: &str) -> usize {
@@ -3744,6 +3834,203 @@ mod vue3_type_reference_directive_tests {
                     "{module_resolution:?} {mode:?} type reference {type_name}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn reference_type_root_candidates_claim_resources_before_path_construction() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let type_root = dir.path().join("types");
+        std::fs::create_dir_all(&type_root).expect("create type root");
+        let type_name = "missing";
+        let path_bytes = vue3_ancestor_search_candidate_weight(&type_root, type_name);
+        let materialization_weight = std::mem::size_of::<PathBuf>() + path_bytes;
+        let type_roots = Vue3TsconfigTypeRoots {
+            paths: std::sync::Arc::from(vec![type_root]),
+            is_explicit: true,
+        };
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: path_bytes,
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: materialization_weight,
+            max_tsconfig_discovery_entries: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(resolve_vue3_tsconfig_named_type_global_type_file(
+            &type_roots,
+            type_name,
+            None,
+            &exact,
+        )
+        .is_none());
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.metadata_target_steps, path_bytes);
+        assert_eq!(exact_stats.tsconfig_discovery_entries, 1);
+        assert_eq!(exact_stats.tsconfig_materialization_entries, 1);
+        assert_eq!(
+            exact_stats.tsconfig_materialization_weight,
+            materialization_weight
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: path_bytes - 1,
+                max_tsconfig_materialization_entries: 1,
+                max_tsconfig_materialization_weight: materialization_weight,
+                max_tsconfig_discovery_entries: 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: path_bytes,
+                max_generated_path_bytes: path_bytes - 1,
+                max_tsconfig_materialization_entries: 1,
+                max_tsconfig_materialization_weight: materialization_weight,
+                max_tsconfig_discovery_entries: 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: path_bytes,
+                max_tsconfig_materialization_entries: 1,
+                max_tsconfig_materialization_weight: materialization_weight - 1,
+                max_tsconfig_discovery_entries: 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            assert!(resolve_vue3_tsconfig_named_type_global_type_file(
+                &type_roots,
+                type_name,
+                None,
+                &resolver,
+            )
+            .is_none());
+            let stats = resolver.external_type_session.stats();
+            assert_eq!(stats.metadata_resolution_path_probes, 0);
+            assert_eq!(stats.tsconfig_materialization_entries, 0);
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn reference_type_roots_are_materialization_bounded_and_resolution_cached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project directory");
+        std::fs::write(
+            project_dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"typeRoots":["./first","./second"]}}"#,
+        )
+        .expect("write project config");
+        let filename = project_dir.join("Comp.vue").to_string_lossy().to_string();
+        let measuring = Vue3TypeResolverContext::default();
+
+        assert!(resolve_vue3_type_reference_directive(
+            &filename,
+            &filename,
+            "missing",
+            &measuring,
+        )
+        .is_none());
+        let measured = measuring.external_type_session.stats();
+        assert!(measured.metadata_target_steps > 0);
+        assert!(measured.metadata_resolution_path_probes > 0);
+        assert!(measured.tsconfig_discovery_entries > 0);
+        assert!(measured.tsconfig_materialization_entries >= 4);
+        assert!(measured.tsconfig_materialization_weight > 0);
+        assert!(!measuring.external_type_session.metadata_is_blocked());
+
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: measured.metadata_target_steps,
+            max_metadata_resolution_path_probes: measured.metadata_resolution_path_probes,
+            max_tsconfig_materialization_entries: measured.tsconfig_materialization_entries,
+            max_tsconfig_materialization_weight: measured.tsconfig_materialization_weight,
+            max_tsconfig_discovery_entries: measured.tsconfig_discovery_entries,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_vue3_type_reference_directive(
+            &filename,
+            &filename,
+            "missing",
+            &exact,
+        )
+        .is_none());
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.metadata_target_steps, measured.metadata_target_steps);
+        assert_eq!(
+            exact_stats.metadata_resolution_path_probes,
+            measured.metadata_resolution_path_probes
+        );
+        assert_eq!(
+            exact_stats.tsconfig_discovery_entries,
+            measured.tsconfig_discovery_entries
+        );
+        assert_eq!(
+            exact_stats.tsconfig_materialization_entries,
+            measured.tsconfig_materialization_entries
+        );
+        assert_eq!(
+            exact_stats.tsconfig_materialization_weight,
+            measured.tsconfig_materialization_weight
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        assert!(resolve_vue3_type_reference_directive(
+            &filename,
+            &filename,
+            "missing",
+            &exact,
+        )
+        .is_none());
+        let cached_stats = exact.external_type_session.stats();
+        assert_eq!(cached_stats.resolution_cache_hits, 1);
+        assert_eq!(
+            cached_stats.metadata_target_steps,
+            exact_stats.metadata_target_steps
+        );
+        assert_eq!(
+            cached_stats.metadata_resolution_path_probes,
+            exact_stats.metadata_resolution_path_probes
+        );
+        assert_eq!(
+            cached_stats.tsconfig_discovery_entries,
+            exact_stats.tsconfig_discovery_entries
+        );
+        assert_eq!(
+            cached_stats.tsconfig_materialization_entries,
+            exact_stats.tsconfig_materialization_entries
+        );
+        assert_eq!(
+            cached_stats.tsconfig_materialization_weight,
+            exact_stats.tsconfig_materialization_weight
+        );
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: measured.metadata_target_steps,
+                max_tsconfig_materialization_entries:
+                    measured.tsconfig_materialization_entries - 1,
+                max_tsconfig_materialization_weight: measured.tsconfig_materialization_weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: measured.metadata_target_steps,
+                max_tsconfig_materialization_entries: measured.tsconfig_materialization_entries,
+                max_tsconfig_materialization_weight:
+                    measured.tsconfig_materialization_weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            assert!(resolve_vue3_type_reference_directive(
+                &filename,
+                &filename,
+                "missing",
+                &resolver,
+            )
+            .is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
         }
     }
 

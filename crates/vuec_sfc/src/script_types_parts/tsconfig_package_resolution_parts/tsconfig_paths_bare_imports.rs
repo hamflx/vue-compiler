@@ -254,6 +254,37 @@ pub(crate) fn vue3_tsconfig_target_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    vue3_tsconfig_target_path_with_materialization(
+        target_base_dir,
+        template_config_dir,
+        target,
+        false,
+        type_resolver,
+    )
+}
+
+pub(crate) fn vue3_materialized_tsconfig_target_path(
+    target_base_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    vue3_tsconfig_target_path_with_materialization(
+        target_base_dir,
+        template_config_dir,
+        target,
+        true,
+        type_resolver,
+    )
+}
+
+fn vue3_tsconfig_target_path_with_materialization(
+    target_base_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    claim_materialization: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     if !vue3_claim_tsconfig_target_steps(target, template_config_dir, "", type_resolver) {
         return None;
     }
@@ -265,6 +296,7 @@ pub(crate) fn vue3_tsconfig_target_path(
     vue3_tsconfig_path_from_expanded_target(
         target_base_dir,
         &target,
+        claim_materialization,
         type_resolver,
     )
 }
@@ -282,7 +314,7 @@ pub(crate) fn vue3_tsconfig_path_mapping_target_path(
     let target =
         vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
     let target = vue3_typescript_path_target_substitution(&target, capture, type_resolver)?;
-    vue3_tsconfig_path_from_expanded_target(target_base_dir, &target, type_resolver)
+    vue3_tsconfig_path_from_expanded_target(target_base_dir, &target, false, type_resolver)
 }
 
 fn vue3_claim_tsconfig_target_steps(
@@ -344,14 +376,64 @@ fn vue3_typescript_path_target_substitution(
 fn vue3_tsconfig_path_from_expanded_target(
     target_base_dir: &Path,
     target: &str,
+    claim_materialization: bool,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    let path_bytes = if claim_materialization {
+        Some(vue3_typescript_path_materialization_bytes(
+            target_base_dir,
+            &target,
+        )?)
+    } else {
+        None
+    };
+    if path_bytes.is_some_and(|path_bytes| {
+        !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver)
+    }) {
+        return None;
+    }
     let path = vue3_materialize_normalized_typescript_path(target_base_dir, &target)?;
+    debug_assert!(path_bytes.is_none_or(|path_bytes| {
+        path.as_os_str().as_encoded_bytes().len() <= path_bytes
+    }));
     type_resolver
         .external_type_session
         .metadata_path_is_within_limit(&normalize_path_string(&path))
         .then_some(path)
+}
+
+fn vue3_typescript_path_materialization_bytes(
+    base_dir: &Path,
+    target: &str,
+) -> Option<usize> {
+    match vue3_typescript_path_kind(target) {
+        Vue3TypeScriptPathKind::Relative => {
+            Some(vue3_ancestor_search_candidate_weight(base_dir, target))
+        }
+        Vue3TypeScriptPathKind::Rooted => {
+            #[cfg(windows)]
+            {
+                Some(vue3_ancestor_search_candidate_weight(base_dir, target))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(target.len())
+            }
+        }
+        Vue3TypeScriptPathKind::WindowsDriveAbsolute
+        | Vue3TypeScriptPathKind::WindowsUncAbsolute => {
+            #[cfg(windows)]
+            {
+                Some(target.len())
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        }
+        Vue3TypeScriptPathKind::Unsupported => None,
+    }
 }
 
 pub(crate) fn vue3_tsconfig_expand_config_dir_template(
@@ -558,6 +640,26 @@ pub(crate) fn vue3_ancestor_search_candidate_weight(dir: &Path, suffix: &str) ->
             !dir.as_os_str().is_empty() && !suffix.is_empty(),
         ))
         .saturating_add(suffix.len())
+}
+
+pub(crate) fn vue3_claim_tsconfig_path_materialization(
+    path_bytes: usize,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    if path_bytes
+        > type_resolver
+            .external_type_session
+            .limits()
+            .max_generated_path_bytes
+    {
+        type_resolver.external_type_session.block_metadata();
+        return false;
+    }
+    type_resolver
+        .external_type_session
+        .claim_tsconfig_materialization(
+            std::mem::size_of::<PathBuf>().saturating_add(path_bytes),
+        )
 }
 
 struct Vue3AncestorSearchPaths<'a> {
