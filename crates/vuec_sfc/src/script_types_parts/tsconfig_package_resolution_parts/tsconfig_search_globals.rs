@@ -2723,7 +2723,7 @@ fn vue3_materialize_tsconfig_global_specs(
     traversal
         .materialized_global_configs
         .insert(state_key.clone());
-    vue3_append_tsconfig_global_type_files(
+    if !vue3_append_tsconfig_global_type_files(
         vue3_tsconfig_file_spec_global_type_files(
             &global_specs.file_specs,
             &global_specs.output_directory_specs,
@@ -2732,11 +2732,12 @@ fn vue3_materialize_tsconfig_global_specs(
         ),
         seen_files,
         files,
-    );
-    if type_resolver.external_type_session.metadata_is_blocked() {
+        type_resolver,
+    ) || type_resolver.external_type_session.metadata_is_blocked()
+    {
         return false;
     }
-    vue3_append_tsconfig_global_type_files(
+    if !vue3_append_tsconfig_global_type_files(
         vue3_tsconfig_global_type_package_files(
             &global_specs.type_package_specs,
             config_dir,
@@ -2744,8 +2745,9 @@ fn vue3_materialize_tsconfig_global_specs(
         ),
         seen_files,
         files,
-    );
-    if type_resolver.external_type_session.metadata_is_blocked() {
+        type_resolver,
+    ) || type_resolver.external_type_session.metadata_is_blocked()
+    {
         return false;
     }
     for reference in vue3_tsconfig_reference_paths(value, config_dir, type_resolver) {
@@ -2767,17 +2769,72 @@ fn vue3_materialize_tsconfig_global_specs(
     true
 }
 
+fn vue3_normalized_path_string_materialization_bytes(path: &Path, suffix: &str) -> usize {
+    let path_bytes = path.to_str().map_or_else(
+        || {
+            path.as_os_str()
+                .as_encoded_bytes()
+                .len()
+                .saturating_mul(3)
+        },
+        str::len,
+    );
+    path_bytes.saturating_add(suffix.len())
+}
+
+fn vue3_materialized_normalized_path_string(
+    path: &Path,
+    suffix: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    let payload_bytes = vue3_normalized_path_string_materialization_bytes(path, suffix);
+    if payload_bytes
+        > type_resolver
+            .external_type_session
+            .limits()
+            .max_generated_path_bytes
+    {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    }
+    if !type_resolver
+        .external_type_session
+        .claim_tsconfig_materialization(
+            std::mem::size_of::<String>().saturating_add(payload_bytes),
+        )
+    {
+        return None;
+    }
+    let mut normalized = normalize_path_string(path);
+    if !suffix.is_empty() {
+        normalized.truncate(normalized.trim_end_matches('/').len());
+        normalized.push_str(suffix);
+    }
+    debug_assert!(normalized.len() <= payload_bytes);
+    Some(normalized)
+}
+
 fn vue3_append_tsconfig_global_type_files(
     candidates: Vec<PathBuf>,
     seen_files: &mut BTreeSet<String>,
     files: &mut Vec<PathBuf>,
-) {
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    let mut pending_keys = BTreeSet::new();
+    let mut pending_files = Vec::new();
     for file in candidates {
-        let normalized = normalize_path_string(&file);
-        if seen_files.insert(normalized) {
-            files.push(file);
+        let Some(normalized) =
+            vue3_materialized_normalized_path_string(&file, "", type_resolver)
+        else {
+            return false;
+        };
+        if !seen_files.contains(&normalized) && pending_keys.insert(normalized) {
+            pending_files.push(file);
         }
     }
+    seen_files.append(&mut pending_keys);
+    files.extend(pending_files);
+    true
 }
 
 fn vue3_tsconfig_file_spec_global_type_files(
@@ -3563,12 +3620,19 @@ fn vue3_tsconfig_filter_global_type_files(
     if include_matcher.is_none() && exclude_matchers.is_empty() {
         return files;
     }
+    let mut normalized_paths = Vec::new();
+    for file in &files {
+        let Some(path) = vue3_materialized_normalized_path_string(file, "", type_resolver)
+        else {
+            return Vec::new();
+        };
+        normalized_paths.push(path);
+    }
     let mut budget = type_resolver
         .external_type_session
         .tsconfig_glob_match_budget();
     let mut matched = Vec::new();
-    for file in files {
-        let path = normalize_path_string(&file);
+    for (file, path) in files.into_iter().zip(normalized_paths) {
         if let Some(matcher) = include_matcher {
             match matcher.matches(&path, &mut || budget.claim_step()) {
                 Some(true) => {}
@@ -3626,17 +3690,15 @@ fn vue3_tsconfig_exclude_patterns(
             || target.ends_with('/')
             || target.ends_with('\\')
             || !final_segment.contains('.');
-        let mut pattern = normalize_path_string(&path);
-        if is_directory_pattern {
-            if !target.contains(['*', '?']) {
-                excludes
-                    .directory_keys
-                    .push(vue3_external_type_path_key(path));
-            }
-            pattern = type_resolver.external_type_session.concat_metadata_path(
-                pattern.trim_end_matches('/'),
-                "/**",
-            )?;
+        let pattern = if is_directory_pattern {
+            vue3_materialized_normalized_path_string(&path, "/**", type_resolver)?
+        } else {
+            vue3_materialized_normalized_path_string(&path, "", type_resolver)?
+        };
+        if is_directory_pattern && !target.contains(['*', '?']) {
+            excludes
+                .directory_keys
+                .push(vue3_external_type_path_key(path));
         }
         excludes.patterns.push(pattern);
     }
@@ -3665,10 +3727,8 @@ fn vue3_tsconfig_output_directory_exclude_patterns(
                 target,
                 type_resolver,
             )?;
-            let pattern = type_resolver.external_type_session.concat_metadata_path(
-                normalize_path_string(&path).trim_end_matches('/'),
-                "/**",
-            )?;
+            let pattern =
+                vue3_materialized_normalized_path_string(&path, "/**", type_resolver)?;
             excludes
                 .directory_keys
                 .push(vue3_external_type_path_key(path));
@@ -3704,7 +3764,7 @@ pub(crate) fn vue3_tsconfig_include_pattern(
         target,
         type_resolver,
     )?;
-    Some(normalize_path_string(&path))
+    vue3_materialized_normalized_path_string(&path, "", type_resolver)
 }
 
 fn vue3_tsconfig_include_path(
@@ -3738,9 +3798,10 @@ fn vue3_tsconfig_include_glob(
         target,
         type_resolver,
     )?;
-    let root = vue3_tsconfig_include_root_from_pattern(&path)?;
+    let pattern = vue3_materialized_normalized_path_string(&path, "", type_resolver)?;
+    let root = vue3_tsconfig_include_root_from_pattern(path)?;
     Some(Vue3TsconfigIncludeGlob {
-        pattern: normalize_path_string(&path),
+        pattern,
         root,
     })
 }
@@ -3758,26 +3819,32 @@ pub(crate) fn vue3_tsconfig_include_root_path(
         target,
         type_resolver,
     )?;
-    vue3_tsconfig_include_root_from_pattern(&pattern)
+    vue3_tsconfig_include_root_from_pattern(pattern)
 }
 
-fn vue3_tsconfig_include_root_from_pattern(pattern: &Path) -> Option<PathBuf> {
-    let mut root = PathBuf::new();
+fn vue3_tsconfig_include_root_from_pattern(mut pattern: PathBuf) -> Option<PathBuf> {
+    let mut component_count = 0;
+    let mut root_component_count = None;
     for component in pattern.components() {
         let contains_wildcard = matches!(
             component,
             std::path::Component::Normal(segment)
-                if segment.to_string_lossy().contains(['*', '?'])
+                if segment.as_encoded_bytes().contains(&b'*')
+                    || segment.as_encoded_bytes().contains(&b'?')
         );
-        if contains_wildcard {
-            break;
+        if contains_wildcard && root_component_count.is_none() {
+            root_component_count = Some(component_count);
         }
-        root.push(component.as_os_str());
+        component_count += 1;
     }
-    if root.as_os_str().is_empty() {
-        root.push(".");
+    let root_component_count = root_component_count.unwrap_or(component_count);
+    for _ in root_component_count..component_count {
+        pattern.pop();
     }
-    root.is_dir().then_some(root)
+    if pattern.as_os_str().is_empty() {
+        pattern.push(".");
+    }
+    pattern.is_dir().then_some(pattern)
 }
 
 #[cfg(test)]
@@ -3795,6 +3862,11 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
         std::mem::size_of::<PathBuf>()
             + vue3_typescript_path_materialization_bytes(base_dir, target)
                 .expect("supported tsconfig target")
+    }
+
+    fn normalized_string_weight(path: &Path, suffix: &str) -> usize {
+        std::mem::size_of::<String>()
+            + vue3_normalized_path_string_materialization_bytes(path, suffix)
     }
 
     fn path_specs(
@@ -3865,6 +3937,85 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
     }
 
     #[test]
+    fn normalized_path_strings_honor_the_generated_path_boundary() {
+        let path = Path::new("config/types");
+        let suffix = "/**";
+        let payload_bytes = vue3_normalized_path_string_materialization_bytes(path, suffix);
+        let weight = normalized_string_weight(path, suffix);
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: payload_bytes,
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert_eq!(
+            vue3_materialized_normalized_path_string(path, suffix, &exact).as_deref(),
+            Some("config/types/**")
+        );
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.tsconfig_materialization_entries, 1);
+        assert_eq!(exact_stats.tsconfig_materialization_weight, weight);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: payload_bytes - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_materialized_normalized_path_string(path, suffix, &short).is_none());
+        let short_stats = short.external_type_session.stats();
+        assert_eq!(short_stats.tsconfig_materialization_entries, 0);
+        assert_eq!(short_stats.tsconfig_materialization_weight, 0);
+        assert!(short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn global_file_dedup_keys_publish_only_after_complete_materialization() {
+        let candidates = [PathBuf::from("types/first.d.ts"), PathBuf::from("types/second.d.ts")];
+        let weight = candidates
+            .iter()
+            .map(|path| normalized_string_weight(path, ""))
+            .sum();
+
+        assert_materialization_boundaries(candidates.len(), weight, 0, 0, |resolver| {
+            let mut seen_files = BTreeSet::new();
+            let mut files = Vec::new();
+            let complete = vue3_append_tsconfig_global_type_files(
+                candidates.to_vec(),
+                &mut seen_files,
+                &mut files,
+                resolver,
+            );
+            if !complete {
+                assert!(seen_files.is_empty());
+                assert!(files.is_empty());
+            }
+            complete
+                && seen_files.len() == candidates.len()
+                && files.as_slice() == candidates.as_slice()
+        });
+    }
+
+    #[test]
+    fn glob_filter_discards_matches_when_path_string_materialization_fails() {
+        let candidates = [PathBuf::from("types/first.d.ts"), PathBuf::from("types/second.d.ts")];
+        let weight = candidates
+            .iter()
+            .map(|path| normalized_string_weight(path, ""))
+            .sum();
+        let matcher = Vue3CompiledTsconfigGlob::new("**/*.d.ts");
+
+        assert_materialization_boundaries(candidates.len(), weight, 0, 0, |resolver| {
+            vue3_tsconfig_filter_global_type_files(
+                candidates.to_vec(),
+                Some(&matcher),
+                &[],
+                resolver,
+            ) == candidates
+        });
+    }
+
+    #[test]
     fn explicit_file_targets_are_materialized_transactionally() {
         let dir = tempfile::tempdir().expect("temp dir");
         let targets = ["first.d.ts", "second.d.ts"];
@@ -3909,9 +4060,15 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
     fn glob_include_claims_its_target_before_deriving_the_scan_root() {
         let dir = tempfile::tempdir().expect("temp dir");
         let target = format!("{}/**/*.d.ts", normalize_path_string(dir.path()));
-        let weight = target_weight(Path::new("ignored"), &target);
+        let target_path = vue3_materialize_normalized_typescript_path(
+            Path::new("ignored"),
+            &target,
+        )
+        .expect("materialize test target");
+        let weight = target_weight(Path::new("ignored"), &target)
+            + normalized_string_weight(&target_path, "");
 
-        assert_materialization_boundaries(1, weight, 0, 0, |resolver| {
+        assert_materialization_boundaries(2, weight, 0, 0, |resolver| {
             vue3_tsconfig_include_glob(
                 Path::new("ignored"),
                 Path::new("ignored"),
@@ -3929,11 +4086,15 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
         let targets = ["first", "second"];
         let exact_weight = targets
             .iter()
-            .map(|target| target_weight(config_dir, target))
+            .map(|target| {
+                let path = normalize_path_components(config_dir.join(target));
+                target_weight(config_dir, target) + normalized_string_weight(&path, "/**")
+            })
             .sum();
+        let exact_entries = targets.len() * 2;
 
         let exclude_targets = targets.map(str::to_string);
-        assert_materialization_boundaries(targets.len(), exact_weight, 0, 0, |resolver| {
+        assert_materialization_boundaries(exact_entries, exact_weight, 0, 0, |resolver| {
             vue3_tsconfig_exclude_patterns(
                 &exclude_targets,
                 config_dir,
@@ -3958,7 +4119,7 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
                 template_config_dir,
             )),
         };
-        assert_materialization_boundaries(targets.len(), exact_weight, 0, 0, |resolver| {
+        assert_materialization_boundaries(exact_entries, exact_weight, 0, 0, |resolver| {
             vue3_tsconfig_output_directory_exclude_patterns(&output_specs, resolver).is_some_and(
                 |excludes| {
                     excludes.patterns.len() == targets.len()
