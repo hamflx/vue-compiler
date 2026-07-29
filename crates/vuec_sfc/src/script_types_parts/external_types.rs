@@ -728,6 +728,7 @@ fn vue3_reachable_global_augmentation_files(
         resolve_package_json_imports: type_resolver.resolve_package_json_imports,
         active_package_json_features: type_resolver.active_package_json_features,
         module_suffixes: type_resolver.module_suffixes.clone(),
+        root_dirs: type_resolver.root_dirs.clone(),
         external_type_session: Vue3ExternalTypeLoadSession::with_limits(
             type_resolver.external_type_session.limits(),
         ),

@@ -1175,6 +1175,7 @@
             resolve_package_json_imports: None,
             active_package_json_features: None,
             module_suffixes: vue3_default_module_suffixes(),
+            root_dirs: std::sync::Arc::from(Vec::<PathBuf>::new()),
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(
                 Vue3ExternalTypeLoadLimits {
                     max_context_build_weight: version_budget,

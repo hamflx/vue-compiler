@@ -350,6 +350,7 @@ mod context_single_flight_tests {
                 type_reference_package_json_features:
                     Vue3PackageJsonResolutionFeatures::default(),
                 module_suffixes: vue3_default_module_suffixes(),
+                root_dirs: std::sync::Arc::from(Vec::<PathBuf>::new()),
             },
         }
     }
@@ -375,6 +376,22 @@ mod context_single_flight_tests {
         assert_eq!(
             configured.resolver.payload_weight() - default.resolver.payload_weight(),
             std::mem::size_of::<String>() * 2 + "browser".len() + "worker".len(),
+        );
+    }
+
+    #[test]
+    fn resolver_identity_charges_root_dir_payload() {
+        let default = key("entry");
+        let mut configured = default.clone();
+        configured.resolver.root_dirs = std::sync::Arc::from([
+            PathBuf::from("source"),
+            PathBuf::from("generated/types"),
+        ]);
+
+        assert_ne!(default, configured);
+        assert_eq!(
+            configured.resolver.payload_weight() - default.resolver.payload_weight(),
+            std::mem::size_of::<PathBuf>() * 2 + "source".len() + "generated/types".len(),
         );
     }
 

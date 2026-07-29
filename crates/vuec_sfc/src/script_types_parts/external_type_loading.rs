@@ -170,6 +170,7 @@ struct Vue3TypeResolverCacheIdentity {
     package_json_features: Vue3PackageJsonResolutionFeatures,
     type_reference_package_json_features: Vue3PackageJsonResolutionFeatures,
     module_suffixes: std::sync::Arc<[String]>,
+    root_dirs: std::sync::Arc<[PathBuf]>,
 }
 
 impl Vue3TypeResolverCacheIdentity {
@@ -184,6 +185,7 @@ impl Vue3TypeResolverCacheIdentity {
             type_reference_package_json_features: type_resolver
                 .package_json_features_for_type_reference(false),
             module_suffixes: type_resolver.module_suffixes.clone(),
+            root_dirs: type_resolver.root_dirs.clone(),
         }
     }
 
@@ -195,14 +197,20 @@ impl Vue3TypeResolverCacheIdentity {
             .saturating_add(std::mem::size_of::<Vue3TypeModuleKind>())
             .saturating_add(std::mem::size_of::<bool>())
             .saturating_add(std::mem::size_of::<Vue3PackageJsonResolutionFeatures>() * 2);
-        self.module_suffixes
+        let string_weight = self
+            .module_suffixes
             .iter()
             .chain(self.custom_conditions.iter())
             .fold(base_weight, |weight, value| {
                 weight
                     .saturating_add(std::mem::size_of::<String>())
                     .saturating_add(value.len())
-            })
+            });
+        self.root_dirs.iter().fold(string_weight, |weight, path| {
+            weight
+                .saturating_add(std::mem::size_of::<PathBuf>())
+                .saturating_add(path.as_os_str().as_encoded_bytes().len())
+        })
     }
 }
 

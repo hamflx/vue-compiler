@@ -86,6 +86,7 @@ struct Vue3TsconfigInheritedResolverOptions {
     module: Vue3TsconfigInheritedOption<Vue3TypeModuleKind>,
     module_resolution: Vue3TsconfigInheritedOption<Vue3TypeModuleResolutionKind>,
     module_suffixes: Vue3TsconfigInheritedOption<std::sync::Arc<[String]>>,
+    root_dirs: Vue3TsconfigInheritedOption<std::sync::Arc<[PathBuf]>>,
     allow_js: Vue3TsconfigInheritedOption<bool>,
     check_js: Vue3TsconfigInheritedOption<bool>,
     custom_conditions: Vue3TsconfigInheritedOption<Vue3CustomConditionSet>,
@@ -99,6 +100,7 @@ impl Vue3TsconfigInheritedResolverOptions {
         self.module.inherit(inherited.module);
         self.module_resolution.inherit(inherited.module_resolution);
         self.module_suffixes.inherit(inherited.module_suffixes);
+        self.root_dirs.inherit(inherited.root_dirs);
         self.allow_js.inherit(inherited.allow_js);
         self.check_js.inherit(inherited.check_js);
         self.custom_conditions.inherit(inherited.custom_conditions);
@@ -158,6 +160,7 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
     pub(crate) module_resolution: Vue3TypeModuleResolutionKind,
     pub(crate) module: Vue3TypeModuleKind,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
+    pub(crate) root_dirs: std::sync::Arc<[PathBuf]>,
     pub(crate) allow_js: bool,
     pub(crate) custom_conditions: Vue3CustomConditionSet,
     pub(crate) resolve_package_json_exports: Option<bool>,
@@ -1167,10 +1170,15 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
         Some(suffixes) if !suffixes.is_empty() => suffixes,
         Some(_) | None => vue3_default_module_suffixes(),
     };
+    let root_dirs = configured
+        .root_dirs
+        .value
+        .unwrap_or_else(|| std::sync::Arc::from(Vec::<PathBuf>::new()));
     Some(Vue3TsconfigTypeResolverOptions {
         module_resolution,
         module,
         module_suffixes,
+        root_dirs,
         allow_js,
         custom_conditions,
         resolve_package_json_exports,
@@ -1265,6 +1273,18 @@ fn vue3_tsconfig_type_resolver_options_from_config(
                         vue3_tsconfig_direct_module_suffixes(value, type_resolver)
                     })?);
             }
+        }
+        if let Some(root_dirs) = compiler_options.and_then(|options| options.get("rootDirs")) {
+            configured
+                .root_dirs
+                .set(vue3_tsconfig_nullable_option(root_dirs, |value| {
+                    vue3_tsconfig_direct_root_dirs(
+                        value,
+                        config_dir,
+                        template_config_dir,
+                        type_resolver,
+                    )
+                })?);
         }
         if let Some(value) = compiler_options.and_then(|options| options.get("allowJs")) {
             configured
@@ -1375,6 +1395,38 @@ fn vue3_tsconfig_direct_module_suffixes(
         suffixes.push(suffix.to_string());
     }
     Some(std::sync::Arc::from(suffixes))
+}
+
+fn vue3_tsconfig_direct_root_dirs(
+    value: &serde_json::Value,
+    config_dir: &Path,
+    template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<[PathBuf]>> {
+    let Some(values) = value.as_array() else {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    };
+    let mut root_dirs = Vec::new();
+    for value in values {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        let Some(root_dir) = value.as_str() else {
+            type_resolver.external_type_session.block_metadata();
+            return None;
+        };
+        root_dirs.push(vue3_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            root_dir,
+            type_resolver,
+        )?);
+    }
+    Some(std::sync::Arc::from(root_dirs))
 }
 
 fn vue3_tsconfig_direct_custom_conditions(

@@ -360,6 +360,7 @@ pub(crate) struct Vue3TypeResolverContext {
     pub(crate) resolve_package_json_imports: Option<bool>,
     pub(crate) active_package_json_features: Option<Vue3PackageJsonResolutionFeatures>,
     pub(crate) module_suffixes: std::sync::Arc<[String]>,
+    pub(crate) root_dirs: std::sync::Arc<[PathBuf]>,
     pub(crate) external_type_session: Vue3ExternalTypeLoadSession,
 }
 
@@ -454,6 +455,7 @@ impl PartialEq for Vue3TypeResolverContext {
             && self.package_json_features_for_type_reference(false)
                 == other.package_json_features_for_type_reference(false)
             && self.module_suffixes == other.module_suffixes
+            && self.root_dirs == other.root_dirs
             && self.external_type_session.limits() == other.external_type_session.limits()
     }
 }
@@ -503,6 +505,7 @@ impl Default for Vue3TypeResolverContext {
             resolve_package_json_imports: None,
             active_package_json_features: None,
             module_suffixes: vue3_default_module_suffixes(),
+            root_dirs: std::sync::Arc::from(Vec::<PathBuf>::new()),
             external_type_session: Vue3ExternalTypeLoadSession::default(),
         }
     }

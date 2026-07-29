@@ -441,5 +441,55 @@ fn resolve_vue3_relative_type_import_with_mode(
         .parent()
         .unwrap_or_else(|| Path::new(""));
     let candidate = normalize_path_components(base.join(source.replace('\\', "/")));
-    resolve_vue3_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
+    let Some((matched_root, suffix)) = type_resolver
+        .root_dirs
+        .iter()
+        .filter_map(|root_dir| {
+            candidate.strip_prefix(root_dir).ok().and_then(|suffix| {
+                (!suffix.as_os_str().is_empty()).then_some((root_dir, suffix))
+            })
+        })
+        .max_by_key(|(root_dir, _)| root_dir.as_os_str().as_encoded_bytes().len())
+    else {
+        return resolve_vue3_type_import_path_with_mode(
+            &candidate,
+            resolution_mode,
+            type_resolver,
+        );
+    };
+    let failure_epoch = type_resolver.external_type_session.failure_epoch();
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_fanout_entry()
+    {
+        return None;
+    }
+    let resolved =
+        resolve_vue3_type_import_path_with_mode(&candidate, resolution_mode, type_resolver);
+    if resolved.is_some()
+        || type_resolver.external_type_session.failure_epoch() != failure_epoch
+    {
+        return resolved;
+    }
+    for root_dir in type_resolver.root_dirs.iter() {
+        if root_dir == matched_root {
+            continue;
+        }
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        let candidate = normalize_path_components(root_dir.join(suffix));
+        let failure_epoch = type_resolver.external_type_session.failure_epoch();
+        let resolved =
+            resolve_vue3_type_import_path_with_mode(&candidate, resolution_mode, type_resolver);
+        if resolved.is_some()
+            || type_resolver.external_type_session.failure_epoch() != failure_epoch
+        {
+            return resolved;
+        }
+    }
+    None
 }
