@@ -224,7 +224,74 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
     pub(crate) resolve_package_json_imports: Option<bool>,
 }
 
-type Vue3TsconfigGraphStateKey = (PathBuf, PathBuf, PathBuf);
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigGraphState {
+    identity: PathBuf,
+    config_dir: PathBuf,
+    template_config_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigGraphStateKey(std::sync::Arc<Vue3TsconfigGraphState>);
+
+impl Vue3TsconfigGraphStateKey {
+    fn from_paths(
+        identity: PathBuf,
+        config_dir: PathBuf,
+        template_config_dir: PathBuf,
+    ) -> Self {
+        Self(std::sync::Arc::new(Vue3TsconfigGraphState {
+            identity,
+            config_dir,
+            template_config_dir,
+        }))
+    }
+
+    fn identity(&self) -> &Path {
+        &self.0.identity
+    }
+
+    fn payload_weight(&self) -> usize {
+        [
+            &self.0.identity,
+            &self.0.config_dir,
+            &self.0.template_config_dir,
+        ]
+        .into_iter()
+        .fold(
+            std::mem::size_of::<Vue3TsconfigGraphState>()
+                .saturating_add(std::mem::size_of::<Vue3TsconfigGraphStateKey>())
+                .saturating_add(2usize.saturating_mul(std::mem::size_of::<usize>())),
+            |weight, path| {
+                weight.saturating_add(path.as_os_str().as_encoded_bytes().len())
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Vue3TsconfigGraphIdentity(Vue3TsconfigGraphStateKey);
+
+impl PartialEq for Vue3TsconfigGraphIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity() == other.0.identity()
+    }
+}
+
+impl Eq for Vue3TsconfigGraphIdentity {}
+
+impl PartialOrd for Vue3TsconfigGraphIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Vue3TsconfigGraphIdentity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.identity().cmp(other.0.identity())
+    }
+}
+
 type Vue3TsconfigTypeRootsOverride = Option<std::sync::Arc<[PathBuf]>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -238,22 +305,25 @@ impl Vue3TsconfigModuleResolutionCacheKey {
         config_path: &Path,
         template_config_dir: &Path,
         type_resolver: &Vue3TypeResolverContext,
-    ) -> Self {
-        Self {
-            state: vue3_tsconfig_graph_state_key(config_path, template_config_dir),
-            typescript_version: type_resolver.typescript_version.to_string(),
+    ) -> Option<Self> {
+        if type_resolver.external_type_session.max_tsconfig_depth() == 0 {
+            type_resolver.external_type_session.block_metadata();
+            return None;
         }
+        let state = type_resolver
+            .external_type_session
+            .claim_tsconfig_node(vue3_tsconfig_graph_state_key(
+                config_path,
+                template_config_dir,
+            ))?;
+        Some(Self {
+            state,
+            typescript_version: type_resolver.typescript_version.to_string(),
+        })
     }
 
     fn payload_weight(&self) -> usize {
-        [&self.state.0, &self.state.1, &self.state.2]
-            .into_iter()
-            .fold(
-            std::mem::size_of::<Self>().saturating_add(self.typescript_version.len()),
-            |weight, path| {
-                weight.saturating_add(path.as_os_str().as_encoded_bytes().len())
-            },
-        )
+        std::mem::size_of::<Self>().saturating_add(self.typescript_version.len())
     }
 }
 
@@ -477,13 +547,19 @@ mod vue3_tsconfig_module_resolution_single_flight_tests {
     use super::*;
     use std::time::Duration;
 
-    fn cache_key(name: &str) -> Vue3TsconfigModuleResolutionCacheKey {
-        Vue3TsconfigModuleResolutionCacheKey {
-            state: (
+    fn cache_key(
+        session: &Vue3ExternalTypeLoadSession,
+        name: &str,
+    ) -> Vue3TsconfigModuleResolutionCacheKey {
+        let state = session
+            .claim_tsconfig_node(Vue3TsconfigGraphStateKey::from_paths(
                 PathBuf::from(format!("/{name}/tsconfig.json")),
                 PathBuf::from(format!("/{name}")),
                 PathBuf::from(format!("/{name}")),
-            ),
+            ))
+            .expect("intern settings cache state");
+        Vue3TsconfigModuleResolutionCacheKey {
+            state,
             typescript_version: "5.0.0".to_string(),
         }
     }
@@ -509,7 +585,7 @@ mod vue3_tsconfig_module_resolution_single_flight_tests {
     #[test]
     fn shares_owner_result_with_waiters_and_ready_cache_hits() {
         let session = Vue3ExternalTypeLoadSession::default();
-        let key = cache_key("shared");
+        let key = cache_key(&session, "shared");
         let owner = start(&session, key.clone());
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
         let worker_session = session.clone();
@@ -544,7 +620,7 @@ mod vue3_tsconfig_module_resolution_single_flight_tests {
             max_tsconfig_settings_cache_entries: 0,
             ..Vue3ExternalTypeLoadLimits::default()
         });
-        let key = cache_key("unretained");
+        let key = cache_key(&session, "unretained");
         let owner = start(&session, key.clone());
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
         let worker_session = session.clone();
@@ -579,7 +655,7 @@ mod vue3_tsconfig_module_resolution_single_flight_tests {
     #[test]
     fn same_thread_reentry_fails_closed_without_deadlocking() {
         let session = Vue3ExternalTypeLoadSession::default();
-        let key = cache_key("reentrant");
+        let key = cache_key(&session, "reentrant");
         let owner = start(&session, key.clone());
 
         assert!(matches!(
@@ -593,7 +669,7 @@ mod vue3_tsconfig_module_resolution_single_flight_tests {
     #[test]
     fn owner_drop_aborts_waiters_and_blocks_partial_metadata_state() {
         let session = Vue3ExternalTypeLoadSession::default();
-        let key = cache_key("aborted");
+        let key = cache_key(&session, "aborted");
         let owner = start(&session, key.clone());
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
         let worker_session = session.clone();
@@ -928,7 +1004,7 @@ struct Vue3TsconfigTypeRoots {
 #[derive(Debug, Default)]
 struct Vue3TsconfigGraphTraversal {
     seen_states: BTreeSet<Vue3TsconfigGraphStateKey>,
-    active_identities: BTreeSet<PathBuf>,
+    active_identities: BTreeSet<Vue3TsconfigGraphIdentity>,
     global_specs: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigGlobalSpecs>,
     materialized_global_configs: BTreeSet<Vue3TsconfigGraphStateKey>,
     resolver_options:
@@ -939,7 +1015,7 @@ fn vue3_tsconfig_graph_state_key(
     config_path: &Path,
     template_config_dir: &Path,
 ) -> Vue3TsconfigGraphStateKey {
-    (
+    Vue3TsconfigGraphStateKey::from_paths(
         vue3_external_type_path_identity(config_path),
         vue3_external_type_lexical_path(config_path.parent().unwrap_or_else(|| Path::new(""))),
         vue3_external_type_lexical_path(template_config_dir),
@@ -952,12 +1028,12 @@ fn vue3_tsconfig_graph_enter(
     depth: usize,
     traversal: &mut Vue3TsconfigGraphTraversal,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<PathBuf> {
+) -> Option<(Vue3TsconfigGraphStateKey, Vue3TsconfigGraphIdentity)> {
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
     let state_key = vue3_tsconfig_graph_state_key(config_path, template_config_dir);
-    let identity = state_key.0.clone();
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
     if traversal.active_identities.contains(&identity) {
         return None;
     }
@@ -968,15 +1044,297 @@ fn vue3_tsconfig_graph_enter(
         type_resolver.external_type_session.block_metadata();
         return None;
     }
-    traversal.seen_states.insert(state_key.clone());
-    if !type_resolver
+    let state_key = type_resolver
         .external_type_session
-        .claim_tsconfig_node(&state_key)
-    {
-        return None;
-    }
+        .claim_tsconfig_node(state_key)?;
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
+    traversal.seen_states.insert(state_key.clone());
     traversal.active_identities.insert(identity.clone());
-    Some(identity)
+    Some((state_key, identity))
+}
+
+#[cfg(test)]
+mod vue3_tsconfig_graph_state_tests {
+    use super::*;
+
+    fn key(name: &str) -> Vue3TsconfigGraphStateKey {
+        Vue3TsconfigGraphStateKey::from_paths(
+            PathBuf::from(format!("/{name}/tsconfig.json")),
+            PathBuf::from(format!("/{name}")),
+            PathBuf::from(format!("/{name}/template")),
+        )
+    }
+
+    #[test]
+    fn node_claims_intern_duplicate_graph_states() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let first_candidate = key("shared");
+        let first = session
+            .claim_tsconfig_node(first_candidate.clone())
+            .expect("claim first graph state");
+        assert!(std::sync::Arc::ptr_eq(&first.0, &first_candidate.0));
+
+        let duplicate_candidate = key("shared");
+        let duplicate = session
+            .claim_tsconfig_node(duplicate_candidate.clone())
+            .expect("reuse graph state");
+        assert!(std::sync::Arc::ptr_eq(&first.0, &duplicate.0));
+        assert!(!std::sync::Arc::ptr_eq(
+            &first.0,
+            &duplicate_candidate.0
+        ));
+        let stats = session.stats();
+        assert_eq!(stats.tsconfig_nodes, 1);
+        assert_eq!(stats.tsconfig_node_weight, first.payload_weight());
+        assert!(!session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn concurrent_node_claims_publish_one_canonical_state() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers = (0..2)
+            .map(|_| {
+                let session = session.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    session
+                        .claim_tsconfig_node(key("concurrent"))
+                        .expect("claim concurrent graph state")
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut claimed = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join graph state worker"));
+        let first = claimed.next().expect("first graph state");
+        let second = claimed.next().expect("second graph state");
+
+        assert!(std::sync::Arc::ptr_eq(&first.0, &second.0));
+        let stats = session.stats();
+        assert_eq!(stats.tsconfig_nodes, 1);
+        assert_eq!(stats.tsconfig_node_weight, first.payload_weight());
+        assert!(!session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn node_claims_honor_exact_count_and_weight_boundaries() {
+        let first = key("first");
+        let second = key("second");
+        let first_weight = first.payload_weight();
+        let exact_weight = first_weight.saturating_add(second.payload_weight());
+        let exact = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_nodes: 2,
+            max_tsconfig_node_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(exact.claim_tsconfig_node(first.clone()).is_some());
+        assert!(exact.claim_tsconfig_node(second.clone()).is_some());
+        assert!(exact.claim_tsconfig_node(key("second")).is_some());
+        let stats = exact.stats();
+        assert_eq!(stats.tsconfig_nodes, 2);
+        assert_eq!(stats.tsconfig_node_weight, exact_weight);
+        assert_eq!(stats.tsconfig_materialization_entries, 0);
+        assert_eq!(stats.tsconfig_materialization_weight, 0);
+        assert!(!exact.metadata_is_blocked());
+
+        let short_count = Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_nodes: 1,
+                max_tsconfig_node_weight: exact_weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        );
+        assert!(short_count.claim_tsconfig_node(first.clone()).is_some());
+        assert!(short_count.claim_tsconfig_node(second.clone()).is_none());
+        let stats = short_count.stats();
+        assert_eq!(stats.tsconfig_nodes, 1);
+        assert_eq!(stats.tsconfig_node_weight, first_weight);
+        assert_eq!(short_count.lock().tsconfig_node_states.len(), 1);
+        assert!(short_count.metadata_is_blocked());
+
+        let short_weight = Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_nodes: 2,
+                max_tsconfig_node_weight: exact_weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        );
+        assert!(short_weight.claim_tsconfig_node(first).is_some());
+        assert!(short_weight.claim_tsconfig_node(second).is_none());
+        let stats = short_weight.stats();
+        assert_eq!(stats.tsconfig_nodes, 1);
+        assert_eq!(stats.tsconfig_node_weight, first_weight);
+        assert_eq!(short_weight.lock().tsconfig_node_states.len(), 1);
+        assert!(short_weight.metadata_is_blocked());
+
+        let zero = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_nodes: 2,
+            max_tsconfig_node_weight: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(zero.claim_tsconfig_node(key("first")).is_none());
+        assert_eq!(zero.stats().tsconfig_nodes, 0);
+        assert_eq!(zero.stats().tsconfig_node_weight, 0);
+        assert!(zero.lock().tsconfig_node_states.is_empty());
+        assert!(zero.metadata_is_blocked());
+    }
+
+    #[test]
+    fn module_resolution_cache_keys_use_the_session_canonical_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("tsconfig.json");
+        let resolver = Vue3TypeResolverContext::default();
+        let cache_key = Vue3TsconfigModuleResolutionCacheKey::new(
+            &config_path,
+            dir.path(),
+            &resolver,
+        )
+        .expect("build settings cache key");
+        let interned = resolver
+            .external_type_session
+            .lock()
+            .tsconfig_node_states
+            .get(&cache_key.state)
+            .expect("interned settings state")
+            .clone();
+        assert!(std::sync::Arc::ptr_eq(&cache_key.state.0, &interned.0));
+        assert_eq!(
+            cache_key.payload_weight(),
+            std::mem::size_of::<Vue3TsconfigModuleResolutionCacheKey>()
+                + cache_key.typescript_version.len()
+        );
+
+        let candidate = vue3_tsconfig_graph_state_key(&config_path, dir.path());
+        let blocked = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_tsconfig_node_weight: candidate.payload_weight() - 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert!(Vue3TsconfigModuleResolutionCacheKey::new(
+            &config_path,
+            dir.path(),
+            &blocked,
+        )
+        .is_none());
+        let state = blocked.external_type_session.lock();
+        assert!(state.tsconfig_node_states.is_empty());
+        assert!(state.tsconfig_module_resolution_cache.is_empty());
+        drop(state);
+        assert!(blocked.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn traversals_reuse_the_session_canonical_graph_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("tsconfig.json");
+        let resolver = Vue3TypeResolverContext::default();
+        let mut first_traversal = Vue3TsconfigGraphTraversal::default();
+        let (first, first_identity) = vue3_tsconfig_graph_enter(
+            &config_path,
+            dir.path(),
+            0,
+            &mut first_traversal,
+            &resolver,
+        )
+        .expect("enter first traversal");
+        first_traversal.active_identities.remove(&first_identity);
+
+        let mut second_traversal = Vue3TsconfigGraphTraversal::default();
+        let (second, second_identity) = vue3_tsconfig_graph_enter(
+            &config_path,
+            dir.path(),
+            0,
+            &mut second_traversal,
+            &resolver,
+        )
+        .expect("enter second traversal");
+        second_traversal.active_identities.remove(&second_identity);
+
+        assert!(std::sync::Arc::ptr_eq(&first.0, &second.0));
+        let first_seen = first_traversal
+            .seen_states
+            .get(&first)
+            .expect("first traversal state");
+        let second_seen = second_traversal
+            .seen_states
+            .get(&second)
+            .expect("second traversal state");
+        assert!(std::sync::Arc::ptr_eq(&first.0, &first_seen.0));
+        assert!(std::sync::Arc::ptr_eq(&first.0, &second_seen.0));
+        assert_eq!(resolver.external_type_session.stats().tsconfig_nodes, 1);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+
+        let blocked = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_tsconfig_node_weight: 0,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        let mut blocked_traversal = Vue3TsconfigGraphTraversal::default();
+        assert!(vue3_tsconfig_graph_enter(
+            &config_path,
+            dir.path(),
+            0,
+            &mut blocked_traversal,
+            &blocked,
+        )
+        .is_none());
+        assert!(blocked_traversal.seen_states.is_empty());
+        assert!(blocked_traversal.active_identities.is_empty());
+        assert!(blocked.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn active_identity_cycles_do_not_hide_distinct_inactive_states() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("tsconfig.json");
+        let first_template = dir.path().join("first-template");
+        let second_template = dir.path().join("second-template");
+        let resolver = Vue3TypeResolverContext::default();
+        let mut traversal = Vue3TsconfigGraphTraversal::default();
+        let (first, first_identity) = vue3_tsconfig_graph_enter(
+            &config_path,
+            &first_template,
+            0,
+            &mut traversal,
+            &resolver,
+        )
+        .expect("enter first template state");
+
+        assert!(vue3_tsconfig_graph_enter(
+            &config_path,
+            &second_template,
+            1,
+            &mut traversal,
+            &resolver,
+        )
+        .is_none());
+        assert_eq!(resolver.external_type_session.stats().tsconfig_nodes, 1);
+        traversal.active_identities.remove(&first_identity);
+
+        let (second, second_identity) = vue3_tsconfig_graph_enter(
+            &config_path,
+            &second_template,
+            0,
+            &mut traversal,
+            &resolver,
+        )
+        .expect("enter inactive second template state");
+        traversal.active_identities.remove(&second_identity);
+        assert_ne!(first, second);
+        assert_eq!(first.identity(), second.identity());
+        assert_eq!(resolver.external_type_session.stats().tsconfig_nodes, 2);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
 }
 
 #[cfg(test)]
@@ -1011,7 +1369,7 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         &config_path,
         &config_dir,
         type_resolver,
-    );
+    )?;
     let settings = match type_resolver
         .external_type_session
         .begin_tsconfig_module_resolution_load(cache_key)
@@ -1085,7 +1443,7 @@ pub(crate) fn vue3_tsconfig_search_paths<'a>(
 
 #[derive(Debug, Default)]
 struct Vue3TsconfigTypeRootsTraversal {
-    active_identities: BTreeSet<PathBuf>,
+    active_identities: BTreeSet<Vue3TsconfigGraphIdentity>,
     cached_overrides: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigTypeRootsOverride>,
 }
 
@@ -1274,7 +1632,7 @@ fn vue3_tsconfig_type_roots_override_from_config(
         return None;
     }
     let state_key = vue3_tsconfig_graph_state_key(config_path, template_config_dir);
-    let identity = state_key.0.clone();
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
     if traversal.active_identities.contains(&identity) {
         return Some(None);
     }
@@ -1285,12 +1643,10 @@ fn vue3_tsconfig_type_roots_override_from_config(
         type_resolver.external_type_session.block_metadata();
         return None;
     }
-    if !type_resolver
+    let state_key = type_resolver
         .external_type_session
-        .claim_tsconfig_node(&state_key)
-    {
-        return None;
-    }
+        .claim_tsconfig_node(state_key)?;
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
     traversal.active_identities.insert(identity.clone());
     let resolved = (|| {
         let value = type_resolver
@@ -1622,7 +1978,7 @@ fn vue3_tsconfig_module_resolution_from_config(
     depth: usize,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3TsconfigModuleResolutionSettings {
-    let Some(identity) = vue3_tsconfig_graph_enter(
+    let Some((_state_key, identity)) = vue3_tsconfig_graph_enter(
         config_path,
         template_config_dir,
         depth,
@@ -1779,7 +2135,7 @@ fn vue3_tsconfig_type_resolver_options_from_config(
     if let Some(options) = traversal.resolver_options.get(&state_key) {
         return Some(options.clone());
     }
-    let Some(identity) = vue3_tsconfig_graph_enter(
+    let Some((state_key, identity)) = vue3_tsconfig_graph_enter(
         config_path,
         template_config_dir,
         depth,
@@ -2280,7 +2636,7 @@ fn vue3_tsconfig_global_type_files_from_config(
         }
         return Some(global_specs);
     }
-    let identity = vue3_tsconfig_graph_enter(
+    let (state_key, identity) = vue3_tsconfig_graph_enter(
         config_path,
         template_config_dir,
         depth,

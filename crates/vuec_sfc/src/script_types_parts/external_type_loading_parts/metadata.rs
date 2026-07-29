@@ -183,23 +183,34 @@ impl Vue3ExternalTypeLoadSession {
         self.parsed_metadata_from_path::<Vue3PackageJsonMetadataKind>(path)
     }
 
-    fn claim_tsconfig_node(&self, state_key: &(PathBuf, PathBuf, PathBuf)) -> bool {
+    fn claim_tsconfig_node(
+        &self,
+        state_key: Vue3TsconfigGraphStateKey,
+    ) -> Option<Vue3TsconfigGraphStateKey> {
         let mut state = self.lock();
         if state.metadata_blocked {
-            return false;
+            return None;
         }
-        if state.tsconfig_node_states.contains(state_key) {
-            return true;
+        if let Some(cached) = state.tsconfig_node_states.get(&state_key) {
+            return Some(cached.clone());
         }
-        if state.tsconfig_node_states.len() >= state.limits.max_tsconfig_nodes {
+        let node_weight = state_key.payload_weight();
+        let remaining_weight = state
+            .limits
+            .max_tsconfig_node_weight
+            .saturating_sub(state.stats.tsconfig_node_weight);
+        if state.tsconfig_node_states.len() >= state.limits.max_tsconfig_nodes
+            || node_weight > remaining_weight
+        {
             let flights = vue3_block_metadata_state(&mut state);
             drop(state);
             vue3_abort_metadata_flights(flights);
-            return false;
+            return None;
         }
         state.tsconfig_node_states.insert(state_key.clone());
         state.stats.tsconfig_nodes = state.tsconfig_node_states.len();
-        true
+        state.stats.tsconfig_node_weight += node_weight;
+        Some(state_key)
     }
 
     pub(crate) fn claim_tsconfig_materialization(&self, weight: usize) -> bool {

@@ -25,7 +25,7 @@ impl Vue3TsconfigEmitPathOptions {
 
 #[derive(Debug, Default)]
 struct Vue3TsconfigEmitPathTraversal {
-    active_identities: BTreeSet<PathBuf>,
+    active_identities: BTreeSet<Vue3TsconfigGraphIdentity>,
     cached_options: BTreeMap<Vue3TsconfigGraphStateKey, Vue3TsconfigEmitPathOptions>,
 }
 
@@ -69,7 +69,7 @@ fn vue3_tsconfig_emit_path_options_from_config(
     if let Some(cached) = traversal.cached_options.get(&state_key) {
         return Some(cached.clone());
     }
-    let identity = state_key.0.clone();
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
     if traversal.active_identities.contains(&identity) {
         return Some(Vue3TsconfigEmitPathOptions::default());
     }
@@ -77,12 +77,10 @@ fn vue3_tsconfig_emit_path_options_from_config(
         type_resolver.external_type_session.block_metadata();
         return None;
     }
-    if !type_resolver
+    let state_key = type_resolver
         .external_type_session
-        .claim_tsconfig_node(&state_key)
-    {
-        return None;
-    }
+        .claim_tsconfig_node(state_key)?;
+    let identity = Vue3TsconfigGraphIdentity(state_key.clone());
     traversal.active_identities.insert(identity.clone());
     let resolved = (|| {
         let value = type_resolver
