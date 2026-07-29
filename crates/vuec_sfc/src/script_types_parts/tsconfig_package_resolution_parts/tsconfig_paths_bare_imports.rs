@@ -396,6 +396,7 @@ fn vue3_typescript_best_path_pattern_match<'a>(
     best.map(|(_, index, capture)| (index, capture))
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_target_path(
     target_base_dir: &Path,
     template_config_dir: &Path,

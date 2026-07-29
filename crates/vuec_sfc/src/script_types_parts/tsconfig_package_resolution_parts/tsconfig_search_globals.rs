@@ -2795,7 +2795,7 @@ fn vue3_tsconfig_file_spec_global_type_files(
             {
                 return Vec::new();
             }
-            let Some(path) = vue3_tsconfig_target_path(
+            let Some(path) = vue3_materialized_tsconfig_target_path(
                 &specs.config_dir,
                 &specs.template_config_dir,
                 target,
@@ -3490,8 +3490,12 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
         return Vec::new();
     }
     if !target.contains('*') && !target.contains('?') {
-        let Some(path) =
-            vue3_tsconfig_target_path(config_dir, template_config_dir, target, type_resolver)
+        let Some(path) = vue3_materialized_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            target,
+            type_resolver,
+        )
         else {
             return Vec::new();
         };
@@ -3655,7 +3659,7 @@ fn vue3_tsconfig_output_directory_exclude_patterns(
             {
                 return None;
             }
-            let path = vue3_tsconfig_target_path(
+            let path = vue3_materialized_tsconfig_target_path(
                 &specs.config_dir,
                 &specs.template_config_dir,
                 target,
@@ -3709,7 +3713,12 @@ fn vue3_tsconfig_include_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    vue3_tsconfig_target_path(config_dir, template_config_dir, target, type_resolver)
+    vue3_materialized_tsconfig_target_path(
+        config_dir,
+        template_config_dir,
+        target,
+        type_resolver,
+    )
 }
 
 struct Vue3TsconfigIncludeGlob {
@@ -3769,6 +3778,195 @@ fn vue3_tsconfig_include_root_from_pattern(pattern: &Path) -> Option<PathBuf> {
         root.push(".");
     }
     root.is_dir().then_some(root)
+}
+
+#[cfg(test)]
+mod vue3_tsconfig_discovery_target_materialization_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn target_weight(base_dir: &Path, target: &str) -> usize {
+        std::mem::size_of::<PathBuf>()
+            + vue3_typescript_path_materialization_bytes(base_dir, target)
+                .expect("supported tsconfig target")
+    }
+
+    fn path_specs(
+        targets: &[&str],
+        config_dir: &Path,
+        template_config_dir: &Path,
+    ) -> Vue3TsconfigPathSpecList {
+        Vue3TsconfigPathSpecList::from_targets(
+            targets.iter().map(|target| (*target).to_string()).collect(),
+            config_dir,
+            template_config_dir,
+        )
+    }
+
+    fn assert_materialization_boundaries(
+        entries: usize,
+        weight: usize,
+        exact_discovery_files: usize,
+        partial_discovery_files: usize,
+        materialize: impl Fn(&Vue3TypeResolverContext) -> bool,
+    ) {
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: entries,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(materialize(&exact));
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.tsconfig_materialization_entries, entries);
+        assert_eq!(exact_stats.tsconfig_materialization_weight, weight);
+        assert_eq!(exact_stats.tsconfig_discovery_files, exact_discovery_files);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let entry_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: entries - 1,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(!materialize(&entry_short));
+        let entry_short_stats = entry_short.external_type_session.stats();
+        assert_eq!(
+            entry_short_stats.tsconfig_materialization_entries,
+            entries - 1
+        );
+        assert_eq!(
+            entry_short_stats.tsconfig_discovery_files,
+            partial_discovery_files
+        );
+        assert!(entry_short.external_type_session.metadata_is_blocked());
+
+        let weight_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: entries,
+            max_tsconfig_materialization_weight: weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(!materialize(&weight_short));
+        let weight_short_stats = weight_short.external_type_session.stats();
+        assert_eq!(
+            weight_short_stats.tsconfig_materialization_entries,
+            entries - 1
+        );
+        assert_eq!(weight_short_stats.tsconfig_materialization_weight, weight - 1);
+        assert_eq!(
+            weight_short_stats.tsconfig_discovery_files,
+            partial_discovery_files
+        );
+        assert!(weight_short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn explicit_file_targets_are_materialized_transactionally() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let targets = ["first.d.ts", "second.d.ts"];
+        let expected = targets.map(|target| dir.path().join(target));
+        for path in &expected {
+            std::fs::write(path, "declare interface Global {}").expect("write declaration");
+        }
+        let file_specs = Vue3TsconfigFileSpecs {
+            files: Some(path_specs(&targets, dir.path(), dir.path())),
+            ..Vue3TsconfigFileSpecs::default()
+        };
+        let exact_weight = targets
+            .iter()
+            .map(|target| target_weight(dir.path(), target))
+            .sum();
+
+        assert_materialization_boundaries(targets.len(), exact_weight, targets.len(), 1, |resolver| {
+            vue3_tsconfig_file_spec_global_type_files(
+                &file_specs,
+                &Vue3TsconfigOutputDirectorySpecs::default(),
+                dir.path(),
+                resolver,
+            ) == expected
+        });
+    }
+
+    #[test]
+    fn non_glob_include_claims_its_target_before_file_discovery() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = "included.d.ts";
+        let expected = dir.path().join(target);
+        std::fs::write(&expected, "declare interface Included {}").expect("write declaration");
+        let weight = target_weight(dir.path(), target);
+
+        assert_materialization_boundaries(1, weight, 1, 0, |resolver| {
+            vue3_tsconfig_include_global_type_files(dir.path(), dir.path(), target, resolver)
+                == [expected.clone()]
+        });
+    }
+
+    #[test]
+    fn glob_include_claims_its_target_before_deriving_the_scan_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = format!("{}/**/*.d.ts", normalize_path_string(dir.path()));
+        let weight = target_weight(Path::new("ignored"), &target);
+
+        assert_materialization_boundaries(1, weight, 0, 0, |resolver| {
+            vue3_tsconfig_include_glob(
+                Path::new("ignored"),
+                Path::new("ignored"),
+                &target,
+                resolver,
+            )
+            .is_some_and(|glob| glob.pattern == target && glob.root == dir.path())
+        });
+    }
+
+    #[test]
+    fn exclude_and_output_directory_targets_are_materialized_transactionally() {
+        let config_dir = Path::new("config");
+        let template_config_dir = Path::new("template");
+        let targets = ["first", "second"];
+        let exact_weight = targets
+            .iter()
+            .map(|target| target_weight(config_dir, target))
+            .sum();
+
+        let exclude_targets = targets.map(str::to_string);
+        assert_materialization_boundaries(targets.len(), exact_weight, 0, 0, |resolver| {
+            vue3_tsconfig_exclude_patterns(
+                &exclude_targets,
+                config_dir,
+                template_config_dir,
+                resolver,
+            )
+            .is_some_and(|excludes| {
+                excludes.patterns.len() == targets.len()
+                    && excludes.directory_keys.len() == targets.len()
+            })
+        });
+
+        let output_specs = Vue3TsconfigOutputDirectorySpecs {
+            out_dir: Some(path_specs(
+                &targets[..1],
+                config_dir,
+                template_config_dir,
+            )),
+            declaration_dir: Some(path_specs(
+                &targets[1..],
+                config_dir,
+                template_config_dir,
+            )),
+        };
+        assert_materialization_boundaries(targets.len(), exact_weight, 0, 0, |resolver| {
+            vue3_tsconfig_output_directory_exclude_patterns(&output_specs, resolver).is_some_and(
+                |excludes| {
+                    excludes.patterns.len() == targets.len()
+                        && excludes.directory_keys.len() == targets.len()
+                },
+            )
+        });
+    }
 }
 
 #[cfg(test)]

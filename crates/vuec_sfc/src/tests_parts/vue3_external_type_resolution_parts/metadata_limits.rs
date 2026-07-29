@@ -4151,7 +4151,7 @@ fn vue3_tsconfig_global_specs_materialize_transactionally() {
     )
     .is_empty());
     let measured = measuring.external_type_session.stats();
-    assert_eq!(measured.tsconfig_materialization_entries, 3);
+    assert_eq!(measured.tsconfig_materialization_entries, 5);
     assert!(measured.tsconfig_materialization_weight > 0);
 
     let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
@@ -4185,8 +4185,11 @@ fn vue3_tsconfig_global_specs_materialize_transactionally() {
     )
     .is_empty());
     let short_stats = short.external_type_session.stats();
-    assert_eq!(short_stats.tsconfig_materialization_entries, 2);
-    assert_eq!(short_stats.metadata_target_steps, 0);
+    assert_eq!(short_stats.tsconfig_materialization_entries, 4);
+    assert_eq!(
+        short_stats.metadata_target_steps,
+        "first.d.ts".len() + "second.d.ts".len()
+    );
     assert!(short.external_type_session.metadata_is_blocked());
 }
 
