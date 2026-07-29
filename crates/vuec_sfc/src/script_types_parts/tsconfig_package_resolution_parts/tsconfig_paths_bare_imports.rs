@@ -20,7 +20,7 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
         None
     };
     let target_base_dir = if let Some(base_url) = configured_base_url {
-        let Some(path) = vue3_tsconfig_target_path(
+        let Some(path) = vue3_materialized_tsconfig_target_path(
             config_dir,
             template_config_dir,
             base_url,
@@ -92,12 +92,160 @@ fn vue3_tsconfig_direct_base_url(
         .get("compilerOptions")?
         .get("baseUrl")?
         .as_str()?;
-    vue3_tsconfig_target_path(
+    vue3_materialized_tsconfig_target_path(
         config_dir,
         template_config_dir,
         base_url,
         type_resolver,
     )
+}
+
+#[cfg(test)]
+mod tsconfig_base_url_materialization_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn base_url_value(base_url: &str) -> serde_json::Value {
+        serde_json::json!({ "compilerOptions": { "baseUrl": base_url } })
+    }
+
+    #[test]
+    fn direct_base_url_honors_exact_materialization_boundaries() {
+        let config_dir = Path::new("config");
+        let template_config_dir = Path::new("template");
+        let target = "./base";
+        let value = base_url_value(target);
+        let path_bytes = vue3_typescript_path_materialization_bytes(config_dir, target)
+            .expect("supported baseUrl path");
+        let weight = std::mem::size_of::<PathBuf>() + path_bytes;
+        let expected = normalize_path_components(config_dir.join(target));
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert_eq!(
+            vue3_tsconfig_direct_base_url(
+                &value,
+                config_dir,
+                template_config_dir,
+                &exact,
+            ),
+            Some(expected)
+        );
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.tsconfig_materialization_entries, 1);
+        assert_eq!(exact_stats.tsconfig_materialization_weight, weight);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let entry_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 0,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_direct_base_url(
+            &value,
+            config_dir,
+            template_config_dir,
+            &entry_short,
+        )
+        .is_none());
+        let entry_short_stats = entry_short.external_type_session.stats();
+        assert_eq!(entry_short_stats.tsconfig_materialization_entries, 0);
+        assert_eq!(entry_short_stats.tsconfig_materialization_weight, 0);
+        assert!(entry_short.external_type_session.metadata_is_blocked());
+
+        let weight_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_direct_base_url(
+            &value,
+            config_dir,
+            template_config_dir,
+            &weight_short,
+        )
+        .is_none());
+        let weight_short_stats = weight_short.external_type_session.stats();
+        assert_eq!(weight_short_stats.tsconfig_materialization_entries, 0);
+        assert_eq!(weight_short_stats.tsconfig_materialization_weight, weight - 1);
+        assert!(weight_short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn path_mapping_base_url_is_claimed_before_retained_mapping_payloads() {
+        let config_dir = Path::new("config");
+        let template_config_dir = Path::new("template");
+        let base_url = "./base";
+        let pattern = "alias/*";
+        let target = "src/*";
+        let value = serde_json::json!({
+            "compilerOptions": {
+                "baseUrl": base_url,
+                "paths": { pattern: [target] }
+            }
+        });
+        let path_bytes = vue3_typescript_path_materialization_bytes(config_dir, base_url)
+            .expect("supported baseUrl path");
+        let base_url_weight = std::mem::size_of::<PathBuf>() + path_bytes;
+        let target_base_dir = normalize_path_components(config_dir.join(base_url));
+        let mapping_weight = std::mem::size_of::<Vue3TsconfigPathMapping>()
+            + pattern.len()
+            + target_base_dir.as_os_str().as_encoded_bytes().len()
+            + template_config_dir.as_os_str().as_encoded_bytes().len();
+        let target_weight = std::mem::size_of::<String>() + target.len();
+        let exact_entries = 3;
+        let exact_weight = base_url_weight + mapping_weight + target_weight;
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: exact_entries,
+            max_tsconfig_materialization_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        let mappings = vue3_tsconfig_direct_path_mappings(
+            &value,
+            config_dir,
+            template_config_dir,
+            &exact,
+        );
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].target_base_dir, target_base_dir);
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(
+            exact_stats.tsconfig_materialization_entries,
+            exact_entries
+        );
+        assert_eq!(exact_stats.tsconfig_materialization_weight, exact_weight);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let weight_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: exact_entries,
+            max_tsconfig_materialization_weight: base_url_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_direct_path_mappings(
+            &value,
+            config_dir,
+            template_config_dir,
+            &weight_short,
+        )
+        .is_empty());
+        let weight_short_stats = weight_short.external_type_session.stats();
+        assert_eq!(weight_short_stats.tsconfig_materialization_entries, 0);
+        assert_eq!(
+            weight_short_stats.tsconfig_materialization_weight,
+            base_url_weight - 1
+        );
+        assert!(weight_short.external_type_session.metadata_is_blocked());
+    }
 }
 
 pub(crate) fn vue3_tsconfig_path_target_values(
