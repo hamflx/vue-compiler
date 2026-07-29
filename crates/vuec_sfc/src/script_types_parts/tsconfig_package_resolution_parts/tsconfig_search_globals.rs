@@ -6,6 +6,27 @@ pub(crate) struct Vue3TsconfigPathMapping {
     pub(crate) template_config_dir: PathBuf,
 }
 
+impl Vue3TsconfigPathMapping {
+    fn payload_weight(&self) -> usize {
+        self.targets.iter().fold(
+            std::mem::size_of::<Self>()
+                .saturating_add(self.pattern.len())
+                .saturating_add(self.target_base_dir.as_os_str().as_encoded_bytes().len())
+                .saturating_add(
+                    self.template_config_dir
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .len(),
+                ),
+            |weight, target| {
+                weight
+                    .saturating_add(std::mem::size_of::<String>())
+                    .saturating_add(target.len())
+            },
+        )
+    }
+}
+
 #[derive(Debug, Default)]
 struct Vue3TsconfigModuleResolutionSettings {
     path_mappings: Option<Vec<Vue3TsconfigPathMapping>>,
@@ -57,8 +78,28 @@ impl Vue3TsconfigModuleResolutionSettings {
         true
     }
 
-    fn into_parts(self) -> (Vec<Vue3TsconfigPathMapping>, Option<PathBuf>) {
-        (self.path_mappings.unwrap_or_default(), self.base_url)
+    fn path_mappings(&self) -> &[Vue3TsconfigPathMapping] {
+        self.path_mappings.as_deref().unwrap_or_default()
+    }
+
+    fn payload_weight(&self) -> usize {
+        let base_weight = std::mem::size_of::<Self>()
+            .saturating_add(
+                self.paths_base_dir
+                    .as_ref()
+                    .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
+            )
+            .saturating_add(
+                self.base_url
+                    .as_ref()
+                    .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
+            );
+        self.path_mappings
+            .iter()
+            .flatten()
+            .fold(base_weight, |weight, mapping| {
+                weight.saturating_add(mapping.payload_weight())
+            })
     }
 }
 
@@ -185,6 +226,93 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
 
 type Vue3TsconfigGraphStateKey = (PathBuf, PathBuf, PathBuf);
 type Vue3TsconfigTypeRootsOverride = Option<std::sync::Arc<[PathBuf]>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigModuleResolutionCacheKey {
+    state: Vue3TsconfigGraphStateKey,
+    typescript_version: String,
+}
+
+impl Vue3TsconfigModuleResolutionCacheKey {
+    fn new(
+        config_path: &Path,
+        template_config_dir: &Path,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> Self {
+        Self {
+            state: vue3_tsconfig_graph_state_key(config_path, template_config_dir),
+            typescript_version: type_resolver.typescript_version.to_string(),
+        }
+    }
+
+    fn payload_weight(&self) -> usize {
+        [&self.state.0, &self.state.1, &self.state.2]
+            .into_iter()
+            .fold(
+            std::mem::size_of::<Self>().saturating_add(self.typescript_version.len()),
+            |weight, path| {
+                weight.saturating_add(path.as_os_str().as_encoded_bytes().len())
+            },
+        )
+    }
+}
+
+impl Vue3ExternalTypeLoadSession {
+    fn cached_tsconfig_module_resolution(
+        &self,
+        cache_key: &Vue3TsconfigModuleResolutionCacheKey,
+    ) -> Option<std::sync::Arc<Vue3TsconfigModuleResolutionSettings>> {
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return None;
+        }
+        let cached = state
+            .tsconfig_module_resolution_cache
+            .get(cache_key)
+            .cloned();
+        if cached.is_some() {
+            state.stats.tsconfig_settings_cache_hits += 1;
+        }
+        cached
+    }
+
+    fn cache_tsconfig_module_resolution(
+        &self,
+        cache_key: Vue3TsconfigModuleResolutionCacheKey,
+        settings: std::sync::Arc<Vue3TsconfigModuleResolutionSettings>,
+    ) -> std::sync::Arc<Vue3TsconfigModuleResolutionSettings> {
+        let cache_weight = cache_key
+            .payload_weight()
+            .saturating_add(settings.payload_weight());
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return settings;
+        }
+        if let Some(cached) = state
+            .tsconfig_module_resolution_cache
+            .get(&cache_key)
+            .cloned()
+        {
+            state.stats.tsconfig_settings_cache_hits += 1;
+            return cached;
+        }
+        let remaining_weight = state
+            .limits
+            .max_tsconfig_settings_cache_weight
+            .saturating_sub(state.stats.cached_tsconfig_settings_weight);
+        if state.tsconfig_module_resolution_cache.len()
+            < state.limits.max_tsconfig_settings_cache_entries
+            && cache_weight <= state.limits.max_tsconfig_settings_cache_entry_weight
+            && cache_weight <= remaining_weight
+        {
+            state
+                .tsconfig_module_resolution_cache
+                .insert(cache_key, settings.clone());
+            state.stats.cached_tsconfig_settings_weight += cache_weight;
+        }
+        settings
+    }
+}
 
 fn vue3_materialize_tsconfig_strings<'a>(
     values: impl IntoIterator<Item = &'a str>,
@@ -577,20 +705,37 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
-    let mut traversal = Vue3TsconfigGraphTraversal::default();
-    let settings = vue3_tsconfig_module_resolution_from_config(
+    let cache_key = Vue3TsconfigModuleResolutionCacheKey::new(
         &config_path,
         &config_dir,
-        &mut traversal,
-        0,
         type_resolver,
     );
+    let settings = if let Some(cached) = type_resolver
+        .external_type_session
+        .cached_tsconfig_module_resolution(&cache_key)
+    {
+        cached
+    } else {
+        let mut traversal = Vue3TsconfigGraphTraversal::default();
+        let settings = vue3_tsconfig_module_resolution_from_config(
+            &config_path,
+            &config_dir,
+            &mut traversal,
+            0,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        type_resolver
+            .external_type_session
+            .cache_tsconfig_module_resolution(cache_key, std::sync::Arc::new(settings))
+    };
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let (path_mappings, base_url) = settings.into_parts();
     let resolved = resolve_vue3_tsconfig_path_mappings_with_mode(
-        &path_mappings,
+        settings.path_mappings(),
         source,
         resolution_mode,
         type_resolver,
@@ -602,7 +747,7 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         return resolved;
     }
     if type_resolver.typescript_version < (7, 0, 0).into() {
-        if let Some(base_url) = base_url.as_ref() {
+        if let Some(base_url) = settings.base_url.as_ref() {
             let resolved = resolve_vue3_tsconfig_base_url_with_mode(
                 base_url,
                 source,

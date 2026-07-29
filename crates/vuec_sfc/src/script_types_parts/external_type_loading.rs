@@ -39,6 +39,9 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_TARGET_STEPS: usize = 16 * 1024
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES: usize = 131_072;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES: usize = 64 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES: usize = 512;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_ENTRIES: usize = 512;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_WEIGHT: usize = 16 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_ENTRY_WEIGHT: usize = 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_MATERIALIZATION_ENTRIES: usize = 65_536;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_MATERIALIZATION_WEIGHT: usize =
     64 * 1024 * 1024;
@@ -80,6 +83,9 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_metadata_resolution_path_probes: usize,
     pub(crate) max_generated_path_bytes: usize,
     pub(crate) max_tsconfig_nodes: usize,
+    pub(crate) max_tsconfig_settings_cache_entries: usize,
+    pub(crate) max_tsconfig_settings_cache_weight: usize,
+    pub(crate) max_tsconfig_settings_cache_entry_weight: usize,
     pub(crate) max_tsconfig_materialization_entries: usize,
     pub(crate) max_tsconfig_materialization_weight: usize,
     pub(crate) max_tsconfig_depth: usize,
@@ -124,6 +130,12 @@ impl Default for Vue3ExternalTypeLoadLimits {
                 VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES,
             max_generated_path_bytes: VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES,
             max_tsconfig_nodes: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES,
+            max_tsconfig_settings_cache_entries:
+                VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_ENTRIES,
+            max_tsconfig_settings_cache_weight:
+                VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_WEIGHT,
+            max_tsconfig_settings_cache_entry_weight:
+                VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_SETTINGS_CACHE_ENTRY_WEIGHT,
             max_tsconfig_materialization_entries:
                 VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_MATERIALIZATION_ENTRIES,
             max_tsconfig_materialization_weight:
@@ -168,6 +180,8 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) metadata_target_steps: usize,
     pub(crate) metadata_resolution_path_probes: usize,
     pub(crate) tsconfig_nodes: usize,
+    pub(crate) tsconfig_settings_cache_hits: usize,
+    pub(crate) cached_tsconfig_settings_weight: usize,
     pub(crate) tsconfig_materialization_entries: usize,
     pub(crate) tsconfig_materialization_weight: usize,
     pub(crate) tsconfig_discovery_entries: usize,
@@ -269,6 +283,10 @@ struct Vue3ExternalTypeLoadState {
     metadata_source_cache: BTreeMap<PathBuf, Vue3MetadataSourceCacheEntry>,
     metadata_path_identities: BTreeMap<PathBuf, PathBuf>,
     tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
+    tsconfig_module_resolution_cache: BTreeMap<
+        Vue3TsconfigModuleResolutionCacheKey,
+        std::sync::Arc<Vue3TsconfigModuleResolutionSettings>,
+    >,
     package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
     ancestor_search_dirs: BTreeSet<PathBuf>,
@@ -303,6 +321,7 @@ impl Vue3ExternalTypeLoadState {
             metadata_source_cache: BTreeMap::new(),
             metadata_path_identities: BTreeMap::new(),
             tsconfig_cache: BTreeMap::new(),
+            tsconfig_module_resolution_cache: BTreeMap::new(),
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
             ancestor_search_dirs: BTreeSet::new(),
