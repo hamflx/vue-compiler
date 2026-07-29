@@ -69,7 +69,10 @@ fn resolve_vue3_type_reference_path_uncached(
         if !vue3_type_reference_path_has_supported_extension(&candidate) {
             return None;
         }
-        return candidate.is_file().then_some(candidate);
+        return type_resolver
+            .external_type_session
+            .source_resolution_path_is_file(&candidate)?
+            .then_some(candidate);
     }
     for extension in ["ts", "tsx", "d.ts"] {
         let candidate = path_with_extension(&candidate, extension);
@@ -79,7 +82,10 @@ fn resolve_vue3_type_reference_path_uncached(
                 .record_resolution_failure();
             return None;
         }
-        if candidate.is_file() {
+        if type_resolver
+            .external_type_session
+            .source_resolution_path_is_file(&candidate)?
+        {
             return Some(candidate);
         }
     }
@@ -570,7 +576,9 @@ impl Vue3TypeImportPathProbeMode {
 
     fn is_dir(self, path: &Path, type_resolver: &Vue3TypeResolverContext) -> Option<bool> {
         match self {
-            Self::Source => Some(path.is_dir()),
+            Self::Source => type_resolver
+                .external_type_session
+                .source_resolution_path_is_dir(path),
             Self::Metadata => type_resolver
                 .external_type_session
                 .metadata_path_is_dir(path),
@@ -579,7 +587,9 @@ impl Vue3TypeImportPathProbeMode {
 
     fn exists(self, path: &Path, type_resolver: &Vue3TypeResolverContext) -> Option<bool> {
         match self {
-            Self::Source => Some(path.exists()),
+            Self::Source => type_resolver
+                .external_type_session
+                .source_resolution_path_exists(path),
             Self::Metadata => type_resolver
                 .external_type_session
                 .metadata_path_exists(path),

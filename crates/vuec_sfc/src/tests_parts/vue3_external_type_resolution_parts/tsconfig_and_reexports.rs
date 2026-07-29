@@ -1642,6 +1642,8 @@ defineProps<Leaf>()
                 context_cache_hits: 0,
                 cached_context_weight: 0,
                 resolution_lookups: 0,
+                source_resolution_entries: 0,
+                source_resolution_weight: 0,
                 resolution_cache_hits: 0,
                 cached_resolution_weight: 0,
                 metadata_files_read: 0,

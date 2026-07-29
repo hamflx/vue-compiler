@@ -246,6 +246,127 @@ fn vue3_root_dirs_resolution_fanout_is_bounded() {
 }
 
 #[test]
+fn vue3_root_dirs_scanning_uses_the_source_resolution_budget() {
+    assert_eq!(VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_ENTRIES, 131_072);
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_WEIGHT,
+        64 * 1024 * 1024
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let src = dir.path().join("src");
+    let first_root = dir.path().join("first");
+    let second_root = dir.path().join("second");
+    for directory in [&src, &first_root, &second_root] {
+        std::fs::create_dir_all(directory).expect("create source resolution directory");
+    }
+    let target = src.join("target.ts");
+    std::fs::write(&target, "export interface BudgetProps {}")
+        .expect("write source resolution target");
+    let filename = src.join("Comp.vue").to_string_lossy().to_string();
+    let candidate = src.join("target");
+    let candidate_weight = candidate.as_os_str().as_encoded_bytes().len();
+    let scan_weight = [first_root.as_path(), second_root.as_path()]
+        .into_iter()
+        .map(|root| {
+            candidate_weight.saturating_add(root.as_os_str().as_encoded_bytes().len())
+        })
+        .sum::<usize>();
+    let exact_weight = scan_weight.saturating_add(target.as_os_str().as_encoded_bytes().len());
+    let root_dirs: std::sync::Arc<[PathBuf]> =
+        std::sync::Arc::from([first_root, second_root]);
+
+    let accepted = Vue3TypeResolverContext {
+        root_dirs: root_dirs.clone(),
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_source_resolution_entries: 3,
+                max_source_resolution_weight: exact_weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "./target", &accepted),
+        Some(target.clone())
+    );
+    let first_stats = accepted.external_type_session.stats();
+    assert_eq!(first_stats.source_resolution_entries, 3);
+    assert_eq!(first_stats.source_resolution_weight, exact_weight);
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "./target", &accepted),
+        Some(target)
+    );
+    let cached_stats = accepted.external_type_session.stats();
+    assert_eq!(cached_stats.source_resolution_entries, 3);
+    assert_eq!(cached_stats.source_resolution_weight, exact_weight);
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+
+    let entry_short = Vue3TypeResolverContext {
+        root_dirs: root_dirs.clone(),
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_source_resolution_entries: 2,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+    assert!(resolve_vue3_type_import(&filename, "./target", &entry_short).is_none());
+    let short_stats = entry_short.external_type_session.stats();
+    assert_eq!(short_stats.source_resolution_entries, 2);
+    assert_eq!(short_stats.source_resolution_weight, scan_weight);
+    assert!(!entry_short.external_type_session.metadata_is_blocked());
+
+    let weight_short = Vue3TypeResolverContext {
+        root_dirs,
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_source_resolution_weight: exact_weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+    assert!(resolve_vue3_type_import(&filename, "./target", &weight_short).is_none());
+    let short_stats = weight_short.external_type_session.stats();
+    assert_eq!(short_stats.source_resolution_entries, 2);
+    assert_eq!(short_stats.source_resolution_weight, exact_weight - 1);
+    assert!(!weight_short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_root_dirs_scan_exhaustion_does_not_use_an_early_match() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let src = dir.path().join("src");
+    let alternate = dir.path().join("alternate");
+    let generated = dir.path().join("generated");
+    for directory in [&src, &alternate, &generated] {
+        std::fs::create_dir_all(directory).expect("create rootDirs scan directory");
+    }
+    let direct_decoy = src.join("target.ts");
+    std::fs::write(&direct_decoy, "export interface WrongProps {}")
+        .expect("write direct fallback decoy");
+    let filename = src.join("Comp.vue").to_string_lossy().to_string();
+    let resolver = Vue3TypeResolverContext {
+        root_dirs: std::sync::Arc::from([src, alternate, generated]),
+        external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+            Vue3ExternalTypeLoadLimits {
+                max_source_resolution_entries: 2,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ),
+        ..Vue3TypeResolverContext::default()
+    };
+
+    assert!(resolve_vue3_type_import(&filename, "./target", &resolver).is_none());
+    let stats = resolver.external_type_session.stats();
+    assert_eq!(stats.source_resolution_entries, 2);
+    assert_eq!(stats.metadata_fanout_entries, 0);
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_root_dirs_isolate_resolution_and_context_caches() {
     let dir = tempfile::tempdir().expect("temp dir");
     let src = dir.path().join("src");

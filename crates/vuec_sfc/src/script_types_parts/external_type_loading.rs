@@ -25,6 +25,8 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT: usize = 64 * 1024 
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT: usize = 8 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT: usize = 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_LOOKUPS: usize = 65_536;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_ENTRIES: usize = 131_072;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_WEIGHT: usize = 64 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRIES: usize = 16_384;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_WEIGHT: usize = 4 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRY_WEIGHT: usize = 64 * 1024;
@@ -60,6 +62,8 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_context_cache_weight: usize,
     pub(crate) max_context_cache_entry_weight: usize,
     pub(crate) max_resolution_lookups: usize,
+    pub(crate) max_source_resolution_entries: usize,
+    pub(crate) max_source_resolution_weight: usize,
     pub(crate) max_resolution_cache_entries: usize,
     pub(crate) max_resolution_cache_weight: usize,
     pub(crate) max_resolution_cache_entry_weight: usize,
@@ -97,6 +101,8 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_context_cache_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT,
             max_context_cache_entry_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT,
             max_resolution_lookups: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_LOOKUPS,
+            max_source_resolution_entries: VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_ENTRIES,
+            max_source_resolution_weight: VUE3_EXTERNAL_TYPE_MAX_SOURCE_RESOLUTION_WEIGHT,
             max_resolution_cache_entries: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRIES,
             max_resolution_cache_weight: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_WEIGHT,
             max_resolution_cache_entry_weight:
@@ -137,6 +143,8 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) context_cache_hits: usize,
     pub(crate) cached_context_weight: usize,
     pub(crate) resolution_lookups: usize,
+    pub(crate) source_resolution_entries: usize,
+    pub(crate) source_resolution_weight: usize,
     pub(crate) resolution_cache_hits: usize,
     pub(crate) cached_resolution_weight: usize,
     pub(crate) metadata_files_read: usize,
@@ -394,6 +402,42 @@ impl Vue3ExternalTypeLoadSession {
 
     fn record_resolution_failure(&self) {
         self.lock().failure_epoch += 1;
+    }
+
+    fn claim_source_resolution_work(&self, weight: usize) -> bool {
+        let weight = weight.max(1);
+        let mut state = self.lock();
+        if state.stats.source_resolution_entries >= state.limits.max_source_resolution_entries {
+            state.failure_epoch += 1;
+            return false;
+        }
+        let remaining = state
+            .limits
+            .max_source_resolution_weight
+            .saturating_sub(state.stats.source_resolution_weight);
+        if weight > remaining {
+            state.stats.source_resolution_weight = state.limits.max_source_resolution_weight;
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.source_resolution_entries += 1;
+        state.stats.source_resolution_weight += weight;
+        true
+    }
+
+    fn source_resolution_path_exists(&self, path: &Path) -> Option<bool> {
+        self.claim_source_resolution_work(path.as_os_str().as_encoded_bytes().len())
+            .then(|| path.exists())
+    }
+
+    fn source_resolution_path_is_dir(&self, path: &Path) -> Option<bool> {
+        self.claim_source_resolution_work(path.as_os_str().as_encoded_bytes().len())
+            .then(|| path.is_dir())
+    }
+
+    fn source_resolution_path_is_file(&self, path: &Path) -> Option<bool> {
+        self.claim_source_resolution_work(path.as_os_str().as_encoded_bytes().len())
+            .then(|| path.is_file())
     }
 
     fn has_context_build_capacity(&self) -> bool {

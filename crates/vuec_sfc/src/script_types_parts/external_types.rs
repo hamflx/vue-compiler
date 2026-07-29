@@ -5117,6 +5117,14 @@ import './referenced.d.ts'"#,
             Some(referenced.clone()),
         );
         assert_eq!(exact.external_type_session.failure_epoch(), 0);
+        assert_eq!(
+            exact.external_type_session.stats().source_resolution_entries,
+            1
+        );
+        assert_eq!(
+            exact.external_type_session.stats().source_resolution_weight,
+            required
+        );
 
         let short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
             max_generated_path_bytes: required - 1,
@@ -5127,6 +5135,111 @@ import './referenced.d.ts'"#,
             None,
         );
         assert_eq!(short.external_type_session.failure_epoch(), 1);
+        assert_eq!(
+            short.external_type_session.stats().source_resolution_entries,
+            0
+        );
+
+        let probe_short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_source_resolution_weight: required - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced.d.ts", &probe_short),
+            None,
+        );
+        assert_eq!(
+            probe_short
+                .external_type_session
+                .stats()
+                .source_resolution_entries,
+            0
+        );
+        assert_eq!(
+            probe_short
+                .external_type_session
+                .stats()
+                .source_resolution_weight,
+            required - 1
+        );
+        assert_eq!(probe_short.external_type_session.failure_epoch(), 1);
+    }
+
+    #[test]
+    fn reference_path_extension_probes_use_the_source_resolution_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let typescript = dir.path().join("referenced.ts");
+        let typescript_jsx = dir.path().join("referenced.tsx");
+        let declaration = dir.path().join("referenced.d.ts");
+        std::fs::write(&declaration, "interface Referenced {}")
+            .expect("write extensionless reference target");
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let exact_weight = [typescript.as_path(), typescript_jsx.as_path(), declaration.as_path()]
+            .into_iter()
+            .map(|path| path.as_os_str().as_encoded_bytes().len())
+            .sum::<usize>();
+        let exact = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_source_resolution_entries: 3,
+            max_source_resolution_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced", &exact),
+            Some(declaration.clone())
+        );
+        let first_stats = exact.external_type_session.stats();
+        assert_eq!(first_stats.source_resolution_entries, 3);
+        assert_eq!(first_stats.source_resolution_weight, exact_weight);
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced", &exact),
+            Some(declaration)
+        );
+        let cached_stats = exact.external_type_session.stats();
+        assert_eq!(cached_stats.source_resolution_entries, 3);
+        assert_eq!(cached_stats.source_resolution_weight, exact_weight);
+        assert_eq!(cached_stats.resolution_cache_hits, 1);
+
+        let short = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_source_resolution_entries: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            resolve_vue3_type_reference_path(&filename, "./referenced", &short),
+            None
+        );
+        assert_eq!(
+            short.external_type_session.stats().source_resolution_entries,
+            2
+        );
+        assert!(!short.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn source_resolution_work_accounting_does_not_overflow() {
+        let resolver = type_resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_source_resolution_entries: usize::MAX,
+            max_source_resolution_weight: usize::MAX,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(resolver
+            .external_type_session
+            .claim_source_resolution_work(usize::MAX));
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .source_resolution_weight,
+            usize::MAX
+        );
+        assert!(!resolver
+            .external_type_session
+            .claim_source_resolution_work(1));
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.source_resolution_entries, 1);
+        assert_eq!(stats.source_resolution_weight, usize::MAX);
+        assert_eq!(resolver.external_type_session.failure_epoch(), 1);
     }
 
     #[test]

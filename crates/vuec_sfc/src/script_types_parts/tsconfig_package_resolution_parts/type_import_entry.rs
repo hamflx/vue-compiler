@@ -441,16 +441,30 @@ fn resolve_vue3_relative_type_import_with_mode(
         .parent()
         .unwrap_or_else(|| Path::new(""));
     let candidate = normalize_path_components(base.join(source.replace('\\', "/")));
-    let Some((matched_root, suffix)) = type_resolver
-        .root_dirs
-        .iter()
-        .filter_map(|root_dir| {
-            candidate.strip_prefix(root_dir).ok().and_then(|suffix| {
-                (!suffix.as_os_str().is_empty()).then_some((root_dir, suffix))
-            })
-        })
-        .max_by_key(|(root_dir, _)| root_dir.as_os_str().as_encoded_bytes().len())
-    else {
+    let candidate_weight = candidate.as_os_str().as_encoded_bytes().len();
+    let mut matched = None;
+    for root_dir in type_resolver.root_dirs.iter() {
+        let root_weight = root_dir.as_os_str().as_encoded_bytes().len();
+        if !type_resolver
+            .external_type_session
+            .claim_source_resolution_work(candidate_weight.saturating_add(root_weight))
+        {
+            return None;
+        }
+        let Ok(suffix) = candidate.strip_prefix(root_dir) else {
+            continue;
+        };
+        if suffix.as_os_str().is_empty() {
+            continue;
+        }
+        if matched
+            .as_ref()
+            .is_none_or(|(matched_weight, _, _)| root_weight >= *matched_weight)
+        {
+            matched = Some((root_weight, root_dir, suffix));
+        }
+    }
+    let Some((_, matched_root, suffix)) = matched else {
         return resolve_vue3_type_import_path_with_mode(
             &candidate,
             resolution_mode,
