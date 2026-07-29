@@ -419,42 +419,57 @@ fn vue3_project_package_source_root_guesses(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vec<PathBuf>> {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-    let roots = if let Some(root_dir) = &options.root_dir {
-        vec![root_dir.clone()]
+    let mut roots = Vec::new();
+    if let Some(root_dir) = &options.root_dir {
+        if !vue3_push_project_package_source_root(&mut roots, root_dir, type_resolver) {
+            return None;
+        }
     } else if options.composite == Some(true)
         || type_resolver.typescript_version >= (6, 0, 0).into()
     {
-        vec![config_dir.to_path_buf()]
+        if !vue3_push_project_package_source_root(&mut roots, config_dir, type_resolver) {
+            return None;
+        }
     } else {
         let importer_dir = importer.parent().unwrap_or_else(|| Path::new(""));
         let common = importer_dir
             .ancestors()
             .find(|ancestor| package_dir.starts_with(ancestor))?;
-        let mut guesses = common
-            .ancestors()
-            .map(Path::to_path_buf)
-            .collect::<Vec<_>>();
-        guesses.reverse();
-        guesses
-    };
-    let mut bounded = Vec::with_capacity(roots.len());
-    for root in roots {
-        if !type_resolver
-            .external_type_session
-            .claim_metadata_fanout_entry()
-        {
-            return None;
+        for root in common.ancestors() {
+            if !vue3_push_project_package_source_root(&mut roots, root, type_resolver) {
+                return None;
+            }
         }
-        let root = normalize_path_components(root);
-        if !type_resolver
-            .external_type_session
-            .metadata_path_is_within_limit(&normalize_path_string(&root))
-        {
-            return None;
-        }
-        bounded.push(root);
+        roots.reverse();
     }
-    Some(bounded)
+    Some(roots)
+}
+
+fn vue3_push_project_package_source_root(
+    roots: &mut Vec<PathBuf>,
+    root: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_fanout_entry()
+    {
+        return false;
+    }
+    let path_bytes = root.as_os_str().as_encoded_bytes().len();
+    if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+        return false;
+    }
+    let root = normalize_path_components(root.to_path_buf());
+    debug_assert!(root.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&root))
+    {
+        return false;
+    }
+    roots.push(root);
+    true
 }
 
 fn vue3_path_relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
@@ -549,16 +564,22 @@ mod project_package_input_target_tests {
         std::fs::create_dir_all(&source_dir).expect("create source directory");
         let leaf = source_dir.join("leaf.ts");
         std::fs::write(&leaf, "export interface Leaf {}").expect("write source target");
+        let source_root_weight = std::mem::size_of::<PathBuf>()
+            .saturating_add(source_dir.as_os_str().as_encoded_bytes().len());
 
         let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
             max_metadata_fanout_entries: 1,
             max_metadata_resolution_path_probes: 3,
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: source_root_weight,
             ..Vue3ExternalTypeLoadLimits::default()
         });
         assert_eq!(resolve_fixture(dir.path(), &exact), Some(leaf.clone()));
         let stats = exact.external_type_session.stats();
         assert_eq!(stats.metadata_fanout_entries, 1);
         assert_eq!(stats.metadata_resolution_path_probes, 3);
+        assert_eq!(stats.tsconfig_materialization_entries, 1);
+        assert_eq!(stats.tsconfig_materialization_weight, source_root_weight);
         assert!(!exact.external_type_session.metadata_is_blocked());
 
         let no_fanout = resolver_with_limits(Vue3ExternalTypeLoadLimits {
@@ -574,6 +595,25 @@ mod project_package_input_target_tests {
         });
         assert!(resolve_fixture(dir.path(), &two_probes).is_none());
         assert!(two_probes.external_type_session.metadata_is_blocked());
+
+        let no_materialization = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_fixture(dir.path(), &no_materialization).is_none());
+        assert!(no_materialization
+            .external_type_session
+            .metadata_is_blocked());
+
+        let short_materialization = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 1,
+            max_tsconfig_materialization_weight: source_root_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_fixture(dir.path(), &short_materialization).is_none());
+        assert!(short_materialization
+            .external_type_session
+            .metadata_is_blocked());
 
         let package_dir = dir.path().join("package");
         let longest_path = [
@@ -599,6 +639,146 @@ mod project_package_input_target_tests {
         });
         assert!(resolve_fixture(dir.path(), &short_path).is_none());
         assert!(short_path.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_package_source_root_guesses_bound_ancestor_materialization() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("workspace").join("package");
+        let importer = package_dir.join("src").join("Comp.vue");
+        let config_path = package_dir.join("tsconfig.json");
+        let ancestor_roots = package_dir.ancestors().collect::<Vec<_>>();
+        let root_count = ancestor_roots.len();
+        let max_root_bytes = ancestor_roots
+            .iter()
+            .map(|root| root.as_os_str().as_encoded_bytes().len())
+            .max()
+            .expect("package path has ancestors");
+        let materialization_weight = ancestor_roots.iter().fold(0usize, |weight, root| {
+            weight.saturating_add(
+                std::mem::size_of::<PathBuf>()
+                    .saturating_add(root.as_os_str().as_encoded_bytes().len()),
+            )
+        });
+        let mut expected = ancestor_roots
+            .iter()
+            .map(|root| normalize_path_components((*root).to_path_buf()))
+            .collect::<Vec<_>>();
+        expected.reverse();
+        let resolver = |limits| Vue3TypeResolverContext {
+            typescript_version: (5, 9, 0).into(),
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        let exact = resolver(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: root_count,
+            max_tsconfig_materialization_entries: root_count,
+            max_tsconfig_materialization_weight: materialization_weight,
+            max_generated_path_bytes: max_root_bytes,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_project_package_source_root_guesses(
+                &importer,
+                &package_dir,
+                &config_path,
+                &Vue3TsconfigEmitPathOptions::default(),
+                &exact,
+            ),
+            Some(expected),
+        );
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, root_count);
+        assert_eq!(stats.tsconfig_materialization_entries, root_count);
+        assert_eq!(
+            stats.tsconfig_materialization_weight,
+            materialization_weight
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short_entries = resolver(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: root_count,
+            max_tsconfig_materialization_entries: root_count - 1,
+            max_tsconfig_materialization_weight: materialization_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_project_package_source_root_guesses(
+            &importer,
+            &package_dir,
+            &config_path,
+            &Vue3TsconfigEmitPathOptions::default(),
+            &short_entries,
+        )
+        .is_none());
+        assert!(short_entries
+            .external_type_session
+            .metadata_is_blocked());
+        let stats = short_entries.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, root_count);
+        assert_eq!(stats.tsconfig_materialization_entries, root_count - 1);
+
+        let short_fanout = resolver(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: root_count - 1,
+            max_tsconfig_materialization_entries: root_count,
+            max_tsconfig_materialization_weight: materialization_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_project_package_source_root_guesses(
+            &importer,
+            &package_dir,
+            &config_path,
+            &Vue3TsconfigEmitPathOptions::default(),
+            &short_fanout,
+        )
+        .is_none());
+        assert!(short_fanout.external_type_session.metadata_is_blocked());
+        let stats = short_fanout.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, root_count - 1);
+        assert_eq!(stats.tsconfig_materialization_entries, root_count - 1);
+
+        let short_weight = resolver(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: root_count,
+            max_tsconfig_materialization_entries: root_count,
+            max_tsconfig_materialization_weight: materialization_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_project_package_source_root_guesses(
+            &importer,
+            &package_dir,
+            &config_path,
+            &Vue3TsconfigEmitPathOptions::default(),
+            &short_weight,
+        )
+        .is_none());
+        assert!(short_weight.external_type_session.metadata_is_blocked());
+        let stats = short_weight.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, root_count);
+        assert_eq!(stats.tsconfig_materialization_entries, root_count - 1);
+        assert_eq!(
+            stats.tsconfig_materialization_weight,
+            materialization_weight - 1
+        );
+
+        let short_path = resolver(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: root_count,
+            max_tsconfig_materialization_entries: root_count,
+            max_tsconfig_materialization_weight: materialization_weight,
+            max_generated_path_bytes: max_root_bytes - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_project_package_source_root_guesses(
+            &importer,
+            &package_dir,
+            &config_path,
+            &Vue3TsconfigEmitPathOptions::default(),
+            &short_path,
+        )
+        .is_none());
+        assert!(short_path.external_type_session.metadata_is_blocked());
+        let stats = short_path.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, 1);
+        assert_eq!(stats.tsconfig_materialization_entries, 0);
     }
 
     #[test]
