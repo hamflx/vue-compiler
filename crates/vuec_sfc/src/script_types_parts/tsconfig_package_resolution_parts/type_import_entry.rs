@@ -323,7 +323,7 @@ fn resolve_vue3_package_self_reference_with_mode(
             return Vue3PackageSelfReferenceResolution::MetadataBlocked;
         }
     };
-    if manifest.name.as_deref() != Some(package_name.as_str()) {
+    if manifest.name.as_deref() != Some(package_name) {
         return Vue3PackageSelfReferenceResolution::NotApplicable;
     }
     let Some(exports) = manifest
@@ -372,7 +372,7 @@ fn resolve_vue3_package_self_reference_with_mode(
         let mut resolved = None;
         let result = visit_vue3_package_exports_type_targets(
             exports,
-            subpath.as_deref(),
+            subpath,
             resolution_mode,
             type_resolver,
             &mut |target| {

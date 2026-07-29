@@ -399,14 +399,14 @@ pub(crate) fn resolve_vue3_bare_type_import_with_mode(
         Vue3PackageResolutionPhase::JavaScript,
     ] {
         for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
-            let package_dir = node_modules.join(&package_name);
+            let package_dir = node_modules.join(package_name);
             let is_package_dir = type_resolver
                 .external_type_session
                 .metadata_path_is_dir(&package_dir)?;
             if is_package_dir {
                 let resolved = resolve_vue3_package_entry_phase_with_mode(
                     &package_dir,
-                    subpath.as_deref(),
+                    subpath,
                     resolution_mode,
                     phase,
                     type_resolver,
@@ -420,14 +420,14 @@ pub(crate) fn resolve_vue3_bare_type_import_with_mode(
             }
             if phase == Vue3PackageResolutionPhase::Types {
                 let types_package_dir =
-                    node_modules.join(vue3_at_types_package_name(&package_name));
+                    node_modules.join(vue3_at_types_package_name(package_name));
                 let is_types_package_dir = type_resolver
                     .external_type_session
                     .metadata_path_is_dir(&types_package_dir)?;
                 if is_types_package_dir {
                     let resolved = resolve_vue3_package_entry_phase_with_mode(
                         &types_package_dir,
-                        subpath.as_deref(),
+                        subpath,
                         resolution_mode,
                         phase,
                         type_resolver,
@@ -484,7 +484,7 @@ pub(crate) fn resolve_vue3_classic_type_import_with_mode(
 
     let (package_name, subpath) = vue3_package_import_parts(source)?;
     for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
-        let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
+        let types_package_dir = node_modules.join(vue3_at_types_package_name(package_name));
         if !type_resolver
             .external_type_session
             .metadata_path_is_dir(&types_package_dir)?
@@ -493,7 +493,7 @@ pub(crate) fn resolve_vue3_classic_type_import_with_mode(
         }
         let resolved = resolve_vue3_package_entry_phase_with_mode(
             &types_package_dir,
-            subpath.as_deref(),
+            subpath,
             resolution_mode,
             Vue3PackageResolutionPhase::Types,
             type_resolver,
@@ -508,35 +508,46 @@ pub(crate) fn resolve_vue3_classic_type_import_with_mode(
     None
 }
 
-pub(crate) fn vue3_package_import_parts(source: &str) -> Option<(String, Option<String>)> {
-    if source.is_empty()
-        || source.starts_with('.')
-        || source.starts_with('/')
-        || source.starts_with('#')
-        || source.contains(':')
-        || source.contains('\\')
-    {
+pub(crate) fn vue3_package_import_parts(source: &str) -> Option<(&str, Option<&str>)> {
+    if source.starts_with('.') || source.starts_with('/') || source.starts_with('#') {
         return None;
     }
-    let parts = source.split('/').collect::<Vec<_>>();
+
+    let segment_is_invalid = |segment: &str| {
+        segment.is_empty()
+            || matches!(segment, "." | "..")
+            || segment.contains(':')
+            || segment.contains('\\')
+    };
+    let mut segments = source.split('/');
+    let first = segments.next()?;
     // Bare package fallback must not normalize outside the selected package root.
-    if parts
-        .iter()
-        .any(|part| part.is_empty() || matches!(*part, "." | ".."))
-    {
+    if segment_is_invalid(first) {
         return None;
     }
-    if parts.first().is_some_and(|part| part.starts_with('@')) {
-        if parts.len() < 2 || parts[0].len() <= 1 || parts[1].is_empty() {
+
+    if first.starts_with('@') {
+        let package = segments.next()?;
+        if first.len() <= 1 || segment_is_invalid(package) {
             return None;
         }
-        let package_name = format!("{}/{}", parts[0], parts[1]);
-        let subpath = (parts.len() > 2).then(|| parts[2..].join("/"));
-        return Some((package_name, subpath));
+        let package_name_len = first
+            .len()
+            .checked_add(1)?
+            .checked_add(package.len())?;
+        if segments.any(segment_is_invalid) {
+            return None;
+        }
+        let subpath = (package_name_len < source.len())
+            .then(|| &source[package_name_len.saturating_add(1)..]);
+        return Some((&source[..package_name_len], subpath));
     }
-    let package_name = parts.first().filter(|part| !part.is_empty())?.to_string();
-    let subpath = (parts.len() > 1).then(|| parts[1..].join("/"));
-    Some((package_name, subpath))
+
+    if segments.any(segment_is_invalid) {
+        return None;
+    }
+    let subpath = (first.len() < source.len()).then(|| &source[first.len().saturating_add(1)..]);
+    Some((first, subpath))
 }
 
 pub(crate) fn vue3_ancestor_search_candidate_weight(dir: &Path, suffix: &str) -> usize {

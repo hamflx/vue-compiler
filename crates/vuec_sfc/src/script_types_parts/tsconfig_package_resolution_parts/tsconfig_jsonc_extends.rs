@@ -368,7 +368,7 @@ pub(crate) fn resolve_vue3_package_tsconfig_extends(
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(target)?;
     for node_modules in vue3_node_modules_search_paths_from_dir(config_dir, type_resolver) {
-        let package_dir = normalize_path_components(node_modules.join(&package_name));
+        let package_dir = normalize_path_components(node_modules.join(package_name));
         if !type_resolver
             .external_type_session
             .metadata_path_is_dir(&package_dir)?
@@ -376,7 +376,7 @@ pub(crate) fn resolve_vue3_package_tsconfig_extends(
             continue;
         }
         let resolved =
-            resolve_vue3_package_tsconfig_entry(&package_dir, subpath.as_deref(), type_resolver);
+            resolve_vue3_package_tsconfig_entry(&package_dir, subpath, type_resolver);
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }

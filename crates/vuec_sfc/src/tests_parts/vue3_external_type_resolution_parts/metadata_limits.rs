@@ -2666,26 +2666,40 @@ fn vue3_types_versions_legacy_index_fallback_obeys_probe_budget() {
 
 #[test]
 fn vue3_bare_package_subpaths_cannot_escape_package_root() {
+    assert_eq!(vue3_package_import_parts("package"), Some(("package", None)));
     assert_eq!(
         vue3_package_import_parts("package/feature/item"),
-        Some(("package".into(), Some("feature/item".into())))
+        Some(("package", Some("feature/item")))
+    );
+    assert_eq!(
+        vue3_package_import_parts("@scope/package"),
+        Some(("@scope/package", None))
     );
     assert_eq!(
         vue3_package_import_parts("@scope/package/feature/item"),
-        Some((
-            "@scope/package".into(),
-            Some("feature/item".into())
-        ))
+        Some(("@scope/package", Some("feature/item")))
     );
     for source in [
+        "",
+        ".",
+        "..",
+        "./package",
+        "../package",
+        "/package",
+        "#alias",
+        "node:fs",
         "package/",
         "package//item",
         "package/./item",
         "package/../item",
         "package/item/..",
         "package\\..\\item",
+        "@",
+        "@scope",
+        "@/package",
         "@scope/..",
         "@scope/package/",
+        "@scope//package",
         "@scope/package/../../item",
     ] {
         assert!(
@@ -2718,6 +2732,36 @@ fn vue3_bare_package_subpaths_cannot_escape_package_root() {
             "package subpath escaped its package root: {source}"
         );
     }
+}
+
+#[test]
+fn vue3_package_import_parts_borrows_large_segmented_specifiers() {
+    let mut source = String::from("package");
+    for _ in 0..100_000 {
+        source.push_str("/feature");
+    }
+
+    let (package_name, subpath) = vue3_package_import_parts(&source).expect("package parts");
+    let expected_subpath = &source["package/".len()..];
+    assert_eq!(package_name, "package");
+    assert_eq!(subpath, Some(expected_subpath));
+    assert_eq!(package_name.as_ptr(), source.as_ptr());
+    assert_eq!(subpath.expect("subpath").as_ptr(), expected_subpath.as_ptr());
+
+    let scoped = "@scope/package/feature/item";
+    let (package_name, subpath) = vue3_package_import_parts(scoped).expect("scoped package parts");
+    assert_eq!(package_name, "@scope/package");
+    assert_eq!(subpath, Some("feature/item"));
+    assert_eq!(package_name.as_ptr(), scoped.as_ptr());
+    assert_eq!(
+        subpath.expect("scoped subpath").as_ptr(),
+        scoped["@scope/package/".len()..].as_ptr()
+    );
+
+    assert_eq!(
+        vue3_package_import_parts("@scope/包/功能/入口"),
+        Some(("@scope/包", Some("功能/入口")))
+    );
 }
 
 #[test]

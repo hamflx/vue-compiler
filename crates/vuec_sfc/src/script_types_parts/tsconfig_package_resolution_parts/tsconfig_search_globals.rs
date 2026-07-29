@@ -1422,10 +1422,10 @@ fn resolve_vue3_bare_type_reference(
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(type_name)?;
     for node_modules in vue3_node_modules_search_paths(containing_filename, type_resolver) {
-        let package_dir = node_modules.join(&package_name);
+        let package_dir = node_modules.join(package_name);
         let resolved = resolve_vue3_type_reference_package_candidate(
             &package_dir,
-            subpath.as_deref(),
+            subpath,
             true,
             Vue3TypeReferenceLookupKind::NodeModules,
             resolution_mode,
@@ -1437,10 +1437,10 @@ fn resolve_vue3_bare_type_reference(
         if resolved.is_some() {
             return resolved;
         }
-        let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
+        let types_package_dir = node_modules.join(vue3_at_types_package_name(package_name));
         let resolved = resolve_vue3_type_reference_package_candidate(
             &types_package_dir,
-            subpath.as_deref(),
+            subpath,
             true,
             Vue3TypeReferenceLookupKind::NodeModules,
             resolution_mode,
