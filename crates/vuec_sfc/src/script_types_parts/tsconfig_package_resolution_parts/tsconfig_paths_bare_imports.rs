@@ -30,6 +30,15 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
         };
         path
     } else {
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(
+                std::mem::size_of::<PathBuf>()
+                    .saturating_add(config_dir.as_os_str().as_encoded_bytes().len()),
+            )
+        {
+            return Vec::new();
+        }
         config_dir.to_path_buf()
     };
     let Some(paths) = compiler_options
@@ -38,17 +47,32 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
     else {
         return Vec::new();
     };
-    paths
-        .iter()
-        .map(|(pattern, targets)| Vue3TsconfigPathMapping {
+    let mut mappings = Vec::new();
+    for (pattern, targets) in paths {
+        let mapping_weight = std::mem::size_of::<Vue3TsconfigPathMapping>()
+            .saturating_add(pattern.len())
+            .saturating_add(target_base_dir.as_os_str().as_encoded_bytes().len())
+            .saturating_add(template_config_dir.as_os_str().as_encoded_bytes().len());
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(mapping_weight)
+        {
+            return Vec::new();
+        }
+        let Some(targets) = vue3_materialize_tsconfig_strings(
+            vue3_tsconfig_path_target_values(targets),
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
+        mappings.push(Vue3TsconfigPathMapping {
             pattern: pattern.clone(),
-            targets: vue3_tsconfig_path_target_values(targets)
-                .map(str::to_string)
-                .collect(),
+            targets,
             target_base_dir: target_base_dir.clone(),
             template_config_dir: template_config_dir.to_path_buf(),
-        })
-        .collect()
+        });
+    }
+    mappings
 }
 
 fn vue3_tsconfig_declares_compiler_option(value: &serde_json::Value, option: &str) -> bool {

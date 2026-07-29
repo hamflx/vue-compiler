@@ -199,6 +199,33 @@ impl Vue3ExternalTypeLoadSession {
         true
     }
 
+    pub(crate) fn claim_tsconfig_materialization(&self, weight: usize) -> bool {
+        let weight = weight.max(1);
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        let entries_exhausted = state.stats.tsconfig_materialization_entries
+            >= state.limits.max_tsconfig_materialization_entries;
+        let remaining_weight = state
+            .limits
+            .max_tsconfig_materialization_weight
+            .saturating_sub(state.stats.tsconfig_materialization_weight);
+        if entries_exhausted || weight > remaining_weight {
+            if weight > remaining_weight {
+                state.stats.tsconfig_materialization_weight =
+                    state.limits.max_tsconfig_materialization_weight;
+            }
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        state.stats.tsconfig_materialization_entries += 1;
+        state.stats.tsconfig_materialization_weight += weight;
+        true
+    }
+
     fn max_tsconfig_depth(&self) -> usize {
         self.lock().limits.max_tsconfig_depth
     }

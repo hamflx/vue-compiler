@@ -3697,6 +3697,239 @@ fn vue3_metadata_target_step_accounting_does_not_overflow() {
 }
 
 #[test]
+fn vue3_tsconfig_materialization_accounting_is_bounded_and_overflow_safe() {
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_MATERIALIZATION_ENTRIES,
+        65_536
+    );
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_MATERIALIZATION_WEIGHT,
+        64 * 1024 * 1024
+    );
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: 2,
+        max_tsconfig_materialization_weight: 5,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(exact
+        .external_type_session
+        .claim_tsconfig_materialization(2));
+    assert!(exact
+        .external_type_session
+        .claim_tsconfig_materialization(3));
+    let exact_stats = exact.external_type_session.stats();
+    assert_eq!(exact_stats.tsconfig_materialization_entries, 2);
+    assert_eq!(exact_stats.tsconfig_materialization_weight, 5);
+    assert!(!exact
+        .external_type_session
+        .claim_tsconfig_materialization(1));
+    assert!(exact.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: 0,
+        max_tsconfig_materialization_weight: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(!zero
+        .external_type_session
+        .claim_tsconfig_materialization(0));
+    let zero_stats = zero.external_type_session.stats();
+    assert_eq!(zero_stats.tsconfig_materialization_entries, 0);
+    assert_eq!(zero_stats.tsconfig_materialization_weight, 0);
+    assert!(zero.external_type_session.metadata_is_blocked());
+
+    let overflow = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: usize::MAX,
+        max_tsconfig_materialization_weight: usize::MAX,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(overflow
+        .external_type_session
+        .claim_tsconfig_materialization(usize::MAX));
+    assert!(!overflow
+        .external_type_session
+        .claim_tsconfig_materialization(1));
+    let overflow_stats = overflow.external_type_session.stats();
+    assert_eq!(overflow_stats.tsconfig_materialization_entries, 1);
+    assert_eq!(overflow_stats.tsconfig_materialization_weight, usize::MAX);
+    assert!(overflow.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_path_settings_are_bounded_before_materialization() {
+    let config_dir = Path::new("config");
+    let template_config_dir = Path::new("template");
+    let pattern = "alias/*";
+    let targets = ["src/*", "fallback/*"];
+    let value = serde_json::json!({
+        "compilerOptions": { "paths": { pattern: targets } }
+    });
+    let base_weight = std::mem::size_of::<PathBuf>()
+        + config_dir.as_os_str().as_encoded_bytes().len();
+    let mapping_weight = std::mem::size_of::<Vue3TsconfigPathMapping>()
+        + pattern.len()
+        + config_dir.as_os_str().as_encoded_bytes().len()
+        + template_config_dir.as_os_str().as_encoded_bytes().len();
+    let target_weight = targets
+        .iter()
+        .map(|target| std::mem::size_of::<String>() + target.len())
+        .sum::<usize>();
+    let exact_entries = 1 + 1 + targets.len();
+    let exact_weight = base_weight + mapping_weight + target_weight;
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: exact_entries,
+        max_tsconfig_materialization_weight: exact_weight,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_tsconfig_direct_path_mappings(
+            &value,
+            config_dir,
+            template_config_dir,
+            &accepted,
+        )
+        .len(),
+        1
+    );
+    let accepted_stats = accepted.external_type_session.stats();
+    assert_eq!(
+        accepted_stats.tsconfig_materialization_entries,
+        exact_entries
+    );
+    assert_eq!(
+        accepted_stats.tsconfig_materialization_weight,
+        exact_weight
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let weight_short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: exact_entries,
+        max_tsconfig_materialization_weight: exact_weight - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_direct_path_mappings(
+        &value,
+        config_dir,
+        template_config_dir,
+        &weight_short,
+    )
+    .is_empty());
+    let weight_short_stats = weight_short.external_type_session.stats();
+    assert_eq!(weight_short_stats.tsconfig_materialization_entries, 3);
+    assert_eq!(
+        weight_short_stats.tsconfig_materialization_weight,
+        exact_weight - 1
+    );
+    assert!(weight_short.external_type_session.metadata_is_blocked());
+
+    let entry_short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: exact_entries - 1,
+        max_tsconfig_materialization_weight: exact_weight,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_direct_path_mappings(
+        &value,
+        config_dir,
+        template_config_dir,
+        &entry_short,
+    )
+    .is_empty());
+    assert_eq!(
+        entry_short
+            .external_type_session
+            .stats()
+            .tsconfig_materialization_entries,
+        exact_entries - 1
+    );
+    assert!(entry_short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_global_specs_materialize_transactionally() {
+    let value = serde_json::json!({
+        "files": ["first.d.ts", "second.d.ts"],
+        "compilerOptions": { "types": [] }
+    });
+    let config_dir = Path::new("config");
+    let measuring = Vue3TypeResolverContext::default();
+    assert!(vue3_tsconfig_direct_global_type_files(
+        &value,
+        config_dir,
+        config_dir,
+        &measuring,
+    )
+    .is_empty());
+    let measured = measuring.external_type_session.stats();
+    assert_eq!(measured.tsconfig_materialization_entries, 3);
+    assert!(measured.tsconfig_materialization_weight > 0);
+
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: measured.tsconfig_materialization_entries,
+        max_tsconfig_materialization_weight: measured.tsconfig_materialization_weight,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_direct_global_type_files(
+        &value,
+        config_dir,
+        config_dir,
+        &exact,
+    )
+    .is_empty());
+    assert_eq!(
+        exact.external_type_session.stats().metadata_target_steps,
+        "first.d.ts".len() + "second.d.ts".len()
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_materialization_entries: measured.tsconfig_materialization_entries,
+        max_tsconfig_materialization_weight: measured.tsconfig_materialization_weight - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_direct_global_type_files(
+        &value,
+        config_dir,
+        config_dir,
+        &short,
+    )
+    .is_empty());
+    let short_stats = short.external_type_session.stats();
+    assert_eq!(short_stats.tsconfig_materialization_entries, 2);
+    assert_eq!(short_stats.metadata_target_steps, 0);
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_negative_resolution_cache_does_not_rematerialize_tsconfig_paths() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"paths":{"missing":["missing.ts"]}}}"#,
+    )
+    .expect("write tsconfig");
+    let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+    let resolver = Vue3TypeResolverContext::default();
+
+    assert!(resolve_vue3_type_import(&filename, "missing", &resolver).is_none());
+    let first_stats = resolver.external_type_session.stats();
+    assert!(first_stats.tsconfig_materialization_entries > 0);
+    assert!(first_stats.tsconfig_materialization_weight > 0);
+    assert!(resolve_vue3_type_import(&filename, "missing", &resolver).is_none());
+    let cached_stats = resolver.external_type_session.stats();
+    assert_eq!(
+        cached_stats.tsconfig_materialization_entries,
+        first_stats.tsconfig_materialization_entries
+    );
+    assert_eq!(
+        cached_stats.tsconfig_materialization_weight,
+        first_stats.tsconfig_materialization_weight
+    );
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_metadata_target_steps_are_bounded_and_cached() {
     assert_eq!(
         VUE3_EXTERNAL_TYPE_MAX_METADATA_TARGET_STEPS,

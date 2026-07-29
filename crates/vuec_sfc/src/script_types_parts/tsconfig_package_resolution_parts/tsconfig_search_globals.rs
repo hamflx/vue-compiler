@@ -26,7 +26,11 @@ impl Vue3TsconfigModuleResolutionSettings {
         }
     }
 
-    fn apply_effective_paths_base(&mut self, typescript_version: &nodejs_semver::Version) {
+    fn apply_effective_paths_base(
+        &mut self,
+        typescript_version: &nodejs_semver::Version,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         let target_base_dir = if typescript_version < &(7, 0, 0).into() {
             self.base_url.as_ref()
         } else {
@@ -34,11 +38,23 @@ impl Vue3TsconfigModuleResolutionSettings {
         }
         .or(self.paths_base_dir.as_ref());
         let Some(target_base_dir) = target_base_dir else {
-            return;
+            return true;
         };
         for mapping in self.path_mappings.iter_mut().flatten() {
+            if mapping.target_base_dir == *target_base_dir {
+                continue;
+            }
+            let weight = std::mem::size_of::<PathBuf>()
+                .saturating_add(target_base_dir.as_os_str().as_encoded_bytes().len());
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_materialization(weight)
+            {
+                return false;
+            }
             mapping.target_base_dir.clone_from(target_base_dir);
         }
+        true
     }
 
     fn into_parts(self) -> (Vec<Vue3TsconfigPathMapping>, Option<PathBuf>) {
@@ -170,11 +186,29 @@ pub(crate) struct Vue3TsconfigTypeResolverOptions {
 type Vue3TsconfigGraphStateKey = (PathBuf, PathBuf, PathBuf);
 type Vue3TsconfigTypeRootsOverride = Option<std::sync::Arc<[PathBuf]>>;
 
+fn vue3_materialize_tsconfig_strings<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vec<String>> {
+    let mut materialized = Vec::new();
+    for value in values {
+        let weight = std::mem::size_of::<String>().saturating_add(value.len());
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(weight)
+        {
+            return None;
+        }
+        materialized.push(value.to_string());
+    }
+    Some(materialized)
+}
+
 #[derive(Clone, Debug)]
 struct Vue3TsconfigPathSpecList {
     targets: std::sync::Arc<[String]>,
-    config_dir: PathBuf,
-    template_config_dir: PathBuf,
+    config_dir: std::sync::Arc<PathBuf>,
+    template_config_dir: std::sync::Arc<PathBuf>,
 }
 
 impl Vue3TsconfigPathSpecList {
@@ -182,26 +216,47 @@ impl Vue3TsconfigPathSpecList {
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) -> Self {
-        Self::from_targets(
-            vue3_tsconfig_string_array(Some(value))
-                .map(str::to_string)
-                .collect(),
-            config_dir,
-            template_config_dir,
-        )
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> Option<Self> {
+        let targets = vue3_materialize_tsconfig_strings(
+            vue3_tsconfig_string_array(Some(value)),
+            type_resolver,
+        )?;
+        Self::from_materialized_targets(targets, config_dir, template_config_dir, type_resolver)
     }
 
     fn from_string(
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) -> Self {
-        Self::from_targets(
-            value.as_str().into_iter().map(str::to_string).collect(),
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> Option<Self> {
+        let targets =
+            vue3_materialize_tsconfig_strings(value.as_str(), type_resolver)?;
+        Self::from_materialized_targets(targets, config_dir, template_config_dir, type_resolver)
+    }
+
+    fn from_materialized_targets(
+        targets: Vec<String>,
+        config_dir: &Path,
+        template_config_dir: &Path,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> Option<Self> {
+        let weight = std::mem::size_of::<Self>()
+            .saturating_add(std::mem::size_of::<PathBuf>().saturating_mul(2))
+            .saturating_add(config_dir.as_os_str().as_encoded_bytes().len())
+            .saturating_add(template_config_dir.as_os_str().as_encoded_bytes().len());
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(weight)
+        {
+            return None;
+        }
+        Some(Self::from_targets(
+            targets,
             config_dir,
             template_config_dir,
-        )
+        ))
     }
 
     fn from_targets(
@@ -211,8 +266,8 @@ impl Vue3TsconfigPathSpecList {
     ) -> Self {
         Self {
             targets: std::sync::Arc::from(targets),
-            config_dir: config_dir.to_path_buf(),
-            template_config_dir: template_config_dir.to_path_buf(),
+            config_dir: std::sync::Arc::new(config_dir.to_path_buf()),
+            template_config_dir: std::sync::Arc::new(template_config_dir.to_path_buf()),
         }
     }
 }
@@ -242,28 +297,42 @@ impl Vue3TsconfigFileSpecs {
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) {
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         if let Some(files) = value.get("files") {
-            self.files = Some(Vue3TsconfigPathSpecList::from_array(
+            let Some(files) = Vue3TsconfigPathSpecList::from_array(
                 files,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.files = Some(files);
         }
         if let Some(include) = value.get("include") {
-            self.include = Some(Vue3TsconfigPathSpecList::from_array(
+            let Some(include) = Vue3TsconfigPathSpecList::from_array(
                 include,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.include = Some(include);
         }
         if let Some(exclude) = value.get("exclude") {
-            self.exclude = Some(Vue3TsconfigPathSpecList::from_array(
+            let Some(exclude) = Vue3TsconfigPathSpecList::from_array(
                 exclude,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.exclude = Some(exclude);
         }
+        true
     }
 }
 
@@ -288,27 +357,35 @@ impl Vue3TsconfigGlobalTypePackageSpecs {
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) {
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         let Some(compiler_options) = value
             .get("compilerOptions")
             .and_then(serde_json::Value::as_object)
         else {
-            return;
+            return true;
         };
         if let Some(types) = compiler_options.get("types") {
-            self.types = Some(std::sync::Arc::from(
-                vue3_tsconfig_string_array(Some(types))
-                    .map(str::to_string)
-                    .collect::<Vec<_>>(),
-            ));
+            let Some(types) = vue3_materialize_tsconfig_strings(
+                vue3_tsconfig_string_array(Some(types)),
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.types = Some(std::sync::Arc::from(types));
         }
         if let Some(type_roots) = compiler_options.get("typeRoots") {
-            self.type_roots = Some(Vue3TsconfigPathSpecList::from_array(
+            let Some(type_roots) = Vue3TsconfigPathSpecList::from_array(
                 type_roots,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.type_roots = Some(type_roots);
         }
+        true
     }
 }
 
@@ -333,27 +410,37 @@ impl Vue3TsconfigOutputDirectorySpecs {
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) {
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         let Some(compiler_options) = value
             .get("compilerOptions")
             .and_then(serde_json::Value::as_object)
         else {
-            return;
+            return true;
         };
         if let Some(out_dir) = compiler_options.get("outDir") {
-            self.out_dir = Some(Vue3TsconfigPathSpecList::from_string(
+            let Some(out_dir) = Vue3TsconfigPathSpecList::from_string(
                 out_dir,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.out_dir = Some(out_dir);
         }
         if let Some(declaration_dir) = compiler_options.get("declarationDir") {
-            self.declaration_dir = Some(Vue3TsconfigPathSpecList::from_string(
+            let Some(declaration_dir) = Vue3TsconfigPathSpecList::from_string(
                 declaration_dir,
                 config_dir,
                 template_config_dir,
-            ));
+                type_resolver,
+            ) else {
+                return false;
+            };
+            self.declaration_dir = Some(declaration_dir);
         }
+        true
     }
 }
 
@@ -383,13 +470,22 @@ impl Vue3TsconfigGlobalSpecs {
         value: &serde_json::Value,
         config_dir: &Path,
         template_config_dir: &Path,
-    ) {
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> bool {
         self.file_specs
-            .apply_direct(value, config_dir, template_config_dir);
-        self.type_package_specs
-            .apply_direct(value, config_dir, template_config_dir);
-        self.output_directory_specs
-            .apply_direct(value, config_dir, template_config_dir);
+            .apply_direct(value, config_dir, template_config_dir, type_resolver)
+            && self.type_package_specs.apply_direct(
+                value,
+                config_dir,
+                template_config_dir,
+                type_resolver,
+            )
+            && self.output_directory_specs.apply_direct(
+                value,
+                config_dir,
+                template_config_dir,
+                type_resolver,
+            )
     }
 }
 
@@ -1112,9 +1208,22 @@ fn vue3_tsconfig_module_resolution_from_config(
                 template_config_dir,
                 type_resolver,
             ));
+            if type_resolver.external_type_session.metadata_is_blocked()
+                || !type_resolver
+                    .external_type_session
+                    .claim_tsconfig_materialization(
+                        std::mem::size_of::<PathBuf>().saturating_add(
+                            config_dir.as_os_str().as_encoded_bytes().len(),
+                        ),
+                    )
+            {
+                return Some(Vue3TsconfigModuleResolutionSettings::default());
+            }
             settings.paths_base_dir = Some(config_dir.to_path_buf());
         }
-        settings.apply_effective_paths_base(&type_resolver.typescript_version);
+        if !settings.apply_effective_paths_base(&type_resolver.typescript_version, type_resolver) {
+            return Some(Vue3TsconfigModuleResolutionSettings::default());
+        }
         Some(settings)
     })()
     .unwrap_or_default();
@@ -1396,6 +1505,14 @@ fn vue3_tsconfig_direct_module_suffixes(
         {
             return None;
         }
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(
+                std::mem::size_of::<String>().saturating_add(suffix.len()),
+            )
+        {
+            return None;
+        }
         suffixes.push(suffix.to_string());
     }
     Some(std::sync::Arc::from(suffixes))
@@ -1460,6 +1577,14 @@ fn vue3_tsconfig_direct_custom_conditions(
             return None;
         };
         if !condition.is_empty() {
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_materialization(
+                    std::mem::size_of::<String>().saturating_add(condition.len()),
+                )
+            {
+                return None;
+            }
             conditions.push(condition.to_string());
         }
     }
@@ -1694,7 +1819,14 @@ fn vue3_tsconfig_global_type_files_from_config(
         if type_resolver.external_type_session.metadata_is_blocked() {
             return None;
         }
-        global_specs.apply_direct(&value, config_dir, template_config_dir);
+        if !global_specs.apply_direct(
+            &value,
+            config_dir,
+            template_config_dir,
+            type_resolver,
+        ) {
+            return None;
+        }
         traversal
             .global_specs
             .insert(state_key.clone(), global_specs.clone());
@@ -1835,15 +1967,25 @@ fn vue3_tsconfig_file_spec_global_type_files(
             }
         }
     }
-    let default_include = Vue3TsconfigPathSpecList::from_targets(
-        vec!["**/*".to_string()],
-        config_dir,
-        config_dir,
-    );
-    let include_specs = file_specs
-        .include
-        .as_ref()
-        .or_else(|| file_specs.files.is_none().then_some(&default_include));
+    let default_include = if file_specs.include.is_none() && file_specs.files.is_none() {
+        let Some(targets) =
+            vue3_materialize_tsconfig_strings(["**/*"], type_resolver)
+        else {
+            return Vec::new();
+        };
+        let Some(specs) = Vue3TsconfigPathSpecList::from_materialized_targets(
+            targets,
+            config_dir,
+            config_dir,
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
+        Some(specs)
+    } else {
+        None
+    };
+    let include_specs = file_specs.include.as_ref().or(default_include.as_ref());
     let Some(include_specs) = include_specs else {
         return files;
     };
@@ -1895,7 +2037,9 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     let mut global_specs = Vue3TsconfigGlobalSpecs::default();
-    global_specs.apply_direct(value, config_dir, template_config_dir);
+    if !global_specs.apply_direct(value, config_dir, template_config_dir, type_resolver) {
+        return Vec::new();
+    }
     let mut files = vue3_tsconfig_file_spec_global_type_files(
         &global_specs.file_specs,
         &global_specs.output_directory_specs,

@@ -1655,6 +1655,8 @@ defineProps<Leaf>()
                 metadata_target_steps: 0,
                 metadata_resolution_path_probes: 0,
                 tsconfig_nodes: 0,
+                tsconfig_materialization_entries: 0,
+                tsconfig_materialization_weight: 0,
                 tsconfig_discovery_entries: 0,
                 tsconfig_discovery_files: 0,
                 tsconfig_glob_match_steps: 0,
