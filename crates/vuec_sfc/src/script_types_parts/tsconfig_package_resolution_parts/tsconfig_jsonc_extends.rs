@@ -193,6 +193,12 @@ pub(crate) fn vue3_resolve_tsconfig_extends_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(target.len())
+    {
+        return None;
+    }
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
     if vue3_tsconfig_path_is_relative(&target)
         || vue3_typescript_path_kind(&target) != Vue3TypeScriptPathKind::Relative
@@ -207,6 +213,12 @@ pub(crate) fn vue3_resolve_tsconfig_reference_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(target.len())
+    {
+        return None;
+    }
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
     vue3_resolve_normalized_tsconfig_path(config_dir, &target, type_resolver)
 }
@@ -434,6 +446,12 @@ pub(crate) fn vue3_package_json_tsconfig_entry(
         .tsconfig
         .as_ref()
         .and_then(serde_json::Value::as_str)?;
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(target.len())
+    {
+        return None;
+    }
     let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
     if !vue3_package_tsconfig_target_is_safe(&target) {
         return None;

@@ -42,6 +42,28 @@ enum Vue3PackageImportResolutionLoad<'a> {
     Blocked,
 }
 
+#[derive(Clone, Copy)]
+enum Vue3MetadataStepBudget {
+    Match,
+    Target,
+}
+
+impl Vue3MetadataStepBudget {
+    fn limit(self, limits: &Vue3ExternalTypeLoadLimits) -> usize {
+        match self {
+            Self::Match => limits.max_metadata_match_steps,
+            Self::Target => limits.max_metadata_target_steps,
+        }
+    }
+
+    fn stats_mut(self, stats: &mut Vue3ExternalTypeLoadStats) -> &mut usize {
+        match self {
+            Self::Match => &mut stats.metadata_match_steps,
+            Self::Target => &mut stats.metadata_target_steps,
+        }
+    }
+}
+
 struct Vue3PackageResolutionGuard<'a> {
     session: &'a Vue3ExternalTypeLoadSession,
     owner: std::thread::ThreadId,
@@ -287,25 +309,31 @@ impl Vue3ExternalTypeLoadSession {
         true
     }
 
-    pub(crate) fn claim_metadata_match_steps(&self, steps: usize) -> bool {
+    fn claim_metadata_steps(&self, steps: usize, budget: Vue3MetadataStepBudget) -> bool {
         let steps = steps.max(1);
         let mut state = self.lock();
         if state.metadata_blocked {
             return false;
         }
-        let remaining = state
-            .limits
-            .max_metadata_match_steps
-            .saturating_sub(state.stats.metadata_match_steps);
+        let limit = budget.limit(&state.limits);
+        let remaining = limit.saturating_sub(*budget.stats_mut(&mut state.stats));
         if steps > remaining {
-            state.stats.metadata_match_steps = state.limits.max_metadata_match_steps;
+            *budget.stats_mut(&mut state.stats) = limit;
             let flights = vue3_block_metadata_state(&mut state);
             drop(state);
             vue3_abort_metadata_flights(flights);
             return false;
         }
-        state.stats.metadata_match_steps += steps;
+        *budget.stats_mut(&mut state.stats) += steps;
         true
+    }
+
+    pub(crate) fn claim_metadata_match_steps(&self, steps: usize) -> bool {
+        self.claim_metadata_steps(steps, Vue3MetadataStepBudget::Match)
+    }
+
+    pub(crate) fn claim_metadata_target_steps(&self, steps: usize) -> bool {
+        self.claim_metadata_steps(steps, Vue3MetadataStepBudget::Target)
     }
 
     fn claim_metadata_resolution_path_probe(&self) -> bool {

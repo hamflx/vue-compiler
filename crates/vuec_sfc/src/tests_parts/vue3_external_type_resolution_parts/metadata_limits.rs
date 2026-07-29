@@ -3581,6 +3581,374 @@ fn vue3_metadata_match_step_accounting_does_not_overflow() {
 }
 
 #[test]
+fn vue3_metadata_target_step_accounting_does_not_overflow() {
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: usize::MAX,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(resolver
+        .external_type_session
+        .claim_metadata_target_steps(usize::MAX));
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        usize::MAX
+    );
+    assert!(!resolver
+        .external_type_session
+        .claim_metadata_target_steps(1));
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        usize::MAX
+    );
+    assert!(resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_metadata_target_steps_are_bounded_and_cached() {
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_METADATA_TARGET_STEPS,
+        16 * 1024 * 1024
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("hit.ts");
+    std::fs::write(&target, "export interface TargetProps {}")
+        .expect("write metadata target");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"paths":{"target":["hit.ts"]}}}"#,
+    )
+    .expect("write metadata target tsconfig");
+    let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+    let exact_steps = "hit.ts".len();
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "target", &accepted),
+        Some(target.clone())
+    );
+    let first_stats = accepted.external_type_session.stats();
+    assert_eq!(first_stats.metadata_target_steps, exact_steps);
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "target", &accepted),
+        Some(target)
+    );
+    let cached_stats = accepted.external_type_session.stats();
+    assert_eq!(cached_stats.metadata_target_steps, exact_steps);
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_type_import(&filename, "target", &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_type_import(&filename, "target", &zero).is_none());
+    assert_eq!(zero.external_type_session.stats().metadata_target_steps, 0);
+    assert!(zero.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_package_target_fallback_bytes_are_bounded_before_processing() {
+    let invalid = "x".repeat(4096);
+    let valid = "./valid.d.ts";
+    let targets = serde_json::json!([invalid, valid]);
+    let exact_steps = targets[0].as_str().expect("invalid target").len() + valid.len();
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_package_exports_type_target(&targets, None, &accepted).as_deref(),
+        Some(valid)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_package_exports_type_target(&targets, None, &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_package_root_and_types_versions_targets_share_the_target_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    write_vue3_test_type_package(
+        &package_dir,
+        r#"{
+            "types":"index.d.ts",
+            "typesVersions":{"*":{"index.d.ts":["hit.d.ts"]}}
+        }"#,
+    );
+    let target = package_dir.join("hit.d.ts");
+    std::fs::write(&target, "export interface VersionedTargetProps {}")
+        .expect("write versioned metadata target");
+    let exact_steps = "index.d.ts".len() + "hit.d.ts".len();
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &accepted),
+        Vue3PackageJsonTypeResolution::Resolved(target)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &short),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_package_pattern_expansion_bytes_are_bounded_before_allocation() {
+    let capture = "x".repeat(4096);
+    let target = "./types/*/*";
+    let exports = serde_json::json!({ "./*": target });
+    let exact_steps = target.len() + capture.len() * 2;
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_package_exports_type_target(&exports, Some(&capture), &accepted),
+        Some(format!("./types/{capture}/{capture}"))
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_package_exports_type_target(&exports, Some(&capture), &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_path_capture_bytes_are_bounded_before_allocation() {
+    let capture = "x".repeat(4096);
+    let target = "generated/*.ts";
+    let exact_steps = target.len() + capture.len();
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_tsconfig_path_mapping_target_path(
+            Path::new("base"),
+            Path::new("config"),
+            target,
+            &capture,
+            &accepted,
+        ),
+        Some(Path::new("base").join(format!("generated/{capture}.ts")))
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_path_mapping_target_path(
+        Path::new("base"),
+        Path::new("config"),
+        target,
+        &capture,
+        &short,
+    )
+    .is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_include_config_dir_bytes_are_bounded_before_expansion() {
+    let target = "${configDir}/**/*.d.ts";
+    let template_config_dir = Path::new("config");
+    let exact_steps = target.len()
+        + template_config_dir
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            * 3;
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_tsconfig_include_pattern(
+            Path::new("base"),
+            template_config_dir,
+            target,
+            &accepted,
+        )
+        .as_deref(),
+        Some("base/config/**/*.d.ts")
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_include_pattern(
+        Path::new("base"),
+        template_config_dir,
+        target,
+        &short,
+    )
+    .is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_link_targets_share_the_target_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let extends_target = "./base.json";
+    let reference_target = "./project";
+    let package_target = "configs/base.json";
+    let base = dir.path().join("base.json");
+    std::fs::write(&base, "{}").expect("write extended config");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("create referenced project");
+    std::fs::write(project.join("tsconfig.json"), "{}").expect("write referenced config");
+    let package_dir = dir.path().join("package");
+    let package_config = package_dir.join(package_target);
+    std::fs::create_dir_all(package_config.parent().expect("package config parent"))
+        .expect("create package config directory");
+    std::fs::write(
+        package_dir.join("package.json"),
+        format!(r#"{{"tsconfig":"{package_target}"}}"#),
+    )
+    .expect("write package manifest");
+    std::fs::write(&package_config, "{}").expect("write package config");
+    let exact_steps = extends_target.len() + reference_target.len() + package_target.len();
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_resolve_tsconfig_extends_path(dir.path(), extends_target, &accepted),
+        Some(base)
+    );
+    assert_eq!(
+        vue3_resolve_tsconfig_reference_path(dir.path(), reference_target, &accepted),
+        Some(project.join("tsconfig.json"))
+    );
+    assert_eq!(
+        vue3_package_json_tsconfig_entry(&package_dir, &accepted),
+        Some(package_config)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_target_steps,
+        exact_steps
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_target_steps: exact_steps - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_resolve_tsconfig_extends_path(dir.path(), extends_target, &short).is_some());
+    assert!(vue3_resolve_tsconfig_reference_path(dir.path(), reference_target, &short).is_some());
+    assert!(vue3_package_json_tsconfig_entry(&package_dir, &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_target_steps,
+        exact_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_metadata_resolution_path_probes_are_bounded_before_success() {
     assert_eq!(
         VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES,

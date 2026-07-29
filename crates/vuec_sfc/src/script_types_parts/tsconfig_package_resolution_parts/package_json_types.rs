@@ -566,6 +566,12 @@ fn resolve_vue3_package_json_entry_phase_with_exports(
     };
     let root_target = match root_target {
         Some(target) => {
+            if !type_resolver
+                .external_type_session
+                .claim_metadata_target_steps(target.len())
+            {
+                return Vue3PackageJsonPhaseResolution::Blocked;
+            }
             let Some(target) =
                 vue3_normalize_typescript_path_separators(target, type_resolver)
             else {
@@ -1098,6 +1104,12 @@ fn visit_vue3_package_target(
     visitor: &mut impl FnMut(&str) -> Vue3PackageTargetVisit,
 ) -> Vue3PackageTargetVisit {
     if let Some(target) = target.as_str() {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(target.len())
+        {
+            return Vue3PackageTargetVisit::Blocked;
+        }
         let target = if target.starts_with("./") && target.contains('\\') {
             let Some(target) =
                 vue3_normalize_typescript_path_separators(target, type_resolver)
@@ -1117,6 +1129,25 @@ fn visit_vue3_package_target(
             type_resolver,
         ) {
             return Vue3PackageTargetVisit::Invalid;
+        }
+        let expansion_steps = match expansion {
+            Vue3PackageTargetExpansion::Pattern(capture) => capture.len().saturating_mul(
+                target
+                    .as_bytes()
+                    .iter()
+                    .filter(|byte| **byte == b'*')
+                    .count(),
+            ),
+            Vue3PackageTargetExpansion::Prefix(subpath) if target.ends_with('/') => subpath.len(),
+            Vue3PackageTargetExpansion::Exact
+            | Vue3PackageTargetExpansion::Prefix(_) => 0,
+        };
+        if expansion_steps != 0
+            && !type_resolver
+                .external_type_session
+                .claim_metadata_target_steps(expansion_steps)
+        {
+            return Vue3PackageTargetVisit::Blocked;
         }
         let expanded = match expansion {
             Vue3PackageTargetExpansion::Exact => target.to_string(),
@@ -1652,6 +1683,20 @@ fn vue3_package_types_versions_path(
         if !type_resolver
             .external_type_session
             .claim_metadata_fanout_entry()
+        {
+            return Vue3TypesVersionsResolution::Blocked;
+        }
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(target.len())
+        {
+            return Vue3TypesVersionsResolution::Blocked;
+        }
+        if !capture.is_empty()
+            && target.contains('*')
+            && !type_resolver
+                .external_type_session
+                .claim_metadata_target_steps(capture.len())
         {
             return Vue3TypesVersionsResolution::Blocked;
         }

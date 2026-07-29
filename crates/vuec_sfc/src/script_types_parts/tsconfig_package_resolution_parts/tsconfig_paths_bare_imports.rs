@@ -1,3 +1,5 @@
+const VUE3_TSCONFIG_CONFIG_DIR_TEMPLATE: &str = "${configDir}";
+
 pub(crate) fn vue3_tsconfig_direct_path_mappings(
     value: &serde_json::Value,
     config_dir: &Path,
@@ -228,6 +230,9 @@ pub(crate) fn vue3_tsconfig_target_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if !vue3_claim_tsconfig_target_steps(target, template_config_dir, "", type_resolver) {
+        return None;
+    }
     let target = vue3_tsconfig_expand_config_dir_template(
         target,
         template_config_dir,
@@ -247,15 +252,53 @@ pub(crate) fn vue3_tsconfig_path_mapping_target_path(
     capture: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if !vue3_claim_tsconfig_target_steps(target, template_config_dir, capture, type_resolver) {
+        return None;
+    }
     let target =
         vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
-    let target =
-        vue3_typescript_path_target_substitution(&target, capture, type_resolver)?;
-    vue3_tsconfig_path_from_expanded_target(
-        target_base_dir,
-        &target,
-        type_resolver,
-    )
+    let target = vue3_typescript_path_target_substitution(&target, capture, type_resolver)?;
+    vue3_tsconfig_path_from_expanded_target(target_base_dir, &target, type_resolver)
+}
+
+fn vue3_claim_tsconfig_target_steps(
+    target: &str,
+    template_config_dir: &Path,
+    capture: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(target.len())
+    {
+        return false;
+    }
+    let expands_config_dir = target.starts_with(VUE3_TSCONFIG_CONFIG_DIR_TEMPLATE);
+    let template_config_dir_bytes = template_config_dir.as_os_str().as_encoded_bytes();
+    let config_dir_steps = if expands_config_dir {
+        // Lossy path conversion can expand one encoded byte into one replacement character.
+        template_config_dir_bytes.len().saturating_mul(3)
+    } else {
+        0
+    };
+    if config_dir_steps != 0
+        && !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(config_dir_steps)
+    {
+        return false;
+    }
+    let substitutes_capture = !capture.is_empty()
+        && (target.contains('*')
+            || (expands_config_dir && template_config_dir_bytes.contains(&b'*')));
+    if substitutes_capture
+        && !type_resolver
+            .external_type_session
+            .claim_metadata_target_steps(capture.len())
+    {
+        return false;
+    }
+    true
 }
 
 fn vue3_typescript_path_target_substitution(
@@ -292,9 +335,7 @@ pub(crate) fn vue3_tsconfig_expand_config_dir_template(
     template_config_dir: &Path,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
-    const CONFIG_DIR_TEMPLATE: &str = "${configDir}";
-
-    let Some(suffix) = target.strip_prefix(CONFIG_DIR_TEMPLATE) else {
+    let Some(suffix) = target.strip_prefix(VUE3_TSCONFIG_CONFIG_DIR_TEMPLATE) else {
         return type_resolver
             .external_type_session
             .concat_metadata_path("", target);

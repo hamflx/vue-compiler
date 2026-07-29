@@ -184,7 +184,9 @@ impl Vue3TsconfigPathSpecList {
         template_config_dir: &Path,
     ) -> Self {
         Self::from_targets(
-            vue3_tsconfig_string_array(Some(value)),
+            vue3_tsconfig_string_array(Some(value))
+                .map(str::to_string)
+                .collect(),
             config_dir,
             template_config_dir,
         )
@@ -294,9 +296,11 @@ impl Vue3TsconfigGlobalTypePackageSpecs {
             return;
         };
         if let Some(types) = compiler_options.get("types") {
-            self.types = Some(std::sync::Arc::from(vue3_tsconfig_string_array(Some(
-                types,
-            ))));
+            self.types = Some(std::sync::Arc::from(
+                vue3_tsconfig_string_array(Some(types))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            ));
         }
         if let Some(type_roots) = compiler_options.get("typeRoots") {
             self.type_roots = Some(Vue3TsconfigPathSpecList::from_array(
@@ -784,7 +788,7 @@ fn vue3_tsconfig_type_roots_override_from_config(
                 let path = vue3_tsconfig_target_path(
                     config_dir,
                     template_config_dir,
-                    &target,
+                    target,
                     type_resolver,
                 )?;
                 roots.push(path);
@@ -1913,14 +1917,14 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
     }
 }
 
-pub(crate) fn vue3_tsconfig_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+pub(crate) fn vue3_tsconfig_string_array(
+    value: Option<&serde_json::Value>,
+) -> impl Iterator<Item = &str> {
     value
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
-        .collect()
 }
 
 fn vue3_tsconfig_global_type_package_files(
@@ -2432,9 +2436,7 @@ fn vue3_tsconfig_include_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let target =
-        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
-    vue3_tsconfig_path_from_expanded_target(config_dir, &target, type_resolver)
+    vue3_tsconfig_target_path(config_dir, template_config_dir, target, type_resolver)
 }
 
 struct Vue3TsconfigIncludeGlob {
