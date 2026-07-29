@@ -40,7 +40,9 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
         .iter()
         .map(|(pattern, targets)| Vue3TsconfigPathMapping {
             pattern: pattern.clone(),
-            targets: vue3_tsconfig_path_target_values(targets),
+            targets: vue3_tsconfig_path_target_values(targets)
+                .map(str::to_string)
+                .collect(),
             target_base_dir: target_base_dir.clone(),
             template_config_dir: template_config_dir.to_path_buf(),
         })
@@ -72,16 +74,15 @@ fn vue3_tsconfig_direct_base_url(
     )
 }
 
-pub(crate) fn vue3_tsconfig_path_target_values(value: &serde_json::Value) -> Vec<String> {
-    match value {
-        serde_json::Value::Array(targets) => targets
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        serde_json::Value::String(target) => vec![target.to_string()],
-        _ => Vec::new(),
-    }
+pub(crate) fn vue3_tsconfig_path_target_values(
+    value: &serde_json::Value,
+) -> impl Iterator<Item = &str> {
+    let values = match value {
+        serde_json::Value::Array(targets) => targets.as_slice(),
+        serde_json::Value::String(_) => std::slice::from_ref(value),
+        _ => &[],
+    };
+    values.iter().filter_map(serde_json::Value::as_str)
 }
 
 #[cfg(test)]

@@ -1655,11 +1655,11 @@ fn vue3_package_types_versions_path(
         {
             return Vue3TypesVersionsResolution::Blocked;
         }
-        let try_raw_target = vue3_types_versions_target_has_known_extension(&target)
+        let try_raw_target = vue3_types_versions_target_has_known_extension(target)
             && (!declaration_only
-                || vue3_types_versions_target_has_typescript_extension(&target));
+                || vue3_types_versions_target_has_typescript_extension(target));
         let Some(target) =
-            vue3_typescript_path_target_substitution(&target, &capture, type_resolver)
+            vue3_typescript_path_target_substitution(target, &capture, type_resolver)
         else {
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return Vue3TypesVersionsResolution::Blocked;
