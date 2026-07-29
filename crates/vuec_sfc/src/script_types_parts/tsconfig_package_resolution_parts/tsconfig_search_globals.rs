@@ -2044,20 +2044,29 @@ fn vue3_tsconfig_direct_custom_conditions(
 }
 
 fn vue3_custom_condition_normalization_steps(conditions: &[String]) -> usize {
-    if conditions.len() < 2 {
-        return 0;
-    }
-    // Charge every entry at the widest comparison cost for sorting and deduplication.
-    let comparison_rounds = usize::BITS as usize
-        - (conditions.len() - 1).leading_zeros() as usize;
     let comparison_width = conditions
         .iter()
         .map(|condition| condition.len().max(1))
         .max()
         .unwrap_or(1);
+    vue3_tsconfig_sort_normalization_steps(conditions.len(), comparison_width, 1)
+}
+
+fn vue3_tsconfig_sort_normalization_steps(
+    entry_count: usize,
+    comparison_width: usize,
+    additional_linear_passes: usize,
+) -> usize {
+    if entry_count < 2 {
+        return 0;
+    }
+    // Model each comparison at the widest key and account for caller-specific scans.
+    let comparison_rounds =
+        usize::BITS as usize - (entry_count - 1).leading_zeros() as usize;
     comparison_width
-        .saturating_mul(conditions.len())
-        .saturating_mul(comparison_rounds.saturating_add(1))
+        .max(1)
+        .saturating_mul(entry_count)
+        .saturating_mul(comparison_rounds.saturating_add(additional_linear_passes))
 }
 
 fn vue3_tsconfig_direct_module_kind(
@@ -2798,6 +2807,10 @@ fn vue3_tsconfig_bounded_sorted_dir_entries(
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Some(Vec::new());
     };
+    let max_path_bytes = type_resolver
+        .external_type_session
+        .limits()
+        .max_generated_path_bytes;
     let mut paths = Vec::new();
     for entry in entries {
         if !type_resolver
@@ -2807,11 +2820,184 @@ fn vue3_tsconfig_bounded_sorted_dir_entries(
             return None;
         }
         if let Ok(entry) = entry {
-            paths.push(entry.path());
+            let path_bytes = vue3_tsconfig_directory_entry_path_bytes(dir, &entry.file_name());
+            if path_bytes > max_path_bytes {
+                type_resolver.external_type_session.block_metadata();
+                return None;
+            }
+            let materialization_weight =
+                std::mem::size_of::<PathBuf>().saturating_add(path_bytes);
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_materialization(materialization_weight)
+            {
+                return None;
+            }
+            let path = entry.path();
+            debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
+            paths.push(path);
         }
+    }
+    let normalization_steps = vue3_tsconfig_path_sort_normalization_steps(&paths);
+    if normalization_steps > 0
+        && !type_resolver
+            .external_type_session
+            .claim_tsconfig_normalization_steps(normalization_steps)
+    {
+        return None;
     }
     paths.sort();
     Some(paths)
+}
+
+fn vue3_tsconfig_directory_entry_path_bytes(dir: &Path, name: &std::ffi::OsStr) -> usize {
+    dir.as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .saturating_add(usize::from(!dir.as_os_str().is_empty()))
+        .saturating_add(name.as_encoded_bytes().len())
+}
+
+fn vue3_tsconfig_path_sort_normalization_steps(paths: &[PathBuf]) -> usize {
+    let comparison_width = paths
+        .iter()
+        .map(|path| path.as_os_str().as_encoded_bytes().len().max(1))
+        .max()
+        .unwrap_or(1);
+    vue3_tsconfig_sort_normalization_steps(paths.len(), comparison_width, 0)
+}
+
+#[cfg(test)]
+mod vue3_tsconfig_directory_sort_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn expected_path_weight(dir: &Path, names: &[&str]) -> usize {
+        names.iter().fold(0usize, |weight, name| {
+            weight.saturating_add(
+                std::mem::size_of::<PathBuf>().saturating_add(
+                    vue3_tsconfig_directory_entry_path_bytes(dir, std::ffi::OsStr::new(name)),
+                ),
+            )
+        })
+    }
+
+    #[test]
+    fn directory_paths_and_sorting_claim_exact_budgets_before_work() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let names = ["alpha", "omega"];
+        for name in names {
+            std::fs::write(dir.path().join(name), "").expect("write directory entry");
+        }
+        let expected = names
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect::<Vec<_>>();
+        let path_weight = expected_path_weight(dir.path(), &names);
+        let path_bytes = vue3_tsconfig_directory_entry_path_bytes(
+            dir.path(),
+            std::ffi::OsStr::new(names[0]),
+        );
+        let normalization_steps = vue3_tsconfig_path_sort_normalization_steps(&expected);
+
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: path_bytes,
+            max_tsconfig_discovery_entries: names.len(),
+            max_tsconfig_materialization_entries: names.len(),
+            max_tsconfig_materialization_weight: path_weight,
+            max_tsconfig_normalization_steps: normalization_steps,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_bounded_sorted_dir_entries(dir.path(), &exact),
+            Some(expected.clone())
+        );
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.tsconfig_discovery_entries, names.len());
+        assert_eq!(stats.tsconfig_materialization_entries, names.len());
+        assert_eq!(stats.tsconfig_materialization_weight, path_weight);
+        assert_eq!(stats.tsconfig_normalization_steps, normalization_steps);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short_path = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: path_bytes - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_bounded_sorted_dir_entries(dir.path(), &short_path).is_none());
+        let stats = short_path.external_type_session.stats();
+        assert_eq!(stats.tsconfig_discovery_entries, 1);
+        assert_eq!(stats.tsconfig_materialization_entries, 0);
+        assert_eq!(stats.tsconfig_materialization_weight, 0);
+        assert!(short_path.external_type_session.metadata_is_blocked());
+
+        let short_materialization = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: names.len(),
+            max_tsconfig_materialization_weight: path_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(
+            vue3_tsconfig_bounded_sorted_dir_entries(dir.path(), &short_materialization)
+                .is_none()
+        );
+        assert_eq!(
+            short_materialization
+                .external_type_session
+                .stats()
+                .tsconfig_materialization_weight,
+            path_weight - 1
+        );
+        assert!(short_materialization
+            .external_type_session
+            .metadata_is_blocked());
+
+        let short_normalization = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_normalization_steps: normalization_steps - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(
+            vue3_tsconfig_bounded_sorted_dir_entries(dir.path(), &short_normalization).is_none()
+        );
+        assert_eq!(
+            short_normalization
+                .external_type_session
+                .stats()
+                .tsconfig_normalization_steps,
+            normalization_steps - 1
+        );
+        assert!(short_normalization
+            .external_type_session
+            .metadata_is_blocked());
+    }
+
+    #[test]
+    fn singleton_directory_needs_no_sort_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("only");
+        std::fs::write(&path, "").expect("write directory entry");
+        let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_normalization_steps: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert_eq!(
+            vue3_tsconfig_bounded_sorted_dir_entries(dir.path(), &resolver),
+            Some(vec![path])
+        );
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .tsconfig_normalization_steps,
+            0
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
 }
 
 pub(crate) fn vue3_tsconfig_global_type_file_is_supported(path: &Path) -> bool {
