@@ -1659,6 +1659,7 @@ defineProps<Leaf>()
                 cached_tsconfig_settings_weight: 0,
                 tsconfig_materialization_entries: 0,
                 tsconfig_materialization_weight: 0,
+                tsconfig_normalization_steps: 0,
                 tsconfig_discovery_entries: 0,
                 tsconfig_discovery_files: 0,
                 tsconfig_glob_match_steps: 0,

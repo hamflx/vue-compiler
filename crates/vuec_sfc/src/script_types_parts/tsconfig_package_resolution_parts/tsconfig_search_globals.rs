@@ -2032,7 +2032,32 @@ fn vue3_tsconfig_direct_custom_conditions(
             conditions.push(condition.to_string());
         }
     }
+    let normalization_steps = vue3_custom_condition_normalization_steps(&conditions);
+    if normalization_steps > 0
+        && !type_resolver
+            .external_type_session
+            .claim_tsconfig_normalization_steps(normalization_steps)
+    {
+        return None;
+    }
     Some(Some(Vue3CustomConditionSet::from_strings(conditions)))
+}
+
+fn vue3_custom_condition_normalization_steps(conditions: &[String]) -> usize {
+    if conditions.len() < 2 {
+        return 0;
+    }
+    // Charge every entry at the widest comparison cost for sorting and deduplication.
+    let comparison_rounds = usize::BITS as usize
+        - (conditions.len() - 1).leading_zeros() as usize;
+    let comparison_width = conditions
+        .iter()
+        .map(|condition| condition.len().max(1))
+        .max()
+        .unwrap_or(1);
+    comparison_width
+        .saturating_mul(conditions.len())
+        .saturating_mul(comparison_rounds.saturating_add(1))
 }
 
 fn vue3_tsconfig_direct_module_kind(
@@ -6024,6 +6049,85 @@ mod vue3_module_suffix_config_tests {
                     "TypeScript {version:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn custom_condition_normalization_work_is_bounded() {
+        assert_eq!(
+            VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NORMALIZATION_STEPS,
+            16 * 1024 * 1024
+        );
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = write_config(
+            dir.path(),
+            r#"{
+                "compilerOptions":{
+                    "module":"ESNext",
+                    "moduleResolution":"Bundler",
+                    "customConditions":["alpha","beta","alpha"]
+                }
+            }"#,
+        );
+        let normalization_steps = "alpha".len() * 3 * 3;
+
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_normalization_steps: normalization_steps,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_type_resolver_options(&filename, &exact)
+                .expect("normalize exact custom conditions")
+                .custom_conditions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["alpha".to_string(), "beta".to_string()]
+        );
+        assert_eq!(
+            exact
+                .external_type_session
+                .stats()
+                .tsconfig_normalization_steps,
+            normalization_steps
+        );
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_normalization_steps: normalization_steps - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_type_resolver_options(&filename, &short).is_none());
+        assert_eq!(
+            short
+                .external_type_session
+                .stats()
+                .tsconfig_normalization_steps,
+            normalization_steps - 1
+        );
+        assert!(short.external_type_session.metadata_is_blocked());
+
+        for conditions in ["[]", r#"["single"]"#] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let filename = write_config(
+                dir.path(),
+                &format!(
+                    r#"{{"compilerOptions":{{"module":"ESNext","moduleResolution":"Bundler","customConditions":{conditions}}}}}"#
+                ),
+            );
+            let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+                max_tsconfig_normalization_steps: 0,
+                ..Vue3ExternalTypeLoadLimits::default()
+            });
+            assert!(vue3_tsconfig_type_resolver_options(&filename, &resolver).is_some());
+            assert_eq!(
+                resolver
+                    .external_type_session
+                    .stats()
+                    .tsconfig_normalization_steps,
+                0
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
         }
     }
 

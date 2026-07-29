@@ -482,6 +482,11 @@ impl Vue3CustomConditionSet {
             .is_ok()
     }
 
+    pub(crate) fn lookup_match_steps(&self, condition: &str) -> usize {
+        let comparisons = usize::BITS as usize - self.0.len().leading_zeros() as usize;
+        condition.len().max(1).saturating_mul(comparisons)
+    }
+
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, String> {
         self.0.iter()
     }

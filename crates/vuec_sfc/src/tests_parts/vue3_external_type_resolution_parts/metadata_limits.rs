@@ -3617,6 +3617,97 @@ fn vue3_metadata_match_steps_are_bounded_and_cached() {
 }
 
 #[test]
+fn vue3_custom_condition_lookup_work_is_bounded_and_cached() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package = dir
+        .path()
+        .join("node_modules")
+        .join("condition-budget");
+    std::fs::create_dir_all(&package).expect("create condition package");
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"exports":{".":{"worker":"./hit.d.ts"}}}"#,
+    )
+    .expect("write condition manifest");
+    let target = package.join("hit.d.ts");
+    std::fs::write(&target, "export interface ConditionBudgetProps {}")
+        .expect("write condition target");
+    let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
+    let resolver = |limits, conditions: &[&str]| {
+        let mut resolver = vue3_type_resolver_with_external_limits(limits);
+        resolver.module_resolution = Vue3TypeModuleResolutionKind::Bundler;
+        resolver.module = Some(Vue3TypeModuleKind::EcmaScript);
+        resolver.custom_conditions = Vue3CustomConditionSet::from_strings(
+            conditions
+                .iter()
+                .map(|condition| (*condition).to_string())
+                .collect(),
+        );
+        resolver
+    };
+
+    let one = resolver(Vue3ExternalTypeLoadLimits::default(), &["worker"]);
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "condition-budget", &one),
+        Some(target.clone())
+    );
+    let one_steps = one.external_type_session.stats().metadata_match_steps;
+    let conditions = ["alpha", "browser", "worker", "zeta"];
+    let measuring = resolver(Vue3ExternalTypeLoadLimits::default(), &conditions);
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "condition-budget", &measuring),
+        Some(target.clone())
+    );
+    let measured_steps = measuring
+        .external_type_session
+        .stats()
+        .metadata_match_steps;
+    assert_eq!(
+        measured_steps - one_steps,
+        "worker".len() * 2,
+        "four sorted conditions require two more binary-search comparisons"
+    );
+
+    let exact = resolver(
+        Vue3ExternalTypeLoadLimits {
+            max_metadata_match_steps: measured_steps,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+        &conditions,
+    );
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "condition-budget", &exact),
+        Some(target.clone())
+    );
+    assert_eq!(
+        exact.external_type_session.stats().metadata_match_steps,
+        measured_steps
+    );
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "condition-budget", &exact),
+        Some(target)
+    );
+    let cached_stats = exact.external_type_session.stats();
+    assert_eq!(cached_stats.metadata_match_steps, measured_steps);
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    let short = resolver(
+        Vue3ExternalTypeLoadLimits {
+            max_metadata_match_steps: measured_steps - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+        &conditions,
+    );
+    assert!(resolve_vue3_type_import(&importer, "condition-budget", &short).is_none());
+    assert_eq!(
+        short.external_type_session.stats().metadata_match_steps,
+        measured_steps - 1
+    );
+    assert!(short.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_metadata_match_step_semantic_miss_does_not_block() {
     let source = "missing";
     let pattern = "known";
@@ -3691,6 +3782,36 @@ fn vue3_metadata_target_step_accounting_does_not_overflow() {
             .external_type_session
             .stats()
             .metadata_target_steps,
+        usize::MAX
+    );
+    assert!(resolver.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_tsconfig_normalization_step_accounting_does_not_overflow() {
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_normalization_steps: usize::MAX,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(resolver
+        .external_type_session
+        .claim_tsconfig_normalization_steps(usize::MAX));
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .tsconfig_normalization_steps,
+        usize::MAX
+    );
+    assert!(!resolver
+        .external_type_session
+        .claim_tsconfig_normalization_steps(1));
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .tsconfig_normalization_steps,
         usize::MAX
     );
     assert!(resolver.external_type_session.metadata_is_blocked());

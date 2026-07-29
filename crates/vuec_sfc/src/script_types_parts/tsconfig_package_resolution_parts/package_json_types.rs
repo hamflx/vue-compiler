@@ -1255,6 +1255,22 @@ fn visit_vue3_package_target(
         {
             return Vue3PackageTargetVisit::Blocked;
         }
+        if !vue3_package_export_builtin_condition_is_active(
+            condition,
+            resolution_mode,
+            type_resolver,
+        ) {
+            let custom_condition_steps = type_resolver
+                .custom_conditions
+                .lookup_match_steps(condition);
+            if custom_condition_steps > 0
+                && !type_resolver
+                    .external_type_session
+                    .claim_metadata_match_steps(custom_condition_steps)
+            {
+                return Vue3PackageTargetVisit::Blocked;
+            }
+        }
     }
     for (condition, target) in conditions {
         if !vue3_package_export_condition_is_active(
@@ -1442,6 +1458,24 @@ fn vue3_package_export_condition_is_active(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> bool {
+    vue3_package_export_builtin_condition_is_active(
+        condition,
+        resolution_mode,
+        type_resolver,
+    ) || type_resolver.custom_conditions.contains(condition)
+        || condition.strip_prefix("types@").is_some_and(|selector| {
+            vue3_package_types_version_selector_matches_version(
+                selector,
+                &type_resolver.typescript_version,
+            )
+        })
+}
+
+fn vue3_package_export_builtin_condition_is_active(
+    condition: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> bool {
     condition == "types"
         || (condition == "node"
             && type_resolver.module_resolution != Vue3TypeModuleResolutionKind::Bundler)
@@ -1451,13 +1485,6 @@ fn vue3_package_export_condition_is_active(
             ("import", Vue3TypeResolutionMode::Import)
                 | ("require", Vue3TypeResolutionMode::Require)
         )
-        || type_resolver.custom_conditions.contains(condition)
-        || condition.strip_prefix("types@").is_some_and(|selector| {
-            vue3_package_types_version_selector_matches_version(
-                selector,
-                &type_resolver.typescript_version,
-            )
-        })
 }
 
 pub(crate) fn vue3_package_export_pattern_capture<'a>(

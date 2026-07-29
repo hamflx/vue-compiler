@@ -46,6 +46,7 @@ enum Vue3PackageImportResolutionLoad<'a> {
 enum Vue3MetadataStepBudget {
     Match,
     Target,
+    TsconfigNormalization,
 }
 
 impl Vue3MetadataStepBudget {
@@ -53,6 +54,7 @@ impl Vue3MetadataStepBudget {
         match self {
             Self::Match => limits.max_metadata_match_steps,
             Self::Target => limits.max_metadata_target_steps,
+            Self::TsconfigNormalization => limits.max_tsconfig_normalization_steps,
         }
     }
 
@@ -60,6 +62,7 @@ impl Vue3MetadataStepBudget {
         match self {
             Self::Match => &mut stats.metadata_match_steps,
             Self::Target => &mut stats.metadata_target_steps,
+            Self::TsconfigNormalization => &mut stats.tsconfig_normalization_steps,
         }
     }
 }
@@ -361,6 +364,10 @@ impl Vue3ExternalTypeLoadSession {
 
     pub(crate) fn claim_metadata_target_steps(&self, steps: usize) -> bool {
         self.claim_metadata_steps(steps, Vue3MetadataStepBudget::Target)
+    }
+
+    pub(crate) fn claim_tsconfig_normalization_steps(&self, steps: usize) -> bool {
+        self.claim_metadata_steps(steps, Vue3MetadataStepBudget::TsconfigNormalization)
     }
 
     fn claim_metadata_resolution_path_probe(&self) -> bool {
