@@ -1,8 +1,8 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue3TsconfigEmitPathOptions {
-    root_dir: Option<PathBuf>,
-    out_dir: Option<PathBuf>,
-    declaration_dir: Option<PathBuf>,
+    root_dir: Option<std::sync::Arc<PathBuf>>,
+    out_dir: Option<std::sync::Arc<PathBuf>>,
+    declaration_dir: Option<std::sync::Arc<PathBuf>>,
     composite: Option<bool>,
 }
 
@@ -165,16 +165,17 @@ fn vue3_tsconfig_compiler_option_path(
     template_config_dir: &Path,
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<PathBuf> {
+) -> Option<std::sync::Arc<PathBuf>> {
     if target.is_empty() {
         return None;
     }
-    vue3_tsconfig_target_path(
+    vue3_materialized_tsconfig_target_path(
         config_dir,
         template_config_dir,
         target,
         type_resolver,
     )
+    .map(std::sync::Arc::new)
 }
 
 fn resolve_vue3_project_package_input_target_with_mode(
@@ -619,6 +620,211 @@ fn vue3_materialized_project_package_input_candidate(
     Some(candidate)
 }
 
+#[cfg(test)]
+mod tsconfig_emit_path_option_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn emit_path_value() -> serde_json::Value {
+        serde_json::json!({
+            "compilerOptions": {
+                "rootDir": "./source",
+                "outDir": "./dist",
+                "declarationDir": "./declarations"
+            }
+        })
+    }
+
+    const EMIT_PATH_TARGETS: [&str; 3] = ["./source", "./dist", "./declarations"];
+
+    fn expected_emit_paths(config_dir: &Path) -> [PathBuf; 3] {
+        [
+            config_dir.join("source"),
+            config_dir.join("dist"),
+            config_dir.join("declarations"),
+        ]
+        .map(normalize_path_components)
+    }
+
+    fn materialization_weight(config_dir: &Path, targets: &[&str]) -> usize {
+        targets.iter().fold(0usize, |weight, target| {
+            let path_bytes = vue3_typescript_path_materialization_bytes(config_dir, target)
+                .expect("supported emit path");
+            weight.saturating_add(
+                std::mem::size_of::<PathBuf>().saturating_add(path_bytes),
+            )
+        })
+    }
+
+    #[test]
+    fn direct_emit_paths_honor_exact_materialization_boundaries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = expected_emit_paths(dir.path());
+        let exact_weight = materialization_weight(dir.path(), &EMIT_PATH_TARGETS);
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: paths.len(),
+            max_tsconfig_materialization_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        let options = vue3_tsconfig_direct_emit_path_options(
+            &emit_path_value(),
+            dir.path(),
+            dir.path(),
+            &exact,
+        )
+        .expect("materialize exact emit paths");
+        assert_eq!(options.root_dir.as_deref(), Some(&paths[0]));
+        assert_eq!(options.out_dir.as_deref(), Some(&paths[1]));
+        assert_eq!(options.declaration_dir.as_deref(), Some(&paths[2]));
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.tsconfig_materialization_entries, paths.len());
+        assert_eq!(stats.tsconfig_materialization_weight, exact_weight);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short_entries = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: paths.len() - 1,
+            max_tsconfig_materialization_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_direct_emit_path_options(
+            &emit_path_value(),
+            dir.path(),
+            dir.path(),
+            &short_entries,
+        )
+        .is_none());
+        let stats = short_entries.external_type_session.stats();
+        assert_eq!(stats.tsconfig_materialization_entries, paths.len() - 1);
+        assert_eq!(
+            stats.tsconfig_materialization_weight,
+            materialization_weight(
+                dir.path(),
+                &EMIT_PATH_TARGETS[..EMIT_PATH_TARGETS.len() - 1],
+            )
+        );
+        assert!(short_entries
+            .external_type_session
+            .metadata_is_blocked());
+
+        let short_weight = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: paths.len(),
+            max_tsconfig_materialization_weight: exact_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_tsconfig_direct_emit_path_options(
+            &emit_path_value(),
+            dir.path(),
+            dir.path(),
+            &short_weight,
+        )
+        .is_none());
+        let stats = short_weight.external_type_session.stats();
+        assert_eq!(stats.tsconfig_materialization_entries, paths.len() - 1);
+        assert_eq!(stats.tsconfig_materialization_weight, exact_weight - 1);
+        assert!(short_weight.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn failed_emit_path_materialization_does_not_publish_partial_options() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("tsconfig.json");
+        std::fs::write(&config_path, emit_path_value().to_string())
+            .expect("write emit path config");
+        let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let mut traversal = Vue3TsconfigEmitPathTraversal::default();
+
+        assert!(vue3_tsconfig_emit_path_options_from_config(
+            &config_path,
+            dir.path(),
+            &mut traversal,
+            0,
+            &resolver,
+        )
+        .is_none());
+        assert!(traversal.cached_options.is_empty());
+        assert_eq!(
+            resolver
+                .external_type_session
+                .stats()
+                .tsconfig_materialization_entries,
+            2
+        );
+        assert!(resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn diamond_extends_share_emit_path_payloads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = dir.path().join("base.json");
+        let left = dir.path().join("left.json");
+        let right = dir.path().join("right.json");
+        let root = dir.path().join("tsconfig.json");
+        std::fs::write(&base, emit_path_value().to_string()).expect("write base config");
+        std::fs::write(&left, r#"{"extends":"./base.json"}"#)
+            .expect("write left config");
+        std::fs::write(&right, r#"{"extends":"./base.json"}"#)
+            .expect("write right config");
+        std::fs::write(
+            &root,
+            r#"{"extends":["./left.json","./right.json"]}"#,
+        )
+        .expect("write root config");
+        let resolver = Vue3TypeResolverContext::default();
+        let mut traversal = Vue3TsconfigEmitPathTraversal::default();
+
+        let options = vue3_tsconfig_emit_path_options_from_config(
+            &root,
+            dir.path(),
+            &mut traversal,
+            0,
+            &resolver,
+        )
+        .expect("resolve diamond emit paths");
+        let base_options = traversal
+            .cached_options
+            .get(&vue3_tsconfig_graph_state_key(&base, dir.path()))
+            .expect("cached base options");
+        for (effective, declared) in [
+            (&options.root_dir, &base_options.root_dir),
+            (&options.out_dir, &base_options.out_dir),
+            (&options.declaration_dir, &base_options.declaration_dir),
+        ] {
+            assert!(std::sync::Arc::ptr_eq(
+                effective.as_ref().expect("effective emit path"),
+                declared.as_ref().expect("declared emit path"),
+            ));
+        }
+        let first_stats = resolver.external_type_session.stats();
+        assert_eq!(first_stats.tsconfig_materialization_entries, 3);
+        assert_eq!(traversal.cached_options.len(), 4);
+
+        let cached = vue3_tsconfig_emit_path_options_from_config(
+            &root,
+            dir.path(),
+            &mut traversal,
+            0,
+            &resolver,
+        )
+        .expect("reuse cached diamond emit paths");
+        assert!(std::sync::Arc::ptr_eq(
+            options.root_dir.as_ref().expect("resolved rootDir"),
+            cached.root_dir.as_ref().expect("cached rootDir"),
+        ));
+        assert_eq!(resolver.external_type_session.stats(), first_stats);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+}
+
 fn vue3_project_package_input_candidate(
     output_path: &Path,
     stem: &str,
@@ -663,8 +869,8 @@ mod project_package_input_target_tests {
             "./dist/leaf.js",
             &package_dir.join("tsconfig.json"),
             &Vue3TsconfigEmitPathOptions {
-                root_dir: Some(source_dir),
-                out_dir: Some(output_dir),
+                root_dir: Some(source_dir.into()),
+                out_dir: Some(output_dir.into()),
                 declaration_dir: None,
                 composite: None,
             },
@@ -787,8 +993,8 @@ mod project_package_input_target_tests {
         let importer = source_root.join("Comp.vue");
         let config_path = package_dir.join("tsconfig.json");
         let options = Vue3TsconfigEmitPathOptions {
-            root_dir: Some(source_root.clone()),
-            out_dir: Some(output_dir.clone()),
+            root_dir: Some(source_root.clone().into()),
+            out_dir: Some(output_dir.clone().into()),
             declaration_dir: None,
             composite: None,
         };
@@ -861,8 +1067,8 @@ mod project_package_input_target_tests {
         let importer = source_root.join("Comp.vue");
         let config_path = package_dir.join("tsconfig.json");
         let options = Vue3TsconfigEmitPathOptions {
-            root_dir: Some(source_root.clone()),
-            out_dir: Some(output_dir.clone()),
+            root_dir: Some(source_root.clone().into()),
+            out_dir: Some(output_dir.clone().into()),
             declaration_dir: None,
             composite: None,
         };
@@ -1083,7 +1289,7 @@ mod project_package_input_target_tests {
         let target = format!("./dist/{stem}.js");
         let options = Vue3TsconfigEmitPathOptions {
             root_dir: None,
-            out_dir: Some(output_dir),
+            out_dir: Some(output_dir.into()),
             declaration_dir: None,
             composite: None,
         };
@@ -1148,8 +1354,8 @@ mod project_package_input_target_tests {
         let importer = source_dir.join("Comp.vue");
         let config_path = package_dir.join("tsconfig.json");
         let options = Vue3TsconfigEmitPathOptions {
-            root_dir: Some(source_dir),
-            out_dir: Some(output_dir),
+            root_dir: Some(source_dir.into()),
+            out_dir: Some(output_dir.into()),
             declaration_dir: None,
             composite: None,
         };
@@ -1200,8 +1406,8 @@ mod project_package_input_target_tests {
         let options = (
             package_dir.join("tsconfig.json"),
             Vue3TsconfigEmitPathOptions {
-                root_dir: Some(source_dir),
-                out_dir: Some(output_dir),
+                root_dir: Some(source_dir.into()),
+                out_dir: Some(output_dir.into()),
                 declaration_dir: None,
                 composite: None,
             },
