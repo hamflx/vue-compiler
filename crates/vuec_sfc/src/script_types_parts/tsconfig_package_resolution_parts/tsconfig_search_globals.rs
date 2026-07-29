@@ -2912,17 +2912,12 @@ fn vue3_tsconfig_file_spec_global_type_files(
         };
         excludes
     };
-    let exclude_matchers = excludes
-        .patterns
-        .iter()
-        .map(|pattern| Vue3CompiledTsconfigGlob::new(pattern))
-        .collect::<Vec<_>>();
     for target in include_specs.targets.iter() {
         files.extend(vue3_tsconfig_include_global_type_files_with_excludes(
             &include_specs.config_dir,
             &include_specs.template_config_dir,
             target,
-            &exclude_matchers,
+            &excludes.patterns,
             &excludes.directory_keys,
             type_resolver,
         ));
@@ -3533,7 +3528,7 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
-    exclude_matchers: &[Vue3CompiledTsconfigGlob<'_>],
+    exclude_patterns: &[String],
     excluded_directory_keys: &[PathBuf],
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
@@ -3566,7 +3561,7 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
             return vue3_tsconfig_filter_global_type_files(
                 vec![path],
                 None,
-                exclude_matchers,
+                exclude_patterns,
                 type_resolver,
             );
         }
@@ -3581,7 +3576,7 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
             return vue3_tsconfig_filter_global_type_files(
                 files,
                 None,
-                exclude_matchers,
+                exclude_patterns,
                 type_resolver,
             );
         }
@@ -3602,22 +3597,21 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vec::new();
     }
-    let matcher = Vue3CompiledTsconfigGlob::new(&glob.pattern);
     vue3_tsconfig_filter_global_type_files(
         files,
-        Some(&matcher),
-        exclude_matchers,
+        Some(&glob.pattern),
+        exclude_patterns,
         type_resolver,
     )
 }
 
 fn vue3_tsconfig_filter_global_type_files(
     files: Vec<PathBuf>,
-    include_matcher: Option<&Vue3CompiledTsconfigGlob<'_>>,
-    exclude_matchers: &[Vue3CompiledTsconfigGlob<'_>],
+    include_pattern: Option<&str>,
+    exclude_patterns: &[String],
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
-    if include_matcher.is_none() && exclude_matchers.is_empty() {
+    if include_pattern.is_none() && exclude_patterns.is_empty() {
         return files;
     }
     let mut normalized_paths = Vec::new();
@@ -3633,7 +3627,8 @@ fn vue3_tsconfig_filter_global_type_files(
         .tsconfig_glob_match_budget();
     let mut matched = Vec::new();
     for (file, path) in files.into_iter().zip(normalized_paths) {
-        if let Some(matcher) = include_matcher {
+        if let Some(pattern) = include_pattern {
+            let matcher = Vue3TsconfigGlobMatcher::new(pattern);
             match matcher.matches(&path, &mut || budget.claim_step()) {
                 Some(true) => {}
                 Some(false) => continue,
@@ -3641,7 +3636,8 @@ fn vue3_tsconfig_filter_global_type_files(
             }
         }
         let mut excluded = false;
-        for matcher in exclude_matchers {
+        for pattern in exclude_patterns {
+            let matcher = Vue3TsconfigGlobMatcher::new(pattern);
             match matcher.matches(&path, &mut || budget.claim_step()) {
                 Some(true) => {
                     excluded = true;
@@ -4003,12 +3999,10 @@ mod vue3_tsconfig_discovery_target_materialization_tests {
             .iter()
             .map(|path| normalized_string_weight(path, ""))
             .sum();
-        let matcher = Vue3CompiledTsconfigGlob::new("**/*.d.ts");
-
         assert_materialization_boundaries(candidates.len(), weight, 0, 0, |resolver| {
             vue3_tsconfig_filter_global_type_files(
                 candidates.to_vec(),
-                Some(&matcher),
+                Some("**/*.d.ts"),
                 &[],
                 resolver,
             ) == candidates
@@ -4246,24 +4240,20 @@ fn vue3_tsconfig_directory_is_implicitly_excluded(name: &str) -> bool {
             })
 }
 
-struct Vue3CompiledTsconfigGlob<'a> {
-    parts: Vec<&'a str>,
+#[derive(Clone, Copy)]
+struct Vue3TsconfigGlobMatcher<'a> {
+    pattern: &'a str,
 }
 
-impl<'a> Vue3CompiledTsconfigGlob<'a> {
-    fn new(pattern: &'a str) -> Self {
-        Self::from_parts(pattern.split('/'))
-    }
+#[derive(Clone, Copy)]
+struct Vue3TsconfigGlobBacktrack {
+    pattern_cursor: Option<usize>,
+    path_cursor: Option<usize>,
+}
 
-    fn from_parts(parts: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut compiled = Vec::new();
-        for part in parts {
-            if part == "**" && compiled.last().copied() == Some("**") {
-                continue;
-            }
-            compiled.push(part);
-        }
-        Self { parts: compiled }
+impl<'a> Vue3TsconfigGlobMatcher<'a> {
+    fn new(pattern: &'a str) -> Self {
+        Self { pattern }
     }
 
     fn matches(
@@ -4271,63 +4261,90 @@ impl<'a> Vue3CompiledTsconfigGlob<'a> {
         path: &str,
         claim_step: &mut impl FnMut() -> bool,
     ) -> Option<bool> {
-        let path_parts = path.split('/').collect::<Vec<_>>();
-        self.matches_parts(&path_parts, claim_step)
-    }
-
-    fn matches_parts(
-        &self,
-        path: &[&str],
-        claim_step: &mut impl FnMut() -> bool,
-    ) -> Option<bool> {
         if !claim_step() {
             return None;
         }
-        let mut pattern_index = 0;
-        let mut path_index = 0;
-        let mut double_star_pattern_index = None;
-        let mut double_star_path_index = 0;
-        while path_index < path.len() {
+        let mut pattern_cursor = Some(0);
+        let mut path_cursor = Some(0);
+        let mut double_star = None;
+        while let Some((path_segment, next_path_cursor)) =
+            vue3_tsconfig_glob_next_segment(path, path_cursor, claim_step)?
+        {
             if !claim_step() {
                 return None;
             }
-            if self.parts.get(pattern_index).copied() == Some("**") {
-                double_star_pattern_index = Some(pattern_index);
-                double_star_path_index = path_index;
-                pattern_index += 1;
+            let pattern_segment =
+                vue3_tsconfig_glob_next_segment(self.pattern, pattern_cursor, claim_step)?;
+            if let Some(("**", next_pattern_cursor)) = pattern_segment {
+                double_star = Some(Vue3TsconfigGlobBacktrack {
+                    pattern_cursor: next_pattern_cursor,
+                    path_cursor,
+                });
+                pattern_cursor = next_pattern_cursor;
                 continue;
             }
-            let segment_matches = match self.parts.get(pattern_index) {
-                Some(pattern) => vue3_tsconfig_glob_segment_match_bounded(
+            if let Some((pattern, next_pattern_cursor)) = pattern_segment {
+                if vue3_tsconfig_glob_segment_match_bounded(
                     pattern,
-                    path[path_index],
+                    path_segment,
                     claim_step,
-                )?,
-                None => false,
-            };
-            if segment_matches {
-                pattern_index += 1;
-                path_index += 1;
-                continue;
+                )? {
+                    pattern_cursor = next_pattern_cursor;
+                    path_cursor = next_path_cursor;
+                    continue;
+                }
             }
-            let Some(double_star_index) = double_star_pattern_index else {
+            let Some(backtrack) = double_star.as_mut() else {
                 return Some(false);
             };
             if !claim_step() {
                 return None;
             }
-            double_star_path_index += 1;
-            path_index = double_star_path_index;
-            pattern_index = double_star_index + 1;
+            let Some((_, next_backtrack_path_cursor)) =
+                vue3_tsconfig_glob_next_segment(path, backtrack.path_cursor, claim_step)?
+            else {
+                return Some(false);
+            };
+            backtrack.path_cursor = next_backtrack_path_cursor;
+            path_cursor = next_backtrack_path_cursor;
+            pattern_cursor = backtrack.pattern_cursor;
         }
-        while self.parts.get(pattern_index).copied() == Some("**") {
-            if !claim_step() {
-                return None;
+        loop {
+            match vue3_tsconfig_glob_next_segment(self.pattern, pattern_cursor, claim_step)? {
+                Some(("**", next_pattern_cursor)) => {
+                    if !claim_step() {
+                        return None;
+                    }
+                    pattern_cursor = next_pattern_cursor;
+                }
+                Some(_) => return Some(false),
+                None => return Some(true),
             }
-            pattern_index += 1;
         }
-        Some(pattern_index == self.parts.len())
     }
+}
+
+fn vue3_tsconfig_glob_next_segment<'a>(
+    value: &'a str,
+    cursor: Option<usize>,
+    claim_step: &mut impl FnMut() -> bool,
+) -> Option<Option<(&'a str, Option<usize>)>> {
+    let Some(start) = cursor else {
+        return Some(None);
+    };
+    debug_assert!(start <= value.len());
+    let bytes = value.as_bytes();
+    let mut end = start;
+    while end < bytes.len() {
+        if !claim_step() {
+            return None;
+        }
+        if bytes[end] == b'/' {
+            return Some(Some((&value[start..end], Some(end + 1))));
+        }
+        end += 1;
+    }
+    Some(Some((&value[start..], None)))
 }
 
 #[cfg(test)]
@@ -4342,7 +4359,7 @@ pub(crate) fn vue3_tsconfig_glob_matches(pattern: &str, path: &str) -> bool {
     } else {
         std::borrow::Cow::Borrowed(path)
     };
-    Vue3CompiledTsconfigGlob::new(&pattern)
+    Vue3TsconfigGlobMatcher::new(&pattern)
         .matches(&path, &mut || true)
         .unwrap_or(false)
 }
@@ -4355,7 +4372,7 @@ pub(crate) fn vue3_tsconfig_glob_matches_with_session(
 ) -> Option<bool> {
     let pattern = pattern.replace('\\', "/");
     let path = path.replace('\\', "/");
-    let matcher = Vue3CompiledTsconfigGlob::new(&pattern);
+    let matcher = Vue3TsconfigGlobMatcher::new(&pattern);
     let mut budget = session.tsconfig_glob_match_budget();
     let result = matcher.matches(&path, &mut || budget.claim_step());
     if budget.finish() {
@@ -4367,8 +4384,16 @@ pub(crate) fn vue3_tsconfig_glob_matches_with_session(
 
 #[cfg(test)]
 pub(crate) fn vue3_tsconfig_glob_parts_match(pattern: &[&str], path: &[&str]) -> bool {
-    Vue3CompiledTsconfigGlob::from_parts(pattern.iter().copied())
-        .matches_parts(path, &mut || true)
+    if path.is_empty() {
+        return pattern.iter().all(|part| *part == "**");
+    }
+    if pattern.is_empty() {
+        return false;
+    }
+    let pattern = pattern.join("/");
+    let path = path.join("/");
+    Vue3TsconfigGlobMatcher::new(&pattern)
+        .matches(&path, &mut || true)
         .unwrap_or(false)
 }
 

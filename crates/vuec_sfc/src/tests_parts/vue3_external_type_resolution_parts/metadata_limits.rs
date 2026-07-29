@@ -398,6 +398,34 @@ fn vue3_adversarial_include_globs_stop_at_the_work_limit() {
     );
     assert!(resolver.external_type_session.metadata_is_blocked());
 
+    let repeated_double_star = "**/".repeat(max_path_bytes / 3);
+    for (pattern, path) in [
+        (format!("{}x", "a".repeat(max_path_bytes - 1)), "z".to_string()),
+        ("z".to_string(), "a".repeat(max_path_bytes)),
+        (repeated_double_star, "target".to_string()),
+    ] {
+        let bounded = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_glob_match_steps: 1_000,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_glob_matches_with_session(
+                &pattern,
+                &path,
+                &bounded.external_type_session,
+            ),
+            None
+        );
+        assert_eq!(
+            bounded
+                .external_type_session
+                .stats()
+                .tsconfig_glob_match_steps,
+            1_000
+        );
+        assert!(bounded.external_type_session.metadata_is_blocked());
+    }
+
     let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
         max_tsconfig_glob_match_steps: 0,
         ..Vue3ExternalTypeLoadLimits::default()

@@ -1149,6 +1149,22 @@ defineProps<
             "src/*/global-?.d.ts",
             "src/nested/deep/global-a.d.ts"
         ));
+        for (pattern, path, expected) in [
+            ("", "", true),
+            ("/", "/", true),
+            ("a//b", "a//b", true),
+            ("a/*/b", "a//b", true),
+            ("a/?/b", "a//b", false),
+            ("**/", "a/", true),
+            ("**/", "a", false),
+            ("**/a/b", "x/a/x/a/b", true),
+        ] {
+            assert_eq!(
+                vue3_tsconfig_glob_matches(pattern, path),
+                expected,
+                "raw pattern={pattern:?}, path={path:?}"
+            );
+        }
     }
 
     #[test]
