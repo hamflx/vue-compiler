@@ -240,14 +240,11 @@ fn resolve_vue3_project_package_input_target_with_pass(
         return None;
     }
     let relative_target = target.strip_prefix("./")?;
-    let final_path = normalize_path_components(package_dir.join(relative_target));
-    let final_path_text = normalize_path_string(&final_path);
-    if !type_resolver
-        .external_type_session
-        .metadata_path_is_within_limit(&final_path_text)
-    {
-        return None;
-    }
+    let final_path = vue3_materialized_project_package_path(
+        package_dir,
+        Path::new(relative_target),
+        type_resolver,
+    )?;
     let source_roots = vue3_project_package_source_root_guesses(
         importer,
         package_dir,
@@ -266,15 +263,31 @@ fn resolve_vue3_project_package_input_target_with_pass(
     }
     for source_root in source_roots {
         for output_dir in output_dirs.iter().copied() {
-            let Some(path_fragment) = vue3_path_relative_to(&final_path, output_dir) else {
-                continue;
+            let path_fragment = match vue3_path_relative_to(
+                &final_path,
+                output_dir,
+                type_resolver,
+            ) {
+                Some(path_fragment) => path_fragment,
+                None if type_resolver.external_type_session.metadata_is_blocked() => return None,
+                None => continue,
             };
             if path_fragment.as_os_str().is_empty() {
                 continue;
             }
-            let possible_input = normalize_path_components(source_root.join(path_fragment));
-            for candidate in vue3_possible_project_input_paths(&possible_input) {
-                let Some(candidate_phase) = vue3_project_package_input_candidate_phase(&candidate)
+            let possible_input = vue3_materialized_project_package_path(
+                &source_root,
+                &path_fragment,
+                type_resolver,
+            )?;
+            let Some((stem, input_extensions)) =
+                vue3_possible_project_input_path_parts(&possible_input)
+            else {
+                continue;
+            };
+            for extension in input_extensions {
+                let Some(candidate_phase) =
+                    vue3_project_package_input_extension_phase(extension)
                 else {
                     continue;
                 };
@@ -282,6 +295,12 @@ fn resolve_vue3_project_package_input_target_with_pass(
                 {
                     continue;
                 }
+                let candidate = vue3_materialized_project_package_input_candidate(
+                    &possible_input,
+                    stem,
+                    extension,
+                    type_resolver,
+                )?;
                 if !type_resolver
                     .external_type_session
                     .metadata_path_is_within_limit(&normalize_path_string(&candidate))
@@ -316,22 +335,15 @@ fn resolve_vue3_project_package_input_target_with_pass(
     None
 }
 
-fn vue3_project_package_input_candidate_phase(
-    candidate: &Path,
+fn vue3_project_package_input_extension_phase(
+    extension: &str,
 ) -> Option<Vue3PackageResolutionPhase> {
-    let extension = vue3_typescript_path_extension(candidate)?;
-    if ["ts", "tsx", "mts", "cts"]
-        .iter()
-        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    {
-        Some(Vue3PackageResolutionPhase::Types)
-    } else if ["js", "jsx", "mjs", "cjs"]
-        .iter()
-        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    {
-        Some(Vue3PackageResolutionPhase::JavaScript)
-    } else {
-        None
+    match extension {
+        ".ts" | ".tsx" | ".mts" | ".cts" => Some(Vue3PackageResolutionPhase::Types),
+        ".js" | ".jsx" | ".mjs" | ".cjs" => {
+            Some(Vue3PackageResolutionPhase::JavaScript)
+        }
+        _ => None,
     }
 }
 
@@ -472,7 +484,35 @@ fn vue3_push_project_package_source_root(
     true
 }
 
-fn vue3_path_relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
+fn vue3_materialized_project_package_path(
+    base: &Path,
+    suffix: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let path_bytes = base
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .saturating_add(usize::from(
+            !base.as_os_str().is_empty() && !suffix.as_os_str().is_empty(),
+        ))
+        .saturating_add(suffix.as_os_str().as_encoded_bytes().len());
+    if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+        return None;
+    }
+    let path = normalize_path_components(base.join(suffix));
+    debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&path))
+        .then_some(path)
+}
+
+fn vue3_path_relative_to(
+    path: &Path,
+    base: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let mut path_components = path.components();
     for base_component in base.components() {
         let path_component = path_components.next()?;
@@ -487,43 +527,110 @@ fn vue3_path_relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
             return None;
         }
     }
-    Some(path_components.map(|component| component.as_os_str()).collect())
+    let mut path_bytes = 0usize;
+    let mut has_component = false;
+    for component in path_components.clone() {
+        path_bytes = path_bytes
+            .saturating_add(usize::from(has_component))
+            .saturating_add(component.as_os_str().as_encoded_bytes().len());
+        has_component = true;
+    }
+    if !has_component {
+        return Some(PathBuf::new());
+    }
+    if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+        return None;
+    }
+    let relative = path_components
+        .map(|component| component.as_os_str())
+        .collect::<PathBuf>();
+    debug_assert!(relative.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&relative))
+        .then_some(relative)
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_possible_project_input_paths(output_path: &Path) -> Vec<PathBuf> {
-    let Some(file_name) = output_path.file_name().and_then(|name| name.to_str()) else {
+    let Some((stem, input_extensions)) = vue3_possible_project_input_path_parts(output_path) else {
         return Vec::new();
     };
-    let lower = file_name.to_ascii_lowercase();
-    let (output_extension, input_extensions): (&str, &[&str]) =
-        if lower.ends_with(".d.mts") {
-            (".d.mts", &[".mts", ".mjs"])
-        } else if lower.ends_with(".mjs") {
-            (".mjs", &[".mts", ".mjs"])
-        } else if lower.ends_with(".d.cts") {
-            (".d.cts", &[".cts", ".cjs"])
-        } else if lower.ends_with(".cjs") {
-            (".cjs", &[".cts", ".cjs"])
-        } else if lower.ends_with(".d.json.ts") {
-            (".d.json.ts", &[".json"])
-        } else if lower.ends_with(".js") {
-            (".js", &[".tsx", ".ts", ".jsx", ".js"])
-        } else if lower.ends_with(".json") {
-            (".json", &[".json"])
-        } else if lower.ends_with(".d.ts") {
-            (".d.ts", &[".tsx", ".ts", ".jsx", ".js"])
-        } else {
-            return Vec::new();
-        };
-    let stem = &file_name[..file_name.len() - output_extension.len()];
     input_extensions
         .iter()
-        .map(|extension| {
-            let mut candidate = output_path.to_path_buf();
-            candidate.set_file_name(format!("{stem}{extension}"));
-            candidate
-        })
+        .map(|extension| vue3_project_package_input_candidate(output_path, stem, extension))
         .collect()
+}
+
+fn vue3_possible_project_input_path_parts(output_path: &Path) -> Option<(&str, &[&str])> {
+    let file_name = output_path.file_name().and_then(|name| name.to_str())?;
+    let (output_extension, input_extensions): (&str, &[&str]) =
+        if vue3_file_name_has_ascii_suffix(file_name, ".d.mts") {
+            (".d.mts", &[".mts", ".mjs"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".mjs") {
+            (".mjs", &[".mts", ".mjs"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".d.cts") {
+            (".d.cts", &[".cts", ".cjs"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".cjs") {
+            (".cjs", &[".cts", ".cjs"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".d.json.ts") {
+            (".d.json.ts", &[".json"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".js") {
+            (".js", &[".tsx", ".ts", ".jsx", ".js"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".json") {
+            (".json", &[".json"])
+        } else if vue3_file_name_has_ascii_suffix(file_name, ".d.ts") {
+            (".d.ts", &[".tsx", ".ts", ".jsx", ".js"])
+        } else {
+            return None;
+        };
+    let stem = &file_name[..file_name.len() - output_extension.len()];
+    Some((stem, input_extensions))
+}
+
+fn vue3_file_name_has_ascii_suffix(file_name: &str, suffix: &str) -> bool {
+    file_name
+        .get(file_name.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
+}
+
+fn vue3_materialized_project_package_input_candidate(
+    output_path: &Path,
+    stem: &str,
+    extension: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name_bytes = stem.len().saturating_add(extension.len());
+    let path_bytes = parent
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .saturating_add(usize::from(
+            !parent.as_os_str().is_empty() && file_name_bytes != 0,
+        ))
+        .saturating_add(file_name_bytes);
+    let allocation_bytes = path_bytes.max(output_path.as_os_str().as_encoded_bytes().len());
+    if !vue3_claim_tsconfig_path_materialization(allocation_bytes, type_resolver) {
+        return None;
+    }
+    let candidate = vue3_project_package_input_candidate(output_path, stem, extension);
+    debug_assert!(candidate.as_os_str().as_encoded_bytes().len() <= allocation_bytes);
+    Some(candidate)
+}
+
+fn vue3_project_package_input_candidate(
+    output_path: &Path,
+    stem: &str,
+    extension: &str,
+) -> PathBuf {
+    debug_assert!(extension.starts_with('.'));
+    let mut file_name = String::with_capacity(stem.len().saturating_add(extension.len()));
+    file_name.push_str(stem);
+    file_name.push_str(extension);
+    let mut candidate = output_path.to_path_buf();
+    candidate.set_file_name(file_name);
+    candidate
 }
 
 #[cfg(test)]
@@ -535,6 +642,15 @@ mod project_package_input_target_tests {
             external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
             ..Vue3TypeResolverContext::default()
         }
+    }
+
+    fn materialized_path_weight(paths: &[PathBuf]) -> usize {
+        paths.iter().fold(0usize, |weight, path| {
+            weight.saturating_add(
+                std::mem::size_of::<PathBuf>()
+                    .saturating_add(path.as_os_str().as_encoded_bytes().len()),
+            )
+        })
     }
 
     fn resolve_fixture(root: &Path, resolver: &Vue3TypeResolverContext) -> Option<PathBuf> {
@@ -564,22 +680,34 @@ mod project_package_input_target_tests {
         std::fs::create_dir_all(&source_dir).expect("create source directory");
         let leaf = source_dir.join("leaf.ts");
         std::fs::write(&leaf, "export interface Leaf {}").expect("write source target");
-        let source_root_weight = std::mem::size_of::<PathBuf>()
-            .saturating_add(source_dir.as_os_str().as_encoded_bytes().len());
+        let package_dir = dir.path().join("package");
+        let materialized_paths = [
+            package_dir.join("dist").join("leaf.js"),
+            source_dir.clone(),
+            PathBuf::from("leaf.js"),
+            source_dir.join("leaf.js"),
+            source_dir.join("leaf.tsx"),
+            source_dir.join("leaf.ts"),
+        ];
+        let materialization_entries = materialized_paths.len();
+        let materialization_weight = materialized_path_weight(&materialized_paths);
 
         let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
             max_metadata_fanout_entries: 1,
             max_metadata_resolution_path_probes: 3,
-            max_tsconfig_materialization_entries: 1,
-            max_tsconfig_materialization_weight: source_root_weight,
+            max_tsconfig_materialization_entries: materialization_entries,
+            max_tsconfig_materialization_weight: materialization_weight,
             ..Vue3ExternalTypeLoadLimits::default()
         });
         assert_eq!(resolve_fixture(dir.path(), &exact), Some(leaf.clone()));
         let stats = exact.external_type_session.stats();
         assert_eq!(stats.metadata_fanout_entries, 1);
         assert_eq!(stats.metadata_resolution_path_probes, 3);
-        assert_eq!(stats.tsconfig_materialization_entries, 1);
-        assert_eq!(stats.tsconfig_materialization_weight, source_root_weight);
+        assert_eq!(
+            stats.tsconfig_materialization_entries,
+            materialization_entries
+        );
+        assert_eq!(stats.tsconfig_materialization_weight, materialization_weight);
         assert!(!exact.external_type_session.metadata_is_blocked());
 
         let no_fanout = resolver_with_limits(Vue3ExternalTypeLoadLimits {
@@ -605,17 +733,26 @@ mod project_package_input_target_tests {
             .external_type_session
             .metadata_is_blocked());
 
-        let short_materialization = resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_tsconfig_materialization_entries: 1,
-            max_tsconfig_materialization_weight: source_root_weight - 1,
+        let short_materialization_entries = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: materialization_entries - 1,
+            max_tsconfig_materialization_weight: materialization_weight,
             ..Vue3ExternalTypeLoadLimits::default()
         });
-        assert!(resolve_fixture(dir.path(), &short_materialization).is_none());
-        assert!(short_materialization
+        assert!(resolve_fixture(dir.path(), &short_materialization_entries).is_none());
+        assert!(short_materialization_entries
             .external_type_session
             .metadata_is_blocked());
 
-        let package_dir = dir.path().join("package");
+        let short_materialization_weight = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: materialization_entries,
+            max_tsconfig_materialization_weight: materialization_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_fixture(dir.path(), &short_materialization_weight).is_none());
+        assert!(short_materialization_weight
+            .external_type_session
+            .metadata_is_blocked());
+
         let longest_path = [
             package_dir.join("dist").join("leaf.js"),
             package_dir.join("src"),
@@ -639,6 +776,146 @@ mod project_package_input_target_tests {
         });
         assert!(resolve_fixture(dir.path(), &short_path).is_none());
         assert!(short_path.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_package_input_mapping_bounds_joined_paths_before_allocation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("package");
+        let source_root = package_dir.join("a-deliberately-long-source-root");
+        let output_dir = package_dir.join("d");
+        let importer = source_root.join("Comp.vue");
+        let config_path = package_dir.join("tsconfig.json");
+        let options = Vue3TsconfigEmitPathOptions {
+            root_dir: Some(source_root.clone()),
+            out_dir: Some(output_dir.clone()),
+            declaration_dir: None,
+            composite: None,
+        };
+        let final_path = output_dir.join("entry.json");
+        let fragment = PathBuf::from("entry.json");
+        let possible_input = source_root.join("entry.json");
+        let exact_paths = [
+            final_path.clone(),
+            source_root.clone(),
+            fragment,
+            possible_input.clone(),
+        ];
+        let exact_weight = materialized_path_weight(&exact_paths);
+        let possible_input_bytes = possible_input.as_os_str().as_encoded_bytes().len();
+        let final_path_bytes = final_path.as_os_str().as_encoded_bytes().len();
+        assert!(possible_input_bytes > final_path_bytes);
+
+        let resolve = |resolver: &Vue3TypeResolverContext| {
+            resolve_vue3_project_package_input_target_with_mode(
+                &importer,
+                &package_dir,
+                "./d/entry.json",
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                resolver,
+            )
+        };
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: possible_input_bytes,
+            max_tsconfig_materialization_entries: exact_paths.len(),
+            max_tsconfig_materialization_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve(&exact).is_none());
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.tsconfig_materialization_entries, exact_paths.len());
+        assert_eq!(stats.tsconfig_materialization_weight, exact_weight);
+        assert_eq!(stats.metadata_resolution_path_probes, 0);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        let short_join = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: possible_input_bytes - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve(&short_join).is_none());
+        let stats = short_join.external_type_session.stats();
+        assert_eq!(stats.tsconfig_materialization_entries, exact_paths.len() - 1);
+        assert_eq!(stats.metadata_resolution_path_probes, 0);
+        assert!(short_join.external_type_session.metadata_is_blocked());
+
+        let short_final = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: final_path_bytes - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve(&short_final).is_none());
+        let stats = short_final.external_type_session.stats();
+        assert_eq!(stats.metadata_fanout_entries, 0);
+        assert_eq!(stats.tsconfig_materialization_entries, 0);
+        assert_eq!(stats.metadata_resolution_path_probes, 0);
+        assert!(short_final.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_package_input_phases_materialize_only_relevant_candidates() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir.path().join("package");
+        let source_root = package_dir.join("src");
+        let output_dir = package_dir.join("dist");
+        let importer = source_root.join("Comp.vue");
+        let config_path = package_dir.join("tsconfig.json");
+        let options = Vue3TsconfigEmitPathOptions {
+            root_dir: Some(source_root.clone()),
+            out_dir: Some(output_dir.clone()),
+            declaration_dir: None,
+            composite: None,
+        };
+        for phase in [
+            Vue3PackageResolutionPhase::Types,
+            Vue3PackageResolutionPhase::JavaScript,
+        ] {
+            let candidate_paths = match phase {
+                Vue3PackageResolutionPhase::Types => {
+                    [source_root.join("leaf.tsx"), source_root.join("leaf.ts")]
+                }
+                Vue3PackageResolutionPhase::JavaScript => {
+                    [source_root.join("leaf.jsx"), source_root.join("leaf.js")]
+                }
+            };
+            let materialized_paths = [
+                output_dir.join("leaf.js"),
+                source_root.clone(),
+                PathBuf::from("leaf.js"),
+                source_root.join("leaf.js"),
+                candidate_paths[0].clone(),
+                candidate_paths[1].clone(),
+            ];
+            let materialization_weight = materialized_path_weight(&materialized_paths);
+            let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+                max_metadata_resolution_path_probes: 2,
+                max_tsconfig_materialization_entries: materialized_paths.len(),
+                max_tsconfig_materialization_weight: materialization_weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            });
+            assert!(resolve_vue3_project_package_input_target_for_phase_with_mode(
+                &importer,
+                &package_dir,
+                "./dist/leaf.js",
+                &config_path,
+                &options,
+                Vue3TypeResolutionMode::Import,
+                phase,
+                &resolver,
+            )
+            .is_none());
+            let stats = resolver.external_type_session.stats();
+            assert_eq!(
+                stats.tsconfig_materialization_entries,
+                materialized_paths.len()
+            );
+            assert_eq!(
+                stats.tsconfig_materialization_weight,
+                materialization_weight
+            );
+            assert_eq!(stats.metadata_resolution_path_probes, 2);
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
     }
 
     #[test]
@@ -990,6 +1267,14 @@ mod project_package_input_target_tests {
         assert_eq!(
             cached.metadata_resolution_path_probes,
             first.metadata_resolution_path_probes
+        );
+        assert_eq!(
+            cached.tsconfig_materialization_entries,
+            first.tsconfig_materialization_entries
+        );
+        assert_eq!(
+            cached.tsconfig_materialization_weight,
+            first.tsconfig_materialization_weight
         );
         assert!(!resolver.external_type_session.metadata_is_blocked());
     }
