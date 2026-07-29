@@ -3315,7 +3315,8 @@ fn vue3_tsconfig_bounded_sorted_dir_entries(
             return None;
         }
         if let Ok(entry) = entry {
-            let path_bytes = vue3_tsconfig_directory_entry_path_bytes(dir, &entry.file_name());
+            let name = entry.file_name();
+            let path_bytes = vue3_tsconfig_directory_entry_path_bytes(dir, &name);
             if path_bytes > max_path_bytes {
                 type_resolver.external_type_session.block_metadata();
                 return None;
@@ -3328,7 +3329,9 @@ fn vue3_tsconfig_bounded_sorted_dir_entries(
             {
                 return None;
             }
-            let path = entry.path();
+            let mut path = PathBuf::with_capacity(path_bytes);
+            path.push(dir);
+            path.push(name);
             debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
             paths.push(path);
         }
@@ -3568,7 +3571,7 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
         if path.is_dir() {
             let mut files = Vec::new();
             vue3_collect_global_type_files_from_dir_with_excludes(
-                &path,
+                path,
                 &mut files,
                 excluded_directory_keys,
                 type_resolver,
@@ -3587,9 +3590,10 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
     else {
         return Vec::new();
     };
+    let Vue3TsconfigIncludeGlob { pattern, root } = glob;
     let mut files = Vec::new();
     vue3_collect_global_type_files_from_dir_with_excludes(
-        &glob.root,
+        root,
         &mut files,
         excluded_directory_keys,
         type_resolver,
@@ -3599,7 +3603,7 @@ fn vue3_tsconfig_include_global_type_files_with_excludes(
     }
     vue3_tsconfig_filter_global_type_files(
         files,
-        Some(&glob.pattern),
+        Some(&pattern),
         exclude_patterns,
         type_resolver,
     )
@@ -4130,11 +4134,70 @@ pub(crate) fn vue3_collect_global_type_files_from_dir(
     files: &mut Vec<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) {
-    vue3_collect_global_type_files_from_dir_with_excludes(dir, files, &[], type_resolver);
+    vue3_collect_global_type_files_from_dir_with_excludes(
+        normalize_path_components(dir.to_path_buf()),
+        files,
+        &[],
+        type_resolver,
+    );
+}
+
+#[cfg(windows)]
+type Vue3TsconfigDirectoryIdentity = file_id::FileId;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigDirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigDirectoryIdentity;
+
+fn vue3_tsconfig_directory_identity(dir: &Path) -> Option<Vue3TsconfigDirectoryIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(dir).ok()?;
+        Some(Vue3TsconfigDirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        file_id::get_high_res_file_id(dir).ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+fn vue3_tsconfig_path_is_within_directory(path: &Path, directory: &Path) -> bool {
+    let mut path_components = path.components();
+    directory.components().all(|directory_component| {
+        path_components.next().is_some_and(|path_component| {
+            if cfg!(windows) {
+                path_component
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(
+                        directory_component.as_os_str().as_encoded_bytes(),
+                    )
+            } else {
+                path_component == directory_component
+            }
+        })
+    })
 }
 
 fn vue3_collect_global_type_files_from_dir_with_excludes(
-    dir: &Path,
+    dir: PathBuf,
     files: &mut Vec<PathBuf>,
     excluded_directory_keys: &[PathBuf],
     type_resolver: &Vue3TypeResolverContext,
@@ -4159,10 +4222,10 @@ fn vue3_collect_global_type_files_from_dir_with_excludes(
 }
 
 fn vue3_collect_global_type_files_from_dir_inner(
-    dir: &Path,
+    dir: PathBuf,
     files: &mut Vec<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
-    seen_dirs: &mut BTreeSet<PathBuf>,
+    seen_dirs: &mut BTreeSet<Vue3TsconfigDirectoryIdentity>,
     excluded_directory_keys: &[PathBuf],
     depth: usize,
     max_depth: usize,
@@ -4170,19 +4233,18 @@ fn vue3_collect_global_type_files_from_dir_inner(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return;
     }
-    let directory_key = vue3_external_type_path_key(normalize_path_components(dir.to_path_buf()));
     if excluded_directory_keys
         .iter()
-        .any(|excluded| directory_key == *excluded || directory_key.starts_with(excluded))
+        .any(|excluded| vue3_tsconfig_path_is_within_directory(&dir, excluded))
     {
         return;
     }
-    let canonical_dir =
-        std::fs::canonicalize(dir).unwrap_or_else(|_| normalize_path_components(dir.to_path_buf()));
-    if !seen_dirs.insert(canonical_dir) {
-        return;
+    if let Some(identity) = vue3_tsconfig_directory_identity(&dir) {
+        if !seen_dirs.insert(identity) {
+            return;
+        }
     }
-    let Some(entries) = vue3_tsconfig_bounded_sorted_dir_entries(dir, type_resolver) else {
+    let Some(entries) = vue3_tsconfig_bounded_sorted_dir_entries(&dir, type_resolver) else {
         return;
     };
     for path in entries {
@@ -4203,7 +4265,7 @@ fn vue3_collect_global_type_files_from_dir_inner(
         if file_type.is_dir() {
             if depth < max_depth {
                 vue3_collect_global_type_files_from_dir_inner(
-                    &path,
+                    path,
                     files,
                     type_resolver,
                     seen_dirs,
@@ -4219,7 +4281,7 @@ fn vue3_collect_global_type_files_from_dir_inner(
             {
                 return;
             }
-            files.push(normalize_path_components(path));
+            files.push(path);
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
             return;
@@ -4238,6 +4300,155 @@ fn vue3_tsconfig_directory_is_implicitly_excluded(name: &str) -> bool {
                     name == *excluded
                 }
             })
+}
+
+#[cfg(test)]
+mod vue3_tsconfig_recursive_scan_tests {
+    use super::*;
+
+    fn resolver_with_limits(limits: Vue3ExternalTypeLoadLimits) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
+    fn entry_weight(dir: &Path, name: &str) -> usize {
+        std::mem::size_of::<PathBuf>().saturating_add(
+            vue3_tsconfig_directory_entry_path_bytes(dir, std::ffi::OsStr::new(name)),
+        )
+    }
+
+    #[test]
+    fn recursive_scan_claims_entry_paths_exactly_and_rolls_back_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("types");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested type directory");
+        let root_file = root.join("a.d.ts");
+        let nested_file = nested.join("b.d.ts");
+        std::fs::write(&root_file, "declare interface A {}")
+            .expect("write root declaration");
+        std::fs::write(&nested_file, "declare interface B {}")
+            .expect("write nested declaration");
+
+        let entries = 3;
+        let weight = entry_weight(&root, "a.d.ts")
+            .saturating_add(entry_weight(&root, "nested"))
+            .saturating_add(entry_weight(&nested, "b.d.ts"));
+        let prefix = PathBuf::from("already-collected.d.ts");
+        let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: entries,
+            max_tsconfig_materialization_weight: weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let mut files = vec![prefix.clone()];
+        vue3_collect_global_type_files_from_dir(&root, &mut files, &exact);
+
+        assert_eq!(files, vec![prefix.clone(), root_file, nested_file.clone()]);
+        let stats = exact.external_type_session.stats();
+        assert_eq!(stats.tsconfig_discovery_entries, entries);
+        assert_eq!(stats.tsconfig_discovery_files, 2);
+        assert_eq!(stats.tsconfig_materialization_entries, entries);
+        assert_eq!(stats.tsconfig_materialization_weight, weight);
+        assert!(!exact.external_type_session.metadata_is_blocked());
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_entries: entries - 1,
+                max_tsconfig_materialization_weight: weight,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_entries: entries,
+                max_tsconfig_materialization_weight: weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_generated_path_bytes: nested_file
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .len()
+                    - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            let mut files = vec![prefix.clone()];
+            vue3_collect_global_type_files_from_dir(&root, &mut files, &resolver);
+
+            assert_eq!(files, vec![prefix.clone()]);
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
+    #[test]
+    fn excluded_root_needs_no_path_materialization() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = normalize_path_components(temp.path().join("types"));
+        std::fs::create_dir_all(&root).expect("create excluded type directory");
+        std::fs::write(root.join("global.d.ts"), "declare interface Global {}")
+            .expect("write excluded declaration");
+        let excluded = vue3_external_type_path_key(root.clone());
+        let resolver = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_materialization_entries: 0,
+            max_tsconfig_materialization_weight: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let prefix = PathBuf::from("already-collected.d.ts");
+        let mut files = vec![prefix.clone()];
+
+        vue3_collect_global_type_files_from_dir_with_excludes(
+            root,
+            &mut files,
+            std::slice::from_ref(&excluded),
+            &resolver,
+        );
+
+        assert_eq!(files, vec![prefix]);
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.tsconfig_discovery_entries, 0);
+        assert_eq!(stats.tsconfig_materialization_entries, 0);
+        assert_eq!(stats.tsconfig_materialization_weight, 0);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn excluded_directories_match_only_complete_path_components() {
+        let excluded = Path::new("project").join("types");
+        assert!(vue3_tsconfig_path_is_within_directory(
+            &excluded.join("nested"),
+            &excluded,
+        ));
+        assert!(!vue3_tsconfig_path_is_within_directory(
+            &Path::new("project").join("types-generated"),
+            &excluded,
+        ));
+        assert_eq!(
+            vue3_tsconfig_path_is_within_directory(
+                &Path::new("PROJECT").join("TYPES").join("nested"),
+                &excluded,
+            ),
+            cfg!(windows),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_identity_follows_a_symlinked_scan_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target = temp.path().join("long-target-directory");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&target).expect("create identity target");
+        symlink(&target, &alias).expect("create directory alias");
+
+        assert_eq!(
+            vue3_tsconfig_directory_identity(&target),
+            vue3_tsconfig_directory_identity(&alias),
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
