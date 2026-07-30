@@ -13,6 +13,8 @@ pub(crate) const CSS_MODULES_MAX_PATH_PROBES: usize = 65_536;
 pub(crate) const CSS_MODULES_MAX_VALUE_BYTES: usize = 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_TOTAL_VALUE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_VALUE_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_TOTAL_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_GENERATED_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_REPLACEMENT_STEPS: usize = 1_048_576;
 pub(crate) const CSS_MODULES_MAX_EXPORT_VALUES: usize = 262_144;
@@ -38,6 +40,8 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_value_bytes: usize,
     pub(crate) max_total_value_bytes: usize,
     pub(crate) max_value_output_bytes: usize,
+    pub(crate) max_output_bytes: usize,
+    pub(crate) max_total_output_bytes: usize,
     pub(crate) max_generated_bytes: usize,
     pub(crate) max_replacement_steps: usize,
     pub(crate) max_export_values: usize,
@@ -65,6 +69,8 @@ impl Default for CssModulesImportLimits {
             max_value_bytes: CSS_MODULES_MAX_VALUE_BYTES,
             max_total_value_bytes: CSS_MODULES_MAX_TOTAL_VALUE_BYTES,
             max_value_output_bytes: CSS_MODULES_MAX_VALUE_OUTPUT_BYTES,
+            max_output_bytes: CSS_MODULES_MAX_OUTPUT_BYTES,
+            max_total_output_bytes: CSS_MODULES_MAX_TOTAL_OUTPUT_BYTES,
             max_generated_bytes: CSS_MODULES_MAX_GENERATED_BYTES,
             max_replacement_steps: CSS_MODULES_MAX_REPLACEMENT_STEPS,
             max_export_values: CSS_MODULES_MAX_EXPORT_VALUES,
@@ -94,6 +100,7 @@ pub(crate) struct CssModulesImportState {
     pub(crate) metadata_bytes: usize,
     pub(crate) path_probes: usize,
     pub(crate) value_bytes: usize,
+    pub(crate) output_bytes: usize,
     pub(crate) generated_bytes: usize,
     pub(crate) replacement_steps: usize,
     pub(crate) export_values: usize,
@@ -115,6 +122,7 @@ impl CssModulesImportState {
             metadata_bytes: 0,
             path_probes: 0,
             value_bytes: 0,
+            output_bytes: 0,
             generated_bytes: 0,
             replacement_steps: 0,
             export_values: 0,
@@ -381,6 +389,32 @@ impl CssModulesImportState {
             return false;
         }
         self.generated_bytes = generated_bytes;
+        true
+    }
+
+    pub(crate) fn claim_module_output(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if bytes > self.limits.max_output_bytes {
+            self.fail(format!(
+                "CSS Modules output exceeds the maximum of {} bytes",
+                self.limits.max_output_bytes
+            ));
+            return false;
+        }
+        let Some(output_bytes) = self.output_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules output size overflowed");
+            return false;
+        };
+        if output_bytes > self.limits.max_total_output_bytes {
+            self.fail(format!(
+                "CSS Modules outputs exceed the maximum total of {} bytes",
+                self.limits.max_total_output_bytes
+            ));
+            return false;
+        }
+        self.output_bytes = output_bytes;
         true
     }
 
@@ -695,7 +729,7 @@ pub(crate) struct CssModulesContext<'a> {
     pub(crate) value_placeholder_modules: BTreeMap<String, String>,
     pub(crate) next_value_placeholder: usize,
     pub(crate) prepended_paths: BTreeSet<String>,
-    pub(crate) prepended_css: Vec<String>,
+    pub(crate) prepended_css: Vec<Arc<CssModulesCompileResult>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) load_state: &'a mut CssModulesImportState,
 }
@@ -929,8 +963,55 @@ impl<'a> CssModulesContext<'a> {
     }
 
     pub(crate) fn finish_code(&mut self, code: String) -> String {
+        let mut output_bytes = 0usize;
+        let mut output_ends_with_newline = false;
+        for result in &self.prepended_css {
+            let css = &result.code;
+            if css.is_empty() {
+                continue;
+            }
+            if !self.imported_dependency && output_bytes != 0 && !output_ends_with_newline {
+                let Some(bytes) = output_bytes.checked_add(1) else {
+                    self.load_state.fail("CSS Modules output size overflowed");
+                    return String::new();
+                };
+                output_bytes = bytes;
+            }
+            let Some(bytes) = output_bytes.checked_add(css.len()) else {
+                self.load_state.fail("CSS Modules output size overflowed");
+                return String::new();
+            };
+            output_bytes = bytes;
+            output_ends_with_newline = css.ends_with('\n');
+        }
+        if !self.imported_dependency
+            && !self.prepended_css_has_nested_import
+            && output_bytes != 0
+            && !code.is_empty()
+            && !output_ends_with_newline
+        {
+            let Some(bytes) = output_bytes.checked_add(1) else {
+                self.load_state.fail("CSS Modules output size overflowed");
+                return String::new();
+            };
+            output_bytes = bytes;
+        }
+        let Some(output_bytes) = output_bytes.checked_add(code.len()) else {
+            self.load_state.fail("CSS Modules output size overflowed");
+            return String::new();
+        };
+        if !self.load_state.claim_module_output(output_bytes) {
+            return String::new();
+        }
         let mut output = String::new();
-        for css in &self.prepended_css {
+        if output.try_reserve_exact(output_bytes).is_err() {
+            self.load_state.fail(
+                "CSS Modules output could not reserve capacity within the configured limit",
+            );
+            return String::new();
+        }
+        for result in &self.prepended_css {
+            let css = &result.code;
             if css.is_empty() {
                 continue;
             }
@@ -948,6 +1029,7 @@ impl<'a> CssModulesContext<'a> {
             output.push('\n');
         }
         output.push_str(&code);
+        debug_assert_eq!(output.len(), output_bytes);
         self.replace_value_placeholders(output)
     }
 
@@ -1038,7 +1120,7 @@ impl<'a> CssModulesContext<'a> {
             if result.has_prepended_css {
                 self.prepended_css_has_nested_import = true;
             }
-            self.prepended_css.push(result.code.clone());
+            self.prepended_css.push(Arc::clone(&result));
         }
         self.imported_modules
             .insert(normalized, Arc::clone(&result));

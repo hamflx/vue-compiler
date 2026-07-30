@@ -1033,6 +1033,8 @@
             max_value_bytes: 1024,
             max_total_value_bytes: 4096,
             max_value_output_bytes: 4096,
+            max_output_bytes: 4096,
+            max_total_output_bytes: 16 * 1024,
             max_generated_bytes: 16 * 1024,
             max_replacement_steps: 4096,
             max_export_values: 4096,
@@ -2200,6 +2202,76 @@
         for name in ["_a_", "_b_", "_c_"] {
             assert!(root.contains(name), "missing {name}: {root}");
         }
+    }
+
+    #[test]
+    fn css_modules_import_output_has_exact_budgets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let entry = dir.path().join("entry.css");
+        let dep = dir.path().join("dep.css");
+        let source = ".root { composes: dep from \"./dep.css\"; color: blue; }";
+        let dependency = ".dep { color: red; }";
+        std::fs::write(&entry, source).expect("write entry");
+        std::fs::write(&dep, dependency).expect("write dependency");
+
+        let mut options = css_modules_test_options(&entry);
+        options.modules_options.generate_scoped_name = Some("[local]".into());
+        let generous = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            css_modules_test_import_limits(),
+        );
+        assert!(generous.diagnostics.is_empty(), "{:?}", generous.diagnostics);
+
+        let mut dependency_options = css_modules_test_options(&dep);
+        dependency_options.modules_options.generate_scoped_name = Some("[local]".into());
+        let standalone_dependency = compile_css_modules_with_limits(
+            dependency,
+            dependency,
+            &dependency_options,
+            css_modules_test_import_limits(),
+        );
+        assert!(standalone_dependency.diagnostics.is_empty());
+        let child_bytes = standalone_dependency.code.len();
+        let root_bytes = generous.code.len();
+        let total_bytes = child_bytes.checked_add(root_bytes).unwrap();
+        assert!(root_bytes > child_bytes);
+
+        let exact_limits = CssModulesImportLimits {
+            max_output_bytes: root_bytes,
+            max_total_output_bytes: total_bytes,
+            ..css_modules_test_import_limits()
+        };
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert_eq!(exact.code, generous.code);
+
+        for limits in [
+            CssModulesImportLimits {
+                max_output_bytes: root_bytes - 1,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_total_output_bytes: total_bytes - 1,
+                ..exact_limits
+            },
+        ] {
+            let result = compile_css_modules_with_limits(source, source, &options, limits);
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+            assert!(result.code.is_empty());
+            assert!(result.raw_modules.is_empty());
+            assert!(result.modules.is_empty());
+        }
+
+        let mut overflow = CssModulesImportState::new(css_modules_test_import_limits());
+        overflow.output_bytes = usize::MAX;
+        assert!(!overflow.claim_module_output(1));
+        assert!(overflow
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("overflowed")));
     }
 
     #[test]
