@@ -559,7 +559,8 @@ pub(crate) fn register_css_module_icss_export_segment(
     if key.is_empty() {
         return;
     }
-    context.set_raw_export_values(key, vec![replace_css_module_export_symbols(value, context)]);
+    let value = replace_css_module_export_symbols(value, context);
+    context.set_raw_export_values(key, vec![value]);
 }
 
 pub(crate) fn parse_css_module_import_prelude(prelude: &str) -> Option<&str> {

@@ -10,6 +10,11 @@ pub(crate) const CSS_MODULES_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_PATH_BYTES: usize = 32 * 1024;
 pub(crate) const CSS_MODULES_MAX_PATH_PROBES: usize = 65_536;
+pub(crate) const CSS_MODULES_MAX_VALUE_BYTES: usize = 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_TOTAL_VALUE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_VALUE_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_GENERATED_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_REPLACEMENT_STEPS: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CssModulesImportLimits {
@@ -21,6 +26,11 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_metadata_bytes: usize,
     pub(crate) max_path_bytes: usize,
     pub(crate) max_path_probes: usize,
+    pub(crate) max_value_bytes: usize,
+    pub(crate) max_total_value_bytes: usize,
+    pub(crate) max_value_output_bytes: usize,
+    pub(crate) max_generated_bytes: usize,
+    pub(crate) max_replacement_steps: usize,
 }
 
 impl Default for CssModulesImportLimits {
@@ -34,6 +44,11 @@ impl Default for CssModulesImportLimits {
             max_metadata_bytes: CSS_MODULES_MAX_METADATA_BYTES,
             max_path_bytes: CSS_MODULES_MAX_PATH_BYTES,
             max_path_probes: CSS_MODULES_MAX_PATH_PROBES,
+            max_value_bytes: CSS_MODULES_MAX_VALUE_BYTES,
+            max_total_value_bytes: CSS_MODULES_MAX_TOTAL_VALUE_BYTES,
+            max_value_output_bytes: CSS_MODULES_MAX_VALUE_OUTPUT_BYTES,
+            max_generated_bytes: CSS_MODULES_MAX_GENERATED_BYTES,
+            max_replacement_steps: CSS_MODULES_MAX_REPLACEMENT_STEPS,
         }
     }
 }
@@ -51,6 +66,9 @@ pub(crate) struct CssModulesImportState {
     pub(crate) imported_bytes: usize,
     pub(crate) metadata_bytes: usize,
     pub(crate) path_probes: usize,
+    pub(crate) value_bytes: usize,
+    pub(crate) generated_bytes: usize,
+    pub(crate) replacement_steps: usize,
     pub(crate) error: Option<CssModulesImportError>,
 }
 
@@ -63,6 +81,9 @@ impl CssModulesImportState {
             imported_bytes: 0,
             metadata_bytes: 0,
             path_probes: 0,
+            value_bytes: 0,
+            generated_bytes: 0,
+            replacement_steps: 0,
             error: None,
         }
     }
@@ -211,6 +232,93 @@ impl CssModulesImportState {
         read_result.ok()?;
         String::from_utf8(bytes).ok()
     }
+
+    pub(crate) fn claim_replacement_step(&mut self) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if self.replacement_steps >= self.limits.max_replacement_steps {
+            self.fail(format!(
+                "CSS Modules value replacement exceeds the maximum of {} steps",
+                self.limits.max_replacement_steps
+            ));
+            return false;
+        }
+        self.replacement_steps += 1;
+        true
+    }
+
+    pub(crate) fn append_generated_value(
+        &mut self,
+        output: &mut String,
+        value: &str,
+        max_output_bytes: usize,
+    ) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(output_bytes) = output.len().checked_add(value.len()) else {
+            self.fail("CSS Modules value output size overflowed");
+            return false;
+        };
+        if output_bytes > max_output_bytes {
+            self.fail(format!(
+                "CSS Modules value output exceeds the maximum of {max_output_bytes} bytes"
+            ));
+            return false;
+        }
+        let Some(generated_bytes) = self.generated_bytes.checked_add(value.len()) else {
+            self.fail("CSS Modules generated value size overflowed");
+            return false;
+        };
+        if generated_bytes > self.limits.max_generated_bytes {
+            self.fail(format!(
+                "CSS Modules generated values exceed the maximum total of {} bytes",
+                self.limits.max_generated_bytes
+            ));
+            return false;
+        }
+        if output.try_reserve(value.len()).is_err() {
+            self.fail("CSS Modules could not reserve value output capacity");
+            return false;
+        }
+        output.push_str(value);
+        self.generated_bytes = generated_bytes;
+        true
+    }
+
+    pub(crate) fn claim_retained_value_bytes(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(value_bytes) = self.value_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules retained value size overflowed");
+            return false;
+        };
+        if value_bytes > self.limits.max_total_value_bytes {
+            self.fail(format!(
+                "CSS Modules retained values exceed the maximum total of {} bytes",
+                self.limits.max_total_value_bytes
+            ));
+            return false;
+        }
+        self.value_bytes = value_bytes;
+        true
+    }
+
+    pub(crate) fn validate_value_bytes(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if bytes > self.limits.max_value_bytes {
+            self.fail(format!(
+                "CSS Modules value exceeds the maximum of {} bytes",
+                self.limits.max_value_bytes
+            ));
+            return false;
+        }
+        true
+    }
 }
 
 pub(crate) fn compile_css_modules(
@@ -256,7 +364,7 @@ pub(crate) fn compile_css_modules_with_limits(
         &filename,
     );
     load_state.active_paths.push(active_path);
-    let mut result = compile_css_modules_file(
+    let result = compile_css_modules_file(
         source,
         hash_source,
         options,
@@ -266,12 +374,8 @@ pub(crate) fn compile_css_modules_with_limits(
         &mut load_state,
     );
     load_state.active_paths.pop();
-    if let Some(error) = load_state.error {
-        result.diagnostics.push(css_modules_import_diagnostic(
-            source,
-            options,
-            error,
-        ));
+    if load_state.error.is_some() {
+        return css_modules_import_limit_result(source, options, load_state.error);
     }
     result
 }
@@ -509,7 +613,7 @@ impl<'a> CssModulesContext<'a> {
         modules
     }
 
-    pub(crate) fn finish_code(&self, code: String) -> String {
+    pub(crate) fn finish_code(&mut self, code: String) -> String {
         let mut output = String::new();
         for css in &self.prepended_css {
             if css.is_empty() {
@@ -556,11 +660,19 @@ impl<'a> CssModulesContext<'a> {
             .map(String::as_str)
     }
 
-    pub(crate) fn replace_value_placeholders(&self, source: String) -> String {
+    pub(crate) fn replace_value_placeholders(&mut self, source: String) -> String {
         if self.value_placeholders.is_empty() {
             return source;
         }
-        replace_css_module_value_symbols(&source, &self.value_placeholders)
+        let max_output_bytes = self.load_state.limits.max_value_output_bytes;
+        let placeholders = &self.value_placeholders;
+        replace_css_module_symbol_values_by(
+            &source,
+            self.load_state,
+            max_output_bytes,
+            |name| placeholders.get(name).map(String::as_str),
+        )
+        .unwrap_or_default()
     }
 
     pub(crate) fn load_imported_module(

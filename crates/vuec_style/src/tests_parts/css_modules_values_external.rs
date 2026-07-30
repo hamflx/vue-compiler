@@ -80,10 +80,18 @@
             ("eclair".to_string(), "Z".to_string()),
         ]);
         let source = r#"a alpha alpha-beta xalpha alpha2 1alpha -alpha eclair value_2 /* alpha */ "alpha" \alpha"#;
+        let mut load_state =
+            CssModulesImportState::new(CssModulesImportLimits::default());
 
         assert_eq!(
-            replace_css_module_values(source, &values),
-            r#"A X Y xalpha alpha2 1alpha -alpha Z Q /* alpha */ "X" \X"#
+            replace_css_module_values(
+                source,
+                &values,
+                &mut load_state,
+                CSS_MODULES_MAX_VALUE_OUTPUT_BYTES,
+            )
+            .as_deref(),
+            Some(r#"A X Y xalpha alpha2 1alpha -alpha Z Q /* alpha */ "X" \X"#)
         );
     }
 
@@ -100,8 +108,18 @@
         let source = std::iter::repeat_n("shared_prefix_missing", 1024)
             .collect::<Vec<_>>()
             .join(" ");
+        let mut load_state =
+            CssModulesImportState::new(CssModulesImportLimits::default());
 
-        assert_eq!(replace_css_module_values(&source, &values), source);
+        assert_eq!(
+            replace_css_module_values(
+                &source,
+                &values,
+                &mut load_state,
+                CSS_MODULES_MAX_VALUE_OUTPUT_BYTES,
+            ),
+            Some(source)
+        );
     }
 
     #[test]
@@ -1012,6 +1030,11 @@
             max_metadata_bytes: 4096,
             max_path_bytes: 4096,
             max_path_probes: 128,
+            max_value_bytes: 1024,
+            max_total_value_bytes: 4096,
+            max_value_output_bytes: 4096,
+            max_generated_bytes: 16 * 1024,
+            max_replacement_steps: 4096,
         }
     }
 
@@ -1022,6 +1045,137 @@
             modules: true,
             ..StyleCompileOptions::default()
         }
+    }
+
+    #[test]
+    fn css_modules_value_expansion_enforces_exact_budgets() {
+        let source = "@value v0: x; @value v1: v0 v0; @value v2: v1 v1;";
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("values.css".into()),
+            modules: true,
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_value_bytes: 7,
+            max_total_value_bytes: 33,
+            max_generated_bytes: 22,
+            max_replacement_steps: 8,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert_eq!(exact.modules.get("v2").map(String::as_str), Some("x x x x"));
+
+        let over_limits = [
+            CssModulesImportLimits {
+                max_value_bytes: 6,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_total_value_bytes: 32,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_generated_bytes: 21,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_replacement_steps: 7,
+                ..exact_limits
+            },
+        ];
+        for limits in over_limits {
+            let result = compile_css_modules_with_limits(source, source, &options, limits);
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+            assert!(result.code.is_empty());
+            assert!(result.raw_modules.is_empty());
+            assert!(result.modules.is_empty());
+        }
+    }
+
+    #[test]
+    fn css_modules_value_replacement_bounds_output_before_append() {
+        let values = BTreeMap::from([("x".to_string(), "1234".to_string())]);
+        let source = "x x x";
+        let mut exact = CssModulesImportState::new(CssModulesImportLimits {
+            max_generated_bytes: 14,
+            max_replacement_steps: 3,
+            ..css_modules_test_import_limits()
+        });
+        assert_eq!(
+            replace_css_module_values(source, &values, &mut exact, 14).as_deref(),
+            Some("1234 1234 1234")
+        );
+        assert_eq!((exact.generated_bytes, exact.replacement_steps), (14, 3));
+        assert!(exact.error.is_none());
+
+        let mut over = CssModulesImportState::new(CssModulesImportLimits {
+            max_generated_bytes: 14,
+            max_replacement_steps: 3,
+            ..css_modules_test_import_limits()
+        });
+        assert!(replace_css_module_values(source, &values, &mut over, 13).is_none());
+        assert!(over.generated_bytes <= 13);
+        assert!(over.error.is_some());
+    }
+
+    #[test]
+    fn css_modules_icss_symbol_replacement_enforces_exact_output() {
+        let options = StyleCompileOptions::default();
+        let mut exact_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_value_output_bytes: 21,
+            max_generated_bytes: 36,
+            max_replacement_steps: 3,
+            ..css_modules_test_import_limits()
+        });
+        let mut exact = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut exact_state,
+        );
+        exact.import_symbols.insert(
+            "x".into(),
+            CssModuleImportSymbol::Found("1234".into()),
+        );
+        assert_eq!(
+            replace_css_module_import_symbols("color: x x x", &mut exact),
+            "color: 1234 1234 1234"
+        );
+        assert_eq!(
+            (
+                exact.load_state.generated_bytes,
+                exact.load_state.replacement_steps,
+            ),
+            (36, 3)
+        );
+        assert!(exact.load_state.error.is_none());
+
+        let mut over_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_value_output_bytes: 20,
+            max_generated_bytes: 36,
+            max_replacement_steps: 3,
+            ..css_modules_test_import_limits()
+        });
+        let mut over = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut over_state,
+        );
+        over.import_symbols.insert(
+            "x".into(),
+            CssModuleImportSymbol::Found("1234".into()),
+        );
+        assert!(replace_css_module_import_symbols("color: x x x", &mut over).is_empty());
+        assert!(over.load_state.error.is_some());
     }
 
     #[test]
@@ -1171,6 +1325,9 @@
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
         assert!(result.diagnostics[0].message.contains("maximum"));
+        assert!(result.code.is_empty());
+        assert!(result.raw_modules.is_empty());
+        assert!(result.modules.is_empty());
 
         let package = dir.path().join("node_modules").join("vuec-css-budget");
         std::fs::create_dir_all(&package).expect("create package");

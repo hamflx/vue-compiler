@@ -53,25 +53,41 @@ pub(crate) fn prepare_css_module_values(
                         index = end;
                         continue;
                     }
-                } else if let Some(value) =
-                    parse_css_module_local_value_statement(statement, &replacements, &exports)
-                {
+                    if context.load_state.error.is_some() {
+                        return String::new();
+                    }
+                } else if let Some(value) = parse_css_module_local_value_statement(
+                    statement,
+                    &replacements,
+                    &exports,
+                    context.load_state,
+                ) {
                     if output.trim().is_empty() {
                         output.clear();
                         drop_leading_whitespace = true;
                     }
-                    replacements.insert(value.name.clone(), value.replacement.clone());
-                    exports.insert(value.name.clone(), value.export.clone());
-                    context.set_raw_export_values(&value.name, vec![value.export]);
+                    context.set_raw_export_values(&value.name, vec![value.export.clone()]);
+                    replacements.insert(value.name.clone(), value.replacement);
+                    exports.insert(value.name, value.export);
                     index = end;
                     continue;
+                }
+                if context.load_state.error.is_some() {
+                    return String::new();
                 }
             }
         }
         output.push(ch);
         index += ch.len_utf8();
     }
-    replace_css_module_values(&output, &replacements)
+    let max_output_bytes = context.load_state.limits.max_value_output_bytes;
+    replace_css_module_values(
+        &output,
+        &replacements,
+        context.load_state,
+        max_output_bytes,
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn css_module_value_keyword_boundary(source: &str, index: usize) -> bool {
@@ -155,6 +171,7 @@ pub(crate) fn parse_css_module_local_value_statement(
     statement: &str,
     replacements: &BTreeMap<String, String>,
     exports: &BTreeMap<String, String>,
+    load_state: &mut CssModulesImportState,
 ) -> Option<CssModuleLocalValue> {
     let body = statement.strip_prefix("@value")?.strip_suffix(';')?.trim();
     let colon = find_top_level_colon(body)?;
@@ -163,10 +180,25 @@ pub(crate) fn parse_css_module_local_value_statement(
     if !is_css_module_value_name(name) || value.is_empty() {
         return None;
     }
+    let max_value_bytes = load_state.limits.max_value_bytes;
+    let replacement =
+        replace_css_module_values(value, replacements, load_state, max_value_bytes)?;
+    let export = replace_css_module_values(value, exports, load_state, max_value_bytes)?;
+    let Some(retained_bytes) = export
+        .len()
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(replacement.len()))
+    else {
+        load_state.fail("CSS Modules retained value size overflowed");
+        return None;
+    };
+    if !load_state.claim_retained_value_bytes(retained_bytes) {
+        return None;
+    }
     Some(CssModuleLocalValue {
         name: name.to_string(),
-        replacement: replace_css_module_values(value, replacements),
-        export: replace_css_module_values(value, exports),
+        replacement,
+        export,
     })
 }
 
@@ -249,12 +281,57 @@ pub(crate) fn register_css_module_value_import(
     };
     for spec in import.specs {
         let (replacement, export) = if let Some(value) = result.raw_modules.get(spec.remote) {
+            if !context.load_state.validate_value_bytes(value.len()) {
+                return false;
+            }
+            let Some(retained_bytes) = value.len().checked_mul(4) else {
+                context
+                    .load_state
+                    .fail("CSS Modules retained value size overflowed");
+                return false;
+            };
+            if !context
+                .load_state
+                .claim_retained_value_bytes(retained_bytes)
+            {
+                return false;
+            }
             (value.clone(), value.clone())
         } else {
-            (
+            let placeholder_bytes = "i__const__".len().checked_add(spec.local.len()).and_then(
+                |bytes| bytes.checked_add(import_index.to_string().len()),
+            );
+            let Some(placeholder_bytes) = placeholder_bytes else {
+                context
+                    .load_state
+                    .fail("CSS Modules imported value size overflowed");
+                return false;
+            };
+            if !context.load_state.validate_value_bytes(placeholder_bytes) {
+                return false;
+            }
+            let values = (
                 format!("i__const_{}_{}", spec.local, *import_index),
                 "undefined".to_string(),
-            )
+            );
+            let Some(retained_bytes) = values
+                .1
+                .len()
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(values.0.len()))
+            else {
+                context
+                    .load_state
+                    .fail("CSS Modules retained value size overflowed");
+                return false;
+            };
+            if !context
+                .load_state
+                .claim_retained_value_bytes(retained_bytes)
+            {
+                return false;
+            }
+            values
         };
         let replacement = context.import_value_placeholder(replacement, export.clone());
         replacements.insert(spec.local.to_string(), replacement);
@@ -273,22 +350,47 @@ pub(crate) fn is_css_module_value_name(name: &str) -> bool {
     is_css_module_identifier_start(first) && chars.all(is_css_module_identifier_continue)
 }
 
-pub(crate) fn replace_css_module_values(source: &str, values: &BTreeMap<String, String>) -> String {
-    if values.is_empty() {
-        return source.to_string();
-    }
+pub(crate) fn replace_css_module_values(
+    source: &str,
+    values: &BTreeMap<String, String>,
+    load_state: &mut CssModulesImportState,
+    max_output_bytes: usize,
+) -> Option<String> {
     debug_assert!(values.keys().all(|name| is_css_module_value_name(name)));
-    let mut output = String::with_capacity(source.len());
+    if values.is_empty() {
+        let mut output = String::with_capacity(source.len().min(max_output_bytes).min(4_096));
+        return load_state
+            .append_generated_value(&mut output, source, max_output_bytes)
+            .then_some(output);
+    }
+    replace_css_module_values_by(source, load_state, max_output_bytes, |name| {
+        values.get(name).map(String::as_str)
+    })
+}
+
+pub(crate) fn replace_css_module_values_by<'a>(
+    source: &str,
+    load_state: &mut CssModulesImportState,
+    max_output_bytes: usize,
+    mut replacement: impl FnMut(&str) -> Option<&'a str>,
+) -> Option<String> {
+    let mut output = String::with_capacity(source.len().min(max_output_bytes).min(4_096));
     let mut index = 0usize;
+    let mut literal_start = 0usize;
     while index < source.len() {
         if source[index..].starts_with("/*") {
             let Some(end_offset) = source[index + 2..].find("*/") else {
-                output.push_str(&source[index..]);
+                if !load_state.append_generated_value(
+                    &mut output,
+                    &source[literal_start..],
+                    max_output_bytes,
+                ) {
+                    return None;
+                }
+                literal_start = source.len();
                 break;
             };
-            let end = index + 2 + end_offset + 2;
-            output.push_str(&source[index..end]);
-            index = end;
+            index += 2 + end_offset + 2;
             continue;
         }
         let Some(ch) = source[index..].chars().next() else {
@@ -308,12 +410,33 @@ pub(crate) fn replace_css_module_values(source: &str, values: &BTreeMap<String, 
                 end += next.len_utf8();
             }
             let name = &source[index..end];
-            output.push_str(values.get(name).map_or(name, String::as_str));
+            if !load_state.append_generated_value(
+                &mut output,
+                &source[literal_start..index],
+                max_output_bytes,
+            ) || !load_state.claim_replacement_step()
+                || !load_state.append_generated_value(
+                    &mut output,
+                    replacement(name).unwrap_or(name),
+                    max_output_bytes,
+                )
+            {
+                return None;
+            }
             index = end;
+            literal_start = end;
             continue;
         }
-        output.push(ch);
         index += ch.len_utf8();
     }
-    output
+    if literal_start < source.len()
+        && !load_state.append_generated_value(
+            &mut output,
+            &source[literal_start..],
+            max_output_bytes,
+        )
+    {
+        return None;
+    }
+    Some(output)
 }

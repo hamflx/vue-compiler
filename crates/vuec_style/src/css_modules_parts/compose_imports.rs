@@ -186,7 +186,7 @@ pub(crate) fn push_unique_css_module_value(values: &mut Vec<String>, value: Stri
 
 pub(crate) fn replace_css_module_import_symbols(
     segment: &str,
-    context: &CssModulesContext<'_>,
+    context: &mut CssModulesContext<'_>,
 ) -> String {
     if context.import_symbols.is_empty() {
         return segment.to_string();
@@ -196,71 +196,100 @@ pub(crate) fn replace_css_module_import_symbols(
     };
     let value = &segment[colon + 1..];
     let replaced = replace_css_module_import_symbols_in_text(value, context);
-    let mut output = String::new();
-    output.push_str(&segment[..colon + 1]);
-    output.push_str(&replaced);
+    let max_output_bytes = context.load_state.limits.max_value_output_bytes;
+    let mut output = String::with_capacity(segment.len().min(max_output_bytes).min(4_096));
+    if !context.load_state.append_generated_value(
+        &mut output,
+        &segment[..colon + 1],
+        max_output_bytes,
+    ) || !context.load_state.append_generated_value(
+        &mut output,
+        &replaced,
+        max_output_bytes,
+    ) {
+        return String::new();
+    }
     output
 }
 
 pub(crate) fn replace_css_module_import_symbols_in_text(
     source: &str,
-    context: &CssModulesContext<'_>,
+    context: &mut CssModulesContext<'_>,
 ) -> String {
     if context.import_symbols.is_empty() {
         return source.to_string();
     }
-    let symbols = context
-        .import_symbols
-        .iter()
-        .filter_map(|(name, symbol)| match symbol {
-            CssModuleImportSymbol::Found(value) => Some((name.clone(), value.clone())),
-            CssModuleImportSymbol::Missing => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    replace_css_module_value_symbols(source, &symbols)
+    let max_output_bytes = context.load_state.limits.max_value_output_bytes;
+    let symbols = &context.import_symbols;
+    replace_css_module_symbol_values_by(
+        source,
+        context.load_state,
+        max_output_bytes,
+        |name| match symbols.get(name) {
+            Some(CssModuleImportSymbol::Found(value)) => Some(value.as_str()),
+            Some(CssModuleImportSymbol::Missing) | None => None,
+        },
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn replace_css_module_export_symbols(
     source: &str,
-    context: &CssModulesContext<'_>,
+    context: &mut CssModulesContext<'_>,
 ) -> String {
     if context.import_symbols.is_empty() {
         return source.to_string();
     }
-    let symbols = context
-        .import_symbols
-        .iter()
-        .map(|(name, symbol)| {
-            let value = match symbol {
-                CssModuleImportSymbol::Found(value) => value.clone(),
-                CssModuleImportSymbol::Missing => "undefined".to_string(),
-            };
-            (name.clone(), value)
-        })
-        .collect::<BTreeMap<_, _>>();
-    replace_css_module_value_symbols(source, &symbols)
+    let max_output_bytes = context.load_state.limits.max_value_output_bytes;
+    let symbols = &context.import_symbols;
+    replace_css_module_symbol_values_by(
+        source,
+        context.load_state,
+        max_output_bytes,
+        |name| match symbols.get(name) {
+            Some(CssModuleImportSymbol::Found(value)) => Some(value.as_str()),
+            Some(CssModuleImportSymbol::Missing) => Some("undefined"),
+            None => None,
+        },
+    )
+    .unwrap_or_default()
 }
 
-pub(crate) fn replace_css_module_value_symbols(
+pub(crate) fn replace_css_module_symbol_values_by<'a>(
     value: &str,
-    symbols: &BTreeMap<String, String>,
-) -> String {
-    let mut output = String::new();
+    load_state: &mut CssModulesImportState,
+    max_output_bytes: usize,
+    mut replacement: impl FnMut(&str) -> Option<&'a str>,
+) -> Option<String> {
+    let mut output = String::with_capacity(value.len().min(max_output_bytes).min(4_096));
     let mut cursor = 0usize;
     while cursor < value.len() {
         let Some((start, end, token)) = find_next_css_module_symbol(value, cursor) else {
-            output.push_str(&value[cursor..]);
+            if !load_state.append_generated_value(
+                &mut output,
+                &value[cursor..],
+                max_output_bytes,
+            ) {
+                return None;
+            }
             break;
         };
-        output.push_str(&value[cursor..start]);
-        if let Some(replacement) = symbols.get(token) {
-            output.push_str(replacement);
-        } else {
-            output.push_str(token);
+        if !load_state.append_generated_value(
+            &mut output,
+            &value[cursor..start],
+            max_output_bytes,
+        ) || !load_state.claim_replacement_step()
+            || !load_state.append_generated_value(
+                &mut output,
+                replacement(token).unwrap_or(token),
+                max_output_bytes,
+            )
+        {
+            return None;
         }
         cursor = end;
     }
-    output
+    Some(output)
 }
 
 pub(crate) fn find_next_css_module_symbol(
