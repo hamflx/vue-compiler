@@ -1,4 +1,5 @@
 use crate::*;
+use std::cell::RefCell;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -88,19 +89,9 @@ pub(crate) fn preprocess_style_with_limits(
     } else if is_less {
         preprocess_less(&prepared, options)
     } else if is_scss {
-        preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss)
-            .map_err(StylePreprocessError::unsupported)
-            .map(|code| PreprocessResult {
-                code,
-                dependencies: sass_dependencies(source, options),
-            })
+        preprocess_sass_with_grass(prepared, options, grass::InputSyntax::Scss)
     } else if is_sass {
-        preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass)
-            .map_err(StylePreprocessError::unsupported)
-            .map(|code| PreprocessResult {
-                code,
-                dependencies: sass_dependencies(source, options),
-            })
+        preprocess_sass_with_grass(prepared, options, grass::InputSyntax::Sass)
     } else {
         preprocess_stylus(&prepared, options)
     }?;
@@ -164,21 +155,45 @@ fn validate_style_source_bytes(
 }
 
 pub(crate) fn preprocess_sass_with_grass(
-    source: &str,
+    source: String,
     options: &StyleCompileOptions,
     syntax: grass::InputSyntax,
-) -> Result<String, String> {
-    let entry_path = options.filename.as_deref().map(PathBuf::from);
-    let virtual_fs = entry_path
-        .as_ref()
-        .map(|path| VirtualSassFs::new(path.clone(), source.as_bytes().to_vec()));
+) -> Result<PreprocessResult, StylePreprocessError> {
+    preprocess_sass_with_grass_and_limits(source, options, syntax, StyleImportLimits::default())
+}
+
+pub(crate) fn preprocess_sass_with_grass_and_limits(
+    source: String,
+    options: &StyleCompileOptions,
+    syntax: grass::InputSyntax,
+    limits: StyleImportLimits,
+) -> Result<PreprocessResult, StylePreprocessError> {
+    validate_style_import_load_paths(&options.preprocess_options.load_paths, limits)?;
+    let entry_path = options
+        .filename
+        .as_deref()
+        .map(|filename| {
+            validate_style_import_path_bytes(
+                Path::new(filename).as_os_str().as_encoded_bytes().len(),
+                limits.max_path_bytes,
+                format_args!("Sass entry path"),
+                None,
+            )?;
+            Ok(PathBuf::from(filename))
+        })
+        .transpose()?;
+    let mut string_source = Some(source);
+    let entry_source = if entry_path.is_some() {
+        string_source.take().map(String::into_bytes)
+    } else {
+        None
+    };
+    let virtual_fs = VirtualSassFs::new(entry_path.clone(), entry_source, limits);
     let mut grass_options = grass::Options::default()
         .input_syntax(syntax)
         .quiet(true)
-        .allows_charset(false);
-    if let Some(virtual_fs) = virtual_fs.as_ref() {
-        grass_options = grass_options.fs(virtual_fs);
-    }
+        .allows_charset(false)
+        .fs(&virtual_fs);
     if let Some(filename) = options.filename.as_deref() {
         if let Some(parent) = Path::new(filename).parent() {
             grass_options = grass_options.load_path(parent);
@@ -187,99 +202,273 @@ pub(crate) fn preprocess_sass_with_grass(
     for load_path in &options.preprocess_options.load_paths {
         grass_options = grass_options.load_path(load_path);
     }
-    if let Some(path) = entry_path {
-        grass::from_path(path, &grass_options).map_err(|error| error.to_string())
+    let compilation = if let Some(path) = entry_path {
+        grass::from_path(path, &grass_options)
+    } else if let Some(source) = string_source {
+        grass::from_string(source, &grass_options)
     } else {
-        grass::from_string(source.to_string(), &grass_options).map_err(|error| error.to_string())
+        return Err(StylePreprocessError::input_limit(
+            "Sass source ownership was unavailable",
+        ));
+    };
+    drop(grass_options);
+    let state = virtual_fs.into_state();
+    if let Some(error) = state.error {
+        return Err(error);
     }
+    let code = compilation.map_err(|error| StylePreprocessError::unsupported(error.to_string()))?;
+    Ok(PreprocessResult {
+        code,
+        dependencies: state.dependencies.into_iter().collect(),
+    })
 }
 
 #[derive(Debug)]
 pub(crate) struct VirtualSassFs {
-    pub(crate) entry_path: PathBuf,
-    pub(crate) entry_source: Vec<u8>,
+    pub(crate) entry_path: Option<PathBuf>,
+    pub(crate) entry_source: Option<Vec<u8>>,
+    pub(crate) limits: StyleImportLimits,
+    pub(crate) state: RefCell<VirtualSassFsState>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct VirtualSassFsState {
+    pub(crate) dependencies: BTreeSet<String>,
+    pub(crate) imported_files: usize,
+    pub(crate) imported_bytes: usize,
+    pub(crate) path_probes: usize,
+    pub(crate) error: Option<StylePreprocessError>,
 }
 
 impl VirtualSassFs {
-    pub(crate) fn new(entry_path: PathBuf, entry_source: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        entry_path: Option<PathBuf>,
+        entry_source: Option<Vec<u8>>,
+        limits: StyleImportLimits,
+    ) -> Self {
         Self {
             entry_path,
             entry_source,
+            limits,
+            state: RefCell::new(VirtualSassFsState::default()),
         }
     }
 
     pub(crate) fn is_entry(&self, path: &Path) -> bool {
-        path == self.entry_path
+        self.entry_path.as_deref() == Some(path)
+    }
+
+    pub(crate) fn into_state(self) -> VirtualSassFsState {
+        self.state.into_inner()
+    }
+
+    fn claim_path_probe(&self, path: &Path) -> bool {
+        let mut state = self.state.borrow_mut();
+        if state.error.is_some() {
+            return false;
+        }
+        let path_bytes = path.as_os_str().as_encoded_bytes().len();
+        if path_bytes > self.limits.max_path_bytes {
+            state.error = Some(StylePreprocessError::import_limit(
+                format!(
+                    "Sass import resolution path exceeds the maximum of {} bytes",
+                    self.limits.max_path_bytes
+                ),
+                None,
+            ));
+            return false;
+        }
+        if state.path_probes >= self.limits.max_path_probes {
+            state.error = Some(StylePreprocessError::import_limit(
+                format!(
+                    "Sass import resolution exceeds the maximum of {} path probes",
+                    self.limits.max_path_probes
+                ),
+                None,
+            ));
+            return false;
+        }
+        state.path_probes += 1;
+        true
+    }
+
+    fn stored_io_error(&self) -> Option<io::Error> {
+        self.state
+            .borrow()
+            .error
+            .as_ref()
+            .map(|error| io::Error::other(error.message.clone()))
+    }
+
+    fn store_error(&self, error: StylePreprocessError) {
+        let mut state = self.state.borrow_mut();
+        if state.error.is_none() {
+            state.error = Some(error);
+        }
+    }
+
+    fn clone_entry_source(&self) -> io::Result<Vec<u8>> {
+        let Some(source) = self.entry_source.as_deref() else {
+            self.store_error(StylePreprocessError::input_limit(
+                "virtual Sass entry source is unavailable",
+            ));
+            return Ok(Vec::new());
+        };
+        let mut cloned = Vec::new();
+        if cloned.try_reserve_exact(source.len()).is_err() {
+            self.store_error(StylePreprocessError::input_limit(
+                "virtual Sass entry source could not reserve capacity",
+            ));
+            return Ok(Vec::new());
+        }
+        cloned.extend_from_slice(source);
+        Ok(cloned)
+    }
+
+    fn read_external(&self, path: &Path) -> io::Result<Vec<u8>> {
+        // Grass 0.13 panics when an imported `Fs::read` returns an I/O error.
+        // Persist the real error and provide a placeholder until the caller regains control.
+        if self.state.borrow().error.is_some() {
+            return Ok(Vec::new());
+        }
+        let path_bytes = path.as_os_str().as_encoded_bytes().len();
+        if path_bytes > self.limits.max_path_bytes {
+            self.store_error(StylePreprocessError::import_limit(
+                format!(
+                    "Sass import resolution path exceeds the maximum of {} bytes",
+                    self.limits.max_path_bytes
+                ),
+                None,
+            ));
+            return Ok(Vec::new());
+        }
+        let remaining_total_bytes = {
+            let state = self.state.borrow();
+            if state.imported_files >= self.limits.max_files {
+                drop(state);
+                self.store_error(StylePreprocessError::import_limit(
+                    format!(
+                        "Sass imports exceed the maximum file count of {}",
+                        self.limits.max_files
+                    ),
+                    None,
+                ));
+                return Ok(Vec::new());
+            }
+            self.limits
+                .max_total_bytes
+                .saturating_sub(state.imported_bytes)
+        };
+        let read_limit = self
+            .limits
+            .max_file_bytes
+            .min(remaining_total_bytes)
+            .saturating_add(1);
+        let read_limit = u64::try_from(read_limit).unwrap_or(u64::MAX);
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.store_error(StylePreprocessError::import_resolve(
+                    format!(
+                        "Sass import could not be read: {}: {error}",
+                        path.to_string_lossy()
+                    ),
+                    None,
+                ));
+                return Ok(Vec::new());
+            }
+        };
+        let mut bytes = Vec::new();
+        if let Err(error) = file.take(read_limit).read_to_end(&mut bytes) {
+            self.store_error(StylePreprocessError::import_resolve(
+                format!(
+                    "Sass import could not be read: {}: {error}",
+                    path.to_string_lossy()
+                ),
+                None,
+            ));
+            return Ok(Vec::new());
+        }
+        if bytes.len() > self.limits.max_file_bytes {
+            self.store_error(StylePreprocessError::import_limit(
+                format!(
+                    "Sass import exceeds the maximum of {} bytes: {}",
+                    self.limits.max_file_bytes,
+                    path.to_string_lossy()
+                ),
+                None,
+            ));
+            return Ok(Vec::new());
+        }
+        if std::str::from_utf8(&bytes).is_err() {
+            self.store_error(StylePreprocessError::import_resolve(
+                format!("Sass import is not valid UTF-8: {}", path.to_string_lossy()),
+                None,
+            ));
+            return Ok(Vec::new());
+        }
+        let mut state = self.state.borrow_mut();
+        let Some(imported_bytes) = state.imported_bytes.checked_add(bytes.len()) else {
+            drop(state);
+            self.store_error(StylePreprocessError::import_limit(
+                "Sass import byte count overflowed",
+                None,
+            ));
+            return Ok(Vec::new());
+        };
+        if imported_bytes > self.limits.max_total_bytes {
+            drop(state);
+            self.store_error(StylePreprocessError::import_limit(
+                format!(
+                    "Sass imports exceed the maximum total of {} bytes",
+                    self.limits.max_total_bytes
+                ),
+                None,
+            ));
+            return Ok(Vec::new());
+        }
+        state.imported_files += 1;
+        state.imported_bytes = imported_bytes;
+        state
+            .dependencies
+            .insert(normalize_native_dependency_path(path));
+        Ok(bytes)
     }
 }
 
 impl grass::Fs for VirtualSassFs {
     fn is_dir(&self, path: &Path) -> bool {
-        path.is_dir()
+        !self.is_entry(path) && self.claim_path_probe(path) && path.is_dir()
     }
 
     fn is_file(&self, path: &Path) -> bool {
-        self.is_entry(path) || path.is_file()
+        self.is_entry(path) || (self.claim_path_probe(path) && path.is_file())
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         if self.is_entry(path) {
-            Ok(self.entry_source.clone())
+            self.clone_entry_source()
         } else {
-            std::fs::read(path)
+            self.read_external(path)
         }
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         if self.is_entry(path) {
-            Ok(self.entry_path.clone())
-        } else {
+            self.entry_path.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "virtual Sass entry path is unavailable",
+                )
+            })
+        } else if self.claim_path_probe(path) {
             std::fs::canonicalize(path)
+        } else {
+            Err(self
+                .stored_io_error()
+                .unwrap_or_else(|| io::Error::other("Sass import resolution path probe failed")))
         }
     }
-}
-
-pub(crate) fn sass_dependencies(source: &str, options: &StyleCompileOptions) -> Vec<String> {
-    let Some(filename) = options.filename.as_deref() else {
-        return Vec::new();
-    };
-    let base_dir = Path::new(filename)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let mut dependencies = Vec::new();
-    for import in sass_imports(source) {
-        for candidate in sass_import_candidates(&base_dir, &import) {
-            if candidate.exists() {
-                dependencies.push(normalize_native_dependency_path(
-                    &std::fs::canonicalize(&candidate).unwrap_or(candidate),
-                ));
-                break;
-            }
-        }
-    }
-    dependencies.sort();
-    dependencies.dedup();
-    dependencies
-}
-
-pub(crate) fn sass_imports(source: &str) -> Vec<String> {
-    let mut imports = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("@import")
-            && !trimmed.starts_with("@use")
-            && !trimmed.starts_with("@forward")
-        {
-            continue;
-        }
-        if let Some(path) = quoted_style_import_path(trimmed) {
-            if !is_css_import(&path) {
-                imports.push(path);
-            }
-        }
-    }
-    imports
 }
 
 pub(crate) fn quoted_style_import_path(source: &str) -> Option<String> {
@@ -295,32 +484,6 @@ pub(crate) fn is_css_import(path: &str) -> bool {
         || path.starts_with("https://")
         || path.ends_with(".css")
         || path.starts_with("url(")
-}
-
-pub(crate) fn sass_import_candidates(base_dir: &Path, import: &str) -> Vec<PathBuf> {
-    let import_path = Path::new(import);
-    let base = if import_path.is_absolute() {
-        PathBuf::from(import_path)
-    } else {
-        base_dir.join(import_path)
-    };
-    let mut candidates = Vec::new();
-    let has_extension = base.extension().is_some();
-    if has_extension {
-        candidates.push(base.clone());
-        if let (Some(parent), Some(file_name)) = (base.parent(), base.file_name()) {
-            candidates.push(parent.join(format!("_{}", file_name.to_string_lossy())));
-        }
-        return candidates;
-    }
-    for extension in ["scss", "sass", "css"] {
-        candidates.push(base.with_extension(extension));
-        if let (Some(parent), Some(file_name)) = (base.parent(), base.file_name()) {
-            let partial = parent.join(format!("_{}.{}", file_name.to_string_lossy(), extension));
-            candidates.push(partial);
-        }
-    }
-    candidates
 }
 
 pub(crate) fn normalize_dependency_path(path: &Path) -> String {
@@ -511,40 +674,7 @@ impl StyleImportContext {
         limits: StyleImportLimits,
     ) -> Result<Self, StylePreprocessError> {
         let configured_paths = &options.preprocess_options.load_paths;
-        if configured_paths.len() > limits.max_load_paths {
-            return Err(StylePreprocessError::import_limit(
-                format!(
-                    "style preprocessor load paths exceed the maximum count of {}",
-                    limits.max_load_paths
-                ),
-                None,
-            ));
-        }
-        let mut load_path_bytes = 0usize;
-        for path in configured_paths {
-            let path_bytes = Path::new(path).as_os_str().as_encoded_bytes().len();
-            validate_style_import_path_bytes(
-                path_bytes,
-                limits.max_path_bytes,
-                format_args!("style preprocessor load path"),
-                None,
-            )?;
-            load_path_bytes = load_path_bytes.checked_add(path_bytes).ok_or_else(|| {
-                StylePreprocessError::import_limit(
-                    "style preprocessor load path size overflowed",
-                    None,
-                )
-            })?;
-            if load_path_bytes > limits.max_total_load_path_bytes {
-                return Err(StylePreprocessError::import_limit(
-                    format!(
-                        "style preprocessor load paths exceed the maximum total of {} bytes",
-                        limits.max_total_load_path_bytes
-                    ),
-                    None,
-                ));
-            }
-        }
+        validate_style_import_load_paths(configured_paths, limits)?;
         let mut load_paths = Vec::new();
         load_paths
             .try_reserve_exact(configured_paths.len())
@@ -595,6 +725,44 @@ impl StyleImportContext {
         self.path_probes += 1;
         Ok(())
     }
+}
+
+pub(crate) fn validate_style_import_load_paths(
+    configured_paths: &[String],
+    limits: StyleImportLimits,
+) -> Result<(), StylePreprocessError> {
+    if configured_paths.len() > limits.max_load_paths {
+        return Err(StylePreprocessError::import_limit(
+            format!(
+                "style preprocessor load paths exceed the maximum count of {}",
+                limits.max_load_paths
+            ),
+            None,
+        ));
+    }
+    let mut load_path_bytes = 0usize;
+    for path in configured_paths {
+        let path_bytes = Path::new(path).as_os_str().as_encoded_bytes().len();
+        validate_style_import_path_bytes(
+            path_bytes,
+            limits.max_path_bytes,
+            format_args!("style preprocessor load path"),
+            None,
+        )?;
+        load_path_bytes = load_path_bytes.checked_add(path_bytes).ok_or_else(|| {
+            StylePreprocessError::import_limit("style preprocessor load path size overflowed", None)
+        })?;
+        if load_path_bytes > limits.max_total_load_path_bytes {
+            return Err(StylePreprocessError::import_limit(
+                format!(
+                    "style preprocessor load paths exceed the maximum total of {} bytes",
+                    limits.max_total_load_path_bytes
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn inline_less_imports(

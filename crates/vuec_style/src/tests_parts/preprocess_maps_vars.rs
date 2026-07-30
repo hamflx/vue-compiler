@@ -1108,7 +1108,7 @@ breakpoint = 700px
     }
 
     #[test]
-    fn lightweight_preprocessors_bound_load_paths_before_copying() {
+    fn preprocessors_bound_load_paths_before_copying() {
         fn options(load_paths: &[&str]) -> StyleCompileOptions {
             StyleCompileOptions {
                 preprocess_options: StylePreprocessOptions {
@@ -1151,7 +1151,7 @@ breakpoint = 700px
         assert_eq!(total_error.code, "VUEC_STYLE_IMPORT_LIMIT");
 
         let excessive_paths = vec![".".to_string(); STYLE_PREPROCESS_MAX_IMPORT_LOAD_PATHS + 1];
-        for language in ["less", "styl"] {
+        for language in ["less", "styl", "scss", "sass"] {
             let result = compile_style(
                 ".root { color: red; }",
                 StyleCompileOptions {
@@ -1171,6 +1171,263 @@ breakpoint = 700px
                 "{language}"
             );
         }
+    }
+
+    #[test]
+    fn sass_filesystem_enforces_import_budgets_atomically() {
+        fn limits() -> StyleImportLimits {
+            StyleImportLimits {
+                max_files: 4,
+                max_file_bytes: 4,
+                max_total_bytes: 8,
+                max_path_bytes: 32 * 1024,
+                max_path_probes: 8,
+                ..StyleImportLimits::default()
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first = dir.path().join("first.scss");
+        let second = dir.path().join("second.scss");
+        std::fs::write(&first, "ab").expect("write first Sass dependency");
+        std::fs::write(&second, "cd").expect("write second Sass dependency");
+
+        let exact = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_files: 2,
+                max_file_bytes: 2,
+                max_total_bytes: 4,
+                ..limits()
+            },
+        );
+        assert_eq!(
+            grass::Fs::read(&exact, &first).expect("first exact Sass import"),
+            b"ab"
+        );
+        assert_eq!(
+            grass::Fs::read(&exact, &second).expect("second exact Sass import"),
+            b"cd"
+        );
+        let exact_state = exact.state.borrow();
+        assert_eq!(exact_state.imported_files, 2);
+        assert_eq!(exact_state.imported_bytes, 4);
+        assert_eq!(exact_state.dependencies.len(), 2);
+        assert!(exact_state.error.is_none());
+        drop(exact_state);
+
+        let file_limited = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_file_bytes: 1,
+                ..limits()
+            },
+        );
+        assert!(grass::Fs::read(&file_limited, &first)
+            .expect("bounded Sass filesystem placeholder")
+            .is_empty());
+        let file_state = file_limited.state.borrow();
+        assert_eq!(file_state.imported_files, 0);
+        assert_eq!(file_state.imported_bytes, 0);
+        assert!(file_state.dependencies.is_empty());
+        assert_eq!(
+            file_state.error.as_ref().map(|error| error.code),
+            Some("VUEC_STYLE_IMPORT_LIMIT")
+        );
+        drop(file_state);
+
+        let total_limited = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_file_bytes: 2,
+                max_total_bytes: 3,
+                ..limits()
+            },
+        );
+        grass::Fs::read(&total_limited, &first).expect("first Sass import within total bytes");
+        assert!(grass::Fs::read(&total_limited, &second)
+            .expect("bounded Sass filesystem placeholder")
+            .is_empty());
+        let total_state = total_limited.state.borrow();
+        assert_eq!(total_state.imported_files, 1);
+        assert_eq!(total_state.imported_bytes, 2);
+        assert_eq!(total_state.dependencies.len(), 1);
+        assert_eq!(
+            total_state
+                .error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            Some("Sass imports exceed the maximum total of 3 bytes")
+        );
+        drop(total_state);
+
+        let count_limited = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_files: 1,
+                max_file_bytes: 2,
+                ..limits()
+            },
+        );
+        grass::Fs::read(&count_limited, &first).expect("first Sass import within file count");
+        assert!(grass::Fs::read(&count_limited, &second)
+            .expect("bounded Sass filesystem placeholder")
+            .is_empty());
+        let count_state = count_limited.state.borrow();
+        assert_eq!(count_state.imported_files, 1);
+        assert_eq!(count_state.imported_bytes, 2);
+        assert_eq!(
+            count_state
+                .error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            Some("Sass imports exceed the maximum file count of 1")
+        );
+        drop(count_state);
+
+        let probe_limited = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_path_probes: 1,
+                ..limits()
+            },
+        );
+        assert!(grass::Fs::is_file(&probe_limited, &first));
+        assert!(!grass::Fs::is_file(&probe_limited, &second));
+        let probe_state = probe_limited.state.borrow();
+        assert_eq!(probe_state.path_probes, 1);
+        assert_eq!(
+            probe_state
+                .error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            Some("Sass import resolution exceeds the maximum of 1 path probes")
+        );
+        drop(probe_state);
+
+        let path_limited = VirtualSassFs::new(
+            None,
+            None,
+            StyleImportLimits {
+                max_path_bytes: 2,
+                ..limits()
+            },
+        );
+        assert!(!grass::Fs::is_file(&path_limited, Path::new("abc")));
+        let path_state = path_limited.state.borrow();
+        assert_eq!(path_state.path_probes, 0);
+        assert_eq!(
+            path_state.error.as_ref().map(|error| error.message.as_str()),
+            Some("Sass import resolution path exceeds the maximum of 2 bytes")
+        );
+        drop(path_state);
+
+        let entry_path = dir.path().join("entry.scss");
+        let entry = VirtualSassFs::new(
+            Some(entry_path.clone()),
+            Some(b"root".to_vec()),
+            StyleImportLimits {
+                max_files: 0,
+                max_file_bytes: 0,
+                max_total_bytes: 0,
+                max_path_probes: 0,
+                ..limits()
+            },
+        );
+        assert!(grass::Fs::is_file(&entry, &entry_path));
+        assert_eq!(
+            grass::Fs::read(&entry, &entry_path).expect("virtual Sass entry"),
+            b"root"
+        );
+        let entry_state = entry.state.borrow();
+        assert_eq!(entry_state.imported_files, 0);
+        assert_eq!(entry_state.imported_bytes, 0);
+        assert_eq!(entry_state.path_probes, 0);
+        assert!(entry_state.error.is_none());
+    }
+
+    #[test]
+    fn sass_preprocessors_surface_bounded_filesystem_failures() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dependency = dir.path().join("_dependency.scss");
+        let dependency_source = "$color: red;";
+        std::fs::write(&dependency, dependency_source).expect("write Sass dependency");
+
+        for (language, syntax, filename, source) in [
+            (
+                "scss",
+                grass::InputSyntax::Scss,
+                "entry.scss",
+                "@use \"./dependency\" as dep; .root { color: dep.$color; }",
+            ),
+            (
+                "sass",
+                grass::InputSyntax::Sass,
+                "entry.sass",
+                "@use \"./dependency\" as dep\n.root\n  color: dep.$color\n",
+            ),
+        ] {
+            let options = StyleCompileOptions {
+                filename: Some(dir.path().join(filename).to_string_lossy().into_owned()),
+                ..StyleCompileOptions::default()
+            };
+            let error = preprocess_sass_with_grass_and_limits(
+                source.into(),
+                &options,
+                syntax,
+                StyleImportLimits {
+                    max_file_bytes: dependency_source.len() - 1,
+                    ..StyleImportLimits::default()
+                },
+            )
+            .err()
+            .expect("Sass dependency beyond byte budget must fail");
+            assert_eq!(error.code, "VUEC_STYLE_IMPORT_LIMIT", "{language}");
+            assert!(
+                error.message.starts_with("Sass import exceeds the maximum"),
+                "{language}: {}",
+                error.message
+            );
+
+            let probe_error = preprocess_sass_with_grass_and_limits(
+                source.into(),
+                &options,
+                syntax,
+                StyleImportLimits {
+                    max_path_probes: 0,
+                    ..StyleImportLimits::default()
+                },
+            )
+            .err()
+            .expect("Sass import resolution beyond probe budget must fail");
+            assert_eq!(probe_error.code, "VUEC_STYLE_IMPORT_LIMIT", "{language}");
+            assert_eq!(
+                probe_error.message,
+                "Sass import resolution exceeds the maximum of 0 path probes",
+                "{language}"
+            );
+        }
+
+        let invalid = dir.path().join("_invalid.scss");
+        std::fs::write(&invalid, [0xff]).expect("write invalid UTF-8 Sass dependency");
+        let invalid_error = preprocess_sass_with_grass_and_limits(
+            "@use \"./invalid\";".into(),
+            &StyleCompileOptions {
+                filename: Some(dir.path().join("invalid-entry.scss").to_string_lossy().into_owned()),
+                ..StyleCompileOptions::default()
+            },
+            grass::InputSyntax::Scss,
+            StyleImportLimits::default(),
+        )
+        .err()
+        .expect("invalid UTF-8 Sass dependency must fail without panicking");
+        assert_eq!(invalid_error.code, "VUEC_STYLE_IMPORT_RESOLVE");
+        assert!(invalid_error.message.starts_with("Sass import is not valid UTF-8:"));
     }
 
     #[test]
@@ -1571,7 +1828,16 @@ space = 12px
         let dir = tempfile::tempdir().expect("temp dir");
         let base = dir.path().join("test.scss");
         let import = dir.path().join("import.scss");
-        std::fs::write(&import, ".imported { color: $red; }\n").expect("write import");
+        let nested_import = dir.path().join("_nested.scss");
+        let additional_import = dir.path().join("_additional.scss");
+        std::fs::write(
+            &import,
+            "@import \"./nested\";\n.imported { color: $red; }\n",
+        )
+        .expect("write import");
+        std::fs::write(&nested_import, ".nested { display: block; }\n")
+            .expect("write nested import");
+        std::fs::write(&additional_import, "$red: red;\n").expect("write additional import");
 
         let result = compile_style(
             r#"
@@ -1586,7 +1852,7 @@ space = 12px
                 preprocess_options: StylePreprocessOptions {
                     additional_data: Some(
                         r#"
-$red: red;
+@import "./additional";
 @mixin square($size) {
   width: $size;
   height: $size;
@@ -1602,18 +1868,18 @@ $red: red;
 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(result.code.contains(".imported"));
+        assert!(result.code.contains(".nested"));
         assert!(result.code.contains("color: red;"));
         assert!(result.code.contains("width: 100px;"));
-        let resolved_import = std::fs::canonicalize(import)
-            .expect("canonical import")
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(
-            result.dependencies,
-            vec![normalize_native_dependency_path(Path::new(
-                &resolved_import
-            ))]
-        );
+        let mut expected = [import, nested_import, additional_import]
+            .into_iter()
+            .map(|path| {
+                let resolved = std::fs::canonicalize(path).expect("canonical Sass dependency");
+                normalize_native_dependency_path(&resolved)
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(result.dependencies, expected);
     }
 
     #[test]
