@@ -1,10 +1,250 @@
 use crate::*;
+use std::io::Read;
+use std::sync::Arc;
+
+pub(crate) const CSS_MODULES_MAX_IMPORT_DEPTH: usize = 64;
+pub(crate) const CSS_MODULES_MAX_IMPORT_FILES: usize = 512;
+pub(crate) const CSS_MODULES_MAX_IMPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_PATH_BYTES: usize = 32 * 1024;
+pub(crate) const CSS_MODULES_MAX_PATH_PROBES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CssModulesImportLimits {
+    pub(crate) max_depth: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_file_bytes: usize,
+    pub(crate) max_total_bytes: usize,
+    pub(crate) max_metadata_file_bytes: usize,
+    pub(crate) max_metadata_bytes: usize,
+    pub(crate) max_path_bytes: usize,
+    pub(crate) max_path_probes: usize,
+}
+
+impl Default for CssModulesImportLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: CSS_MODULES_MAX_IMPORT_DEPTH,
+            max_files: CSS_MODULES_MAX_IMPORT_FILES,
+            max_file_bytes: CSS_MODULES_MAX_IMPORT_FILE_BYTES,
+            max_total_bytes: CSS_MODULES_MAX_IMPORT_BYTES,
+            max_metadata_file_bytes: CSS_MODULES_MAX_METADATA_FILE_BYTES,
+            max_metadata_bytes: CSS_MODULES_MAX_METADATA_BYTES,
+            max_path_bytes: CSS_MODULES_MAX_PATH_BYTES,
+            max_path_probes: CSS_MODULES_MAX_PATH_PROBES,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CssModulesImportError {
+    pub(crate) message: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct CssModulesImportState {
+    pub(crate) limits: CssModulesImportLimits,
+    pub(crate) active_paths: Vec<PathBuf>,
+    pub(crate) imported_files: usize,
+    pub(crate) imported_bytes: usize,
+    pub(crate) metadata_bytes: usize,
+    pub(crate) path_probes: usize,
+    pub(crate) error: Option<CssModulesImportError>,
+}
+
+impl CssModulesImportState {
+    pub(crate) fn new(limits: CssModulesImportLimits) -> Self {
+        Self {
+            limits,
+            active_paths: Vec::new(),
+            imported_files: 0,
+            imported_bytes: 0,
+            metadata_bytes: 0,
+            path_probes: 0,
+            error: None,
+        }
+    }
+
+    pub(crate) fn fail(&mut self, message: impl Into<String>) {
+        if self.error.is_none() {
+            self.error = Some(CssModulesImportError {
+                message: message.into(),
+            });
+        }
+    }
+
+    pub(crate) fn validate_path(&mut self, path: &Path, description: &str) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let bytes = path.as_os_str().as_encoded_bytes().len();
+        if bytes > self.limits.max_path_bytes {
+            self.fail(format!(
+                "{description} exceeds the maximum of {} bytes",
+                self.limits.max_path_bytes
+            ));
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn claim_path_probe(&mut self, path: &Path, description: &str) -> bool {
+        if !self.validate_path(path, description) {
+            return false;
+        }
+        if self.path_probes >= self.limits.max_path_probes {
+            self.fail(format!(
+                "CSS Modules import resolution exceeds the maximum of {} path probes",
+                self.limits.max_path_probes
+            ));
+            return false;
+        }
+        self.path_probes += 1;
+        true
+    }
+
+    pub(crate) fn is_file(&mut self, path: &Path) -> bool {
+        self.claim_path_probe(path, "CSS Modules import resolution path") && path.is_file()
+    }
+
+    pub(crate) fn is_dir(&mut self, path: &Path) -> bool {
+        self.claim_path_probe(path, "CSS Modules import resolution path") && path.is_dir()
+    }
+
+    pub(crate) fn canonicalize(&mut self, path: &Path) -> Option<PathBuf> {
+        if !self.claim_path_probe(path, "CSS Modules import resolution path") {
+            return None;
+        }
+        std::fs::canonicalize(path).ok()
+    }
+
+    pub(crate) fn read_module(&mut self, path: &Path) -> Option<String> {
+        if !self.validate_path(path, "CSS Modules import path") {
+            return None;
+        }
+        if self.imported_files >= self.limits.max_files {
+            self.fail(format!(
+                "CSS Modules imports exceed the maximum file count of {}",
+                self.limits.max_files
+            ));
+            return None;
+        }
+        let remaining = self
+            .limits
+            .max_total_bytes
+            .saturating_sub(self.imported_bytes);
+        let read_limit = self
+            .limits
+            .max_file_bytes
+            .min(remaining)
+            .saturating_add(1);
+        let file = std::fs::File::open(path).ok()?;
+        let mut bytes = Vec::new();
+        let read_result = file
+            .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes);
+        if bytes.len() > self.limits.max_file_bytes {
+            self.fail(format!(
+                "CSS Modules import exceeds the maximum of {} bytes: {}",
+                self.limits.max_file_bytes,
+                path.to_string_lossy()
+            ));
+            return None;
+        }
+        let imported_bytes = self.imported_bytes.checked_add(bytes.len()).or_else(|| {
+            self.fail("CSS Modules import byte count overflowed");
+            None
+        })?;
+        if imported_bytes > self.limits.max_total_bytes {
+            self.fail(format!(
+                "CSS Modules imports exceed the maximum total of {} bytes",
+                self.limits.max_total_bytes
+            ));
+            return None;
+        }
+        self.imported_files += 1;
+        self.imported_bytes = imported_bytes;
+        read_result.ok()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    pub(crate) fn read_metadata(&mut self, path: &Path) -> Option<String> {
+        if !self.claim_path_probe(path, "CSS Modules package metadata path") {
+            return None;
+        }
+        let remaining = self
+            .limits
+            .max_metadata_bytes
+            .saturating_sub(self.metadata_bytes);
+        let read_limit = self
+            .limits
+            .max_metadata_file_bytes
+            .min(remaining)
+            .saturating_add(1);
+        let file = std::fs::File::open(path).ok()?;
+        let mut bytes = Vec::new();
+        let read_result = file
+            .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes);
+        if bytes.len() > self.limits.max_metadata_file_bytes {
+            self.fail(format!(
+                "CSS Modules package metadata exceeds the maximum of {} bytes: {}",
+                self.limits.max_metadata_file_bytes,
+                path.to_string_lossy()
+            ));
+            return None;
+        }
+        let metadata_bytes = self.metadata_bytes.checked_add(bytes.len()).or_else(|| {
+            self.fail("CSS Modules package metadata byte count overflowed");
+            None
+        })?;
+        if metadata_bytes > self.limits.max_metadata_bytes {
+            self.fail(format!(
+                "CSS Modules package metadata exceeds the maximum total of {} bytes",
+                self.limits.max_metadata_bytes
+            ));
+            return None;
+        }
+        self.metadata_bytes = metadata_bytes;
+        read_result.ok()?;
+        String::from_utf8(bytes).ok()
+    }
+}
 
 pub(crate) fn compile_css_modules(
     source: &str,
     hash_source: &str,
     options: &StyleCompileOptions,
 ) -> CssModulesCompileResult {
+    compile_css_modules_with_limits(
+        source,
+        hash_source,
+        options,
+        CssModulesImportLimits::default(),
+    )
+}
+
+pub(crate) fn compile_css_modules_with_limits(
+    source: &str,
+    hash_source: &str,
+    options: &StyleCompileOptions,
+    limits: CssModulesImportLimits,
+) -> CssModulesCompileResult {
+    let mut load_state = CssModulesImportState::new(limits);
+    let filename = options.filename.as_deref().unwrap_or("style.css");
+    if !load_state.validate_path(Path::new(filename), "CSS Modules entry path") {
+        return css_modules_import_limit_result(source, options, load_state.error);
+    }
+    let active_path = load_state
+        .canonicalize(Path::new(filename))
+        .unwrap_or_else(|| PathBuf::from(filename));
+    if load_state.error.is_some()
+        || !load_state.validate_path(&active_path, "CSS Modules resolved entry path")
+    {
+        return css_modules_import_limit_result(source, options, load_state.error);
+    }
     let filename = options
         .filename
         .as_deref()
@@ -15,16 +255,54 @@ pub(crate) fn compile_css_modules(
         &options.modules_options.global_module_paths,
         &filename,
     );
-    let mut active_paths = Vec::new();
-    compile_css_modules_file(
+    load_state.active_paths.push(active_path);
+    let mut result = compile_css_modules_file(
         source,
         hash_source,
         options,
         filename,
         scope_behaviour,
         false,
-        &mut active_paths,
-    )
+        &mut load_state,
+    );
+    load_state.active_paths.pop();
+    if let Some(error) = load_state.error {
+        result.diagnostics.push(css_modules_import_diagnostic(
+            source,
+            options,
+            error,
+        ));
+    }
+    result
+}
+
+fn css_modules_import_limit_result(
+    source: &str,
+    options: &StyleCompileOptions,
+    error: Option<CssModulesImportError>,
+) -> CssModulesCompileResult {
+    CssModulesCompileResult {
+        code: String::new(),
+        raw_modules: BTreeMap::new(),
+        modules: BTreeMap::new(),
+        diagnostics: error
+            .map(|error| css_modules_import_diagnostic(source, options, error))
+            .into_iter()
+            .collect(),
+        has_prepended_css: false,
+    }
+}
+
+fn css_modules_import_diagnostic(
+    source: &str,
+    options: &StyleCompileOptions,
+    error: CssModulesImportError,
+) -> Diagnostic {
+    Diagnostic::error("VUEC_STYLE_MODULE_LIMIT", error.message).with_span(Some(style_source_span(
+        options,
+        0,
+        first_span_end(source),
+    )))
 }
 
 pub(crate) fn compile_css_modules_file(
@@ -34,20 +312,15 @@ pub(crate) fn compile_css_modules_file(
     filename: String,
     scope_behaviour: CssModulesScopeBehaviour,
     imported_dependency: bool,
-    active_paths: &mut Vec<PathBuf>,
+    load_state: &mut CssModulesImportState,
 ) -> CssModulesCompileResult {
-    let active_path = css_module_active_path(&filename);
-    let pushed_active = !active_paths.iter().any(|active| active == &active_path);
-    if pushed_active {
-        active_paths.push(active_path);
-    }
     let mut context = CssModulesContext::new(
         options,
         filename,
         hash_source.to_string(),
         scope_behaviour,
         imported_dependency,
-        active_paths,
+        load_state,
     );
     let source = prepare_css_module_values(source, &mut context);
     let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root, false);
@@ -55,9 +328,6 @@ pub(crate) fn compile_css_modules_file(
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
     let modules = context.modules();
-    if pushed_active {
-        context.active_paths.pop();
-    }
     CssModulesCompileResult {
         code,
         raw_modules,
@@ -90,7 +360,7 @@ pub(crate) struct CssModulesContext<'a> {
     pub(crate) raw_exports: Vec<CssModuleExport>,
     pub(crate) raw_export_index: BTreeMap<String, usize>,
     pub(crate) import_symbols: BTreeMap<String, CssModuleImportSymbol>,
-    pub(crate) imported_modules: BTreeMap<String, CssModulesCompileResult>,
+    pub(crate) imported_modules: BTreeMap<String, Arc<CssModulesCompileResult>>,
     pub(crate) prepended_css_has_nested_import: bool,
     pub(crate) value_placeholders: BTreeMap<String, String>,
     pub(crate) value_placeholder_modules: BTreeMap<String, String>,
@@ -98,7 +368,7 @@ pub(crate) struct CssModulesContext<'a> {
     pub(crate) prepended_paths: BTreeSet<String>,
     pub(crate) prepended_css: Vec<String>,
     pub(crate) diagnostics: Vec<Diagnostic>,
-    pub(crate) active_paths: &'a mut Vec<PathBuf>,
+    pub(crate) load_state: &'a mut CssModulesImportState,
 }
 
 impl<'a> CssModulesContext<'a> {
@@ -108,7 +378,7 @@ impl<'a> CssModulesContext<'a> {
         hash_source: String,
         scope_behaviour: CssModulesScopeBehaviour,
         imported_dependency: bool,
-        active_paths: &'a mut Vec<PathBuf>,
+        load_state: &'a mut CssModulesImportState,
     ) -> Self {
         Self {
             options,
@@ -133,7 +403,7 @@ impl<'a> CssModulesContext<'a> {
             prepended_paths: BTreeSet::new(),
             prepended_css: Vec::new(),
             diagnostics: Vec::new(),
-            active_paths,
+            load_state,
         }
     }
 
@@ -297,37 +567,58 @@ impl<'a> CssModulesContext<'a> {
         output
     }
 
-    pub(crate) fn load_imported_module(&mut self, import: &str) -> Option<CssModulesCompileResult> {
-        let resolved = resolve_css_module_import(import, &self.filename)?;
+    pub(crate) fn load_imported_module(
+        &mut self,
+        import: &str,
+    ) -> Option<Arc<CssModulesCompileResult>> {
+        if self.load_state.error.is_some() {
+            return None;
+        }
+        let resolved = resolve_css_module_import(import, &self.filename, self.load_state)?;
         let normalized = normalize_dependency_path(&resolved.path);
         if let Some(result) = self.imported_modules.get(&normalized) {
-            return Some(result.clone());
+            return Some(Arc::clone(result));
         }
         if self
+            .load_state
             .active_paths
             .iter()
             .any(|active| active == &resolved.path)
         {
             return None;
         }
-        let source = std::fs::read_to_string(&resolved.path).ok()?;
+        let imported_depth = self.load_state.active_paths.len().saturating_sub(1);
+        if imported_depth >= self.load_state.limits.max_depth {
+            self.load_state.fail(format!(
+                "CSS Modules imports exceed the maximum depth of {}",
+                self.load_state.limits.max_depth
+            ));
+            return None;
+        }
+        let source = self.load_state.read_module(&resolved.path)?;
         let normalized_source = normalize_style_output(&source);
-        let result = compile_css_modules_file(
+        self.load_state.active_paths.push(resolved.path.clone());
+        let result = Arc::new(compile_css_modules_file(
             &normalized_source,
             &source,
             self.options,
             resolved.logical_filename,
             self.scope_behaviour,
             true,
-            self.active_paths,
-        );
+            self.load_state,
+        ));
+        self.load_state.active_paths.pop();
+        if self.load_state.error.is_some() {
+            return None;
+        }
         if self.prepended_paths.insert(normalized.clone()) && !result.code.is_empty() {
             if result.has_prepended_css {
                 self.prepended_css_has_nested_import = true;
             }
             self.prepended_css.push(result.code.clone());
         }
-        self.imported_modules.insert(normalized, result.clone());
+        self.imported_modules
+            .insert(normalized, Arc::clone(&result));
         Some(result)
     }
 

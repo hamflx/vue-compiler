@@ -43,12 +43,11 @@ pub(crate) fn css_module_composed_values(
                     push_unique_css_module_value(&mut composed, token.value.to_string());
                 }
             } else {
+                let Some(result) = context.load_imported_module(import) else {
+                    return unsupported_css_module_compose();
+                };
                 for token in &tokens[..from_index] {
-                    let Some(values) =
-                        css_module_external_composed_values(token.value, import, context)
-                    else {
-                        return unsupported_css_module_compose();
-                    };
+                    let values = css_module_external_composed_values(token.value, &result);
                     for value in values {
                         push_unique_css_module_value(&mut composed, value);
                     }
@@ -161,17 +160,13 @@ pub(crate) fn css_module_single_class_selector_name(selector: &str) -> Option<St
 
 pub(crate) fn css_module_external_composed_values(
     class_name: &str,
-    import: &str,
-    context: &mut CssModulesContext<'_>,
-) -> Option<Vec<String>> {
-    let result = context.load_imported_module(import)?;
-    Some(
-        result
-            .raw_modules
-            .get(class_name)
-            .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
-            .unwrap_or_else(|| vec!["undefined".to_string()]),
-    )
+    result: &CssModulesCompileResult,
+) -> Vec<String> {
+    result
+        .raw_modules
+        .get(class_name)
+        .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
+        .unwrap_or_else(|| vec!["undefined".to_string()])
 }
 
 pub(crate) fn parse_css_module_global_compose(value: &str) -> Option<String> {
@@ -301,36 +296,69 @@ pub(crate) struct CssModuleResolvedImport {
 pub(crate) fn resolve_css_module_import(
     import: &str,
     filename: &str,
+    load_state: &mut CssModulesImportState,
 ) -> Option<CssModuleResolvedImport> {
+    if !load_state.validate_path(
+        Path::new(import.trim()),
+        "CSS Modules import specifier",
+    ) {
+        return None;
+    }
     let import = unquote_css_module_path(import);
     let import_path = Path::new(&import);
     let importer_dir = Path::new(filename)
         .parent()
         .unwrap_or_else(|| Path::new(""));
     if import_path.is_absolute() {
-        return css_module_resolved_import(import_path.to_path_buf(), import_path.to_path_buf());
+        return css_module_resolved_import(
+            import_path.to_path_buf(),
+            import_path.to_path_buf(),
+            load_state,
+        );
     }
 
     if is_relative_css_module_import(&import) {
         let logical = importer_dir.join(import_path);
-        return css_module_resolved_import(logical.clone(), logical);
+        return css_module_resolved_import(logical.clone(), logical, load_state);
     }
 
-    resolve_css_module_node_modules_import(&import, importer_dir).or_else(|| {
-        let logical = importer_dir.join(import_path);
-        css_module_resolved_import(logical.clone(), logical)
-    })
+    let resolved = resolve_css_module_node_modules_import(&import, importer_dir, load_state);
+    if resolved.is_some() || load_state.error.is_some() {
+        return resolved;
+    }
+    if !is_safe_css_module_bare_fallback_path(&import, import_path) {
+        return None;
+    }
+    let logical = importer_dir.join(import_path);
+    css_module_resolved_import(logical.clone(), logical, load_state)
+}
+
+fn is_safe_css_module_bare_fallback_path(import: &str, path: &Path) -> bool {
+    !import.is_empty()
+        && !import.contains('\\')
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 pub(crate) fn css_module_resolved_import(
     path: PathBuf,
     logical_filename: PathBuf,
+    load_state: &mut CssModulesImportState,
 ) -> Option<CssModuleResolvedImport> {
-    if !path.is_file() {
+    if !load_state.validate_path(&logical_filename, "CSS Modules logical import path")
+        || !load_state.is_file(&path)
+    {
+        return None;
+    }
+    let path = load_state.canonicalize(&path).unwrap_or(path);
+    if load_state.error.is_some()
+        || !load_state.validate_path(&path, "CSS Modules resolved import path")
+    {
         return None;
     }
     Some(CssModuleResolvedImport {
-        path: std::fs::canonicalize(&path).unwrap_or(path),
+        path,
         logical_filename: logical_filename.to_string_lossy().to_string(),
     })
 }
@@ -342,25 +370,40 @@ pub(crate) fn is_relative_css_module_import(import: &str) -> bool {
 pub(crate) fn resolve_css_module_node_modules_import(
     import: &str,
     importer_dir: &Path,
+    load_state: &mut CssModulesImportState,
 ) -> Option<CssModuleResolvedImport> {
     let (package_name, subpath) = split_css_module_package_specifier(import)?;
-    for dir in css_module_import_ancestor_dirs(importer_dir) {
+    let start = if importer_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        importer_dir
+    };
+    for dir in start.ancestors() {
         let package_dir = dir.join("node_modules").join(&package_name);
-        if !package_dir.is_dir() {
+        if !load_state.is_dir(&package_dir) {
+            if load_state.error.is_some() {
+                return None;
+            }
             continue;
         }
         let path = if subpath.as_os_str().is_empty() {
-            css_module_package_main_file(&package_dir)?
+            css_module_package_main_file(&package_dir, load_state)?
         } else {
-            match css_module_package_exports_file(&package_dir, &subpath) {
+            match css_module_package_exports_file(&package_dir, &subpath, load_state) {
                 CssModulePackageExportsResolution::Resolved(path) => path,
                 CssModulePackageExportsResolution::Blocked => return None,
                 CssModulePackageExportsResolution::NoExports => package_dir.join(&subpath),
             }
         };
+        if load_state.error.is_some() {
+            return None;
+        }
         let logical = importer_dir.join(import);
-        if let Some(resolved) = css_module_resolved_import(path, logical) {
+        if let Some(resolved) = css_module_resolved_import(path, logical, load_state) {
             return Some(resolved);
+        }
+        if load_state.error.is_some() {
+            return None;
         }
     }
     None
@@ -370,58 +413,83 @@ pub(crate) fn split_css_module_package_specifier(import: &str) -> Option<(String
     if import.is_empty() || import.starts_with('/') || import.starts_with('\\') {
         return None;
     }
-    let parts = import.split('/').collect::<Vec<_>>();
-    if parts.first().is_some_and(|part| part.is_empty()) {
-        return None;
-    }
+    let mut parts = import.split('/');
     if import.starts_with('@') {
-        let scope = *parts.first()?;
-        let name = *parts.get(1)?;
-        if scope.len() <= 1 || name.is_empty() {
+        let scope = parts.next()?;
+        let name = parts.next()?;
+        if scope.len() <= 1
+            || !is_safe_css_module_package_segment(scope)
+            || !is_safe_css_module_package_segment(name)
+        {
             return None;
         }
         let package = format!("{scope}/{name}");
-        let subpath = parts.iter().skip(2).collect::<PathBuf>();
+        let subpath = css_module_package_subpath(parts)?;
         Some((package, subpath))
     } else {
-        let package = (*parts.first()?).to_string();
-        let subpath = parts.iter().skip(1).collect::<PathBuf>();
-        Some((package, subpath))
+        let package = parts.next()?;
+        if !is_safe_css_module_package_segment(package) {
+            return None;
+        }
+        let subpath = css_module_package_subpath(parts)?;
+        Some((package.to_string(), subpath))
     }
 }
 
-pub(crate) fn css_module_import_ancestor_dirs(importer_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let start = if importer_dir.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        importer_dir.to_path_buf()
-    };
-    for ancestor in start.ancestors() {
-        dirs.push(ancestor.to_path_buf());
+fn css_module_package_subpath<'a>(parts: impl Iterator<Item = &'a str>) -> Option<PathBuf> {
+    let mut subpath = PathBuf::new();
+    for part in parts {
+        if !is_safe_css_module_package_segment(part) {
+            return None;
+        }
+        subpath.push(part);
     }
-    dirs
+    Some(subpath)
 }
 
-pub(crate) fn css_module_package_main_file(package_dir: &Path) -> Option<PathBuf> {
-    match css_module_package_exports_file(package_dir, Path::new("")) {
-        CssModulePackageExportsResolution::Resolved(path) => return Some(path),
-        CssModulePackageExportsResolution::Blocked => return None,
-        CssModulePackageExportsResolution::NoExports => {}
+fn is_safe_css_module_package_segment(segment: &str) -> bool {
+    if segment.is_empty() || segment.contains('\\') {
+        return false;
     }
-    let package_json = package_dir.join("package.json");
-    if let Ok(source) = std::fs::read_to_string(package_json) {
-        if let Ok(value) = serde_json::from_str::<CssModulePackageJson>(&source) {
-            if let Some(main) = value.main {
-                let candidate = package_dir.join(main);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+    let mut components = Path::new(segment).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+pub(crate) fn css_module_package_main_file(
+    package_dir: &Path,
+    load_state: &mut CssModulesImportState,
+) -> Option<PathBuf> {
+    let package = read_css_module_package_json(package_dir, load_state);
+    if load_state.error.is_some() {
+        return None;
+    }
+    if let Some(package) = package {
+        match css_module_package_exports_file_from_json(
+            package_dir,
+            Path::new(""),
+            &package,
+            load_state,
+        ) {
+            CssModulePackageExportsResolution::Resolved(path) => return Some(path),
+            CssModulePackageExportsResolution::Blocked => return None,
+            CssModulePackageExportsResolution::NoExports => {}
+        }
+        if let Some(main) = package.main {
+            let main = Path::new(&main);
+            if !is_safe_css_module_package_relative_path(main)
+                || !load_state.validate_path(main, "CSS Modules package main path")
+            {
+                return None;
+            }
+            let candidate = package_dir.join(main);
+            if load_state.is_file(&candidate) {
+                return Some(candidate);
             }
         }
     }
     let index_css = package_dir.join("index.css");
-    index_css.is_file().then_some(index_css)
+    load_state.is_file(&index_css).then_some(index_css)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -525,19 +593,34 @@ impl<'de> Deserialize<'de> for CssModulePackageJsonObject {
 pub(crate) fn css_module_package_exports_file(
     package_dir: &Path,
     subpath: &Path,
+    load_state: &mut CssModulesImportState,
 ) -> CssModulePackageExportsResolution {
+    let Some(package) = read_css_module_package_json(package_dir, load_state) else {
+        return CssModulePackageExportsResolution::NoExports;
+    };
+    css_module_package_exports_file_from_json(package_dir, subpath, &package, load_state)
+}
+
+fn read_css_module_package_json(
+    package_dir: &Path,
+    load_state: &mut CssModulesImportState,
+) -> Option<CssModulePackageJson> {
     let package_json = package_dir.join("package.json");
-    let Ok(source) = std::fs::read_to_string(package_json) else {
-        return CssModulePackageExportsResolution::NoExports;
-    };
-    let Ok(value) = serde_json::from_str::<CssModulePackageJson>(&source) else {
-        return CssModulePackageExportsResolution::NoExports;
-    };
-    let Some(exports) = value.exports.as_ref() else {
+    let source = load_state.read_metadata(&package_json)?;
+    serde_json::from_str(&source).ok()
+}
+
+fn css_module_package_exports_file_from_json(
+    package_dir: &Path,
+    subpath: &Path,
+    package: &CssModulePackageJson,
+    load_state: &mut CssModulesImportState,
+) -> CssModulePackageExportsResolution {
+    let Some(exports) = package.exports.as_ref() else {
         return CssModulePackageExportsResolution::NoExports;
     };
     let target = if subpath.as_os_str().is_empty() {
-        css_module_package_exports_root_target(exports)
+        css_module_package_exports_root_target(exports, load_state)
     } else {
         let key = format!(
             "./{}",
@@ -546,12 +629,15 @@ pub(crate) fn css_module_package_exports_file(
                 .replace('\\', "/")
                 .trim_start_matches("./")
         );
-        css_module_package_exports_subpath_target(exports, &key)
+        if !load_state.validate_path(Path::new(&key), "CSS Modules package export key") {
+            return CssModulePackageExportsResolution::Blocked;
+        }
+        css_module_package_exports_subpath_target(exports, &key, load_state)
     };
     let Some(target) = target else {
         return CssModulePackageExportsResolution::Blocked;
     };
-    let Some(path) = css_module_package_export_target(package_dir, &target) else {
+    let Some(path) = css_module_package_export_target(package_dir, &target, load_state) else {
         return CssModulePackageExportsResolution::Blocked;
     };
     CssModulePackageExportsResolution::Resolved(path)
@@ -559,39 +645,61 @@ pub(crate) fn css_module_package_exports_file(
 
 pub(crate) fn css_module_package_exports_root_target(
     exports: &CssModulePackageJsonValue,
+    load_state: &mut CssModulesImportState,
 ) -> Option<String> {
-    css_module_package_export_target_value(exports).or_else(|| {
-        exports
-            .get(".")
-            .and_then(css_module_package_export_target_value)
-    })
+    let target = css_module_package_export_target_value(exports).or_else(|| {
+        exports.get(".").and_then(css_module_package_export_target_value)
+    })?;
+    if !load_state.validate_path(Path::new(target), "CSS Modules package export target") {
+        return None;
+    }
+    Some(target.to_string())
 }
 
 pub(crate) fn css_module_package_exports_subpath_target(
     exports: &CssModulePackageJsonValue,
     key: &str,
+    load_state: &mut CssModulesImportState,
 ) -> Option<String> {
     if let Some(target) = exports
         .get(key)
         .and_then(css_module_package_export_target_value)
     {
-        return Some(target);
+        if !load_state.validate_path(Path::new(target), "CSS Modules package export target") {
+            return None;
+        }
+        return Some(target.to_string());
     }
     for (pattern, target) in exports.entries()? {
         let Some(capture) = css_module_package_export_pattern_capture(pattern, key) else {
             continue;
         };
         let target = css_module_package_export_target_value(target)?;
-        return Some(target.replace('*', &capture));
+        let stars = target.as_bytes().iter().filter(|byte| **byte == b'*').count();
+        let Some(replaced_bytes) = stars
+            .checked_mul(capture.len())
+            .and_then(|bytes| bytes.checked_add(target.len().saturating_sub(stars)))
+        else {
+            load_state.fail("CSS Modules package export target size overflowed");
+            return None;
+        };
+        if replaced_bytes > load_state.limits.max_path_bytes {
+            load_state.fail(format!(
+                "CSS Modules package export target exceeds the maximum of {} bytes",
+                load_state.limits.max_path_bytes
+            ));
+            return None;
+        }
+        return Some(target.replace('*', capture));
     }
     None
 }
 
 pub(crate) fn css_module_package_export_target_value(
     value: &CssModulePackageJsonValue,
-) -> Option<String> {
+) -> Option<&str> {
     if let Some(value) = value.as_str() {
-        return Some(value.to_string());
+        return Some(value);
     }
     for (condition, target) in value.entries()? {
         if matches!(condition.as_str(), "require" | "node" | "default") {
@@ -603,10 +711,10 @@ pub(crate) fn css_module_package_export_target_value(
     None
 }
 
-pub(crate) fn css_module_package_export_pattern_capture(
+pub(crate) fn css_module_package_export_pattern_capture<'a>(
     pattern: &str,
-    key: &str,
-) -> Option<String> {
+    key: &'a str,
+) -> Option<&'a str> {
     let star = pattern.find('*')?;
     let prefix = &pattern[..star];
     let suffix = &pattern[star + 1..];
@@ -614,17 +722,33 @@ pub(crate) fn css_module_package_export_pattern_capture(
     {
         return None;
     }
-    Some(key[prefix.len()..key.len() - suffix.len()].to_string())
+    Some(&key[prefix.len()..key.len() - suffix.len()])
 }
 
 pub(crate) fn css_module_package_export_target(
     package_dir: &Path,
     target: &str,
+    load_state: &mut CssModulesImportState,
 ) -> Option<PathBuf> {
-    if !target.starts_with("./") {
+    let target_path = Path::new(target);
+    if !target.starts_with("./") || !is_safe_css_module_package_relative_path(target_path) {
         return None;
     }
-    Some(package_dir.join(target))
+    let path = package_dir.join(target_path);
+    load_state
+        .validate_path(&path, "CSS Modules package export path")
+        .then_some(path)
+}
+
+fn is_safe_css_module_package_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )
+        })
 }
 
 pub(crate) fn unquote_css_module_path(value: &str) -> String {
@@ -637,10 +761,6 @@ pub(crate) fn unquote_css_module_path(value: &str) -> String {
     } else {
         value.to_string()
     }
-}
-
-pub(crate) fn css_module_active_path(filename: &str) -> PathBuf {
-    std::fs::canonicalize(filename).unwrap_or_else(|_| PathBuf::from(filename))
 }
 
 pub(crate) fn find_pseudo_function_from(
