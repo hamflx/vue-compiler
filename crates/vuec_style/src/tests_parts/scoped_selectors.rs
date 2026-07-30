@@ -945,3 +945,110 @@
             ".foo[data-v-test] {\n@keyframes fade-test {\nto { opacity: 1;\n}\n} animation: fade-test 1s;\n}"
         );
     }
+
+    #[test]
+    fn scoped_style_resource_limits_have_exact_boundaries() {
+        let source = ":is(.a){}";
+        let scope_id = "data-v-x";
+        let exact = ScopedStyleLimits {
+            max_source_bytes: source.len(),
+            max_scope_id_bytes: scope_id.len(),
+            max_syntax_depth: 1,
+            max_recursive_scan_bytes: 15,
+        };
+        assert_eq!(
+            rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
+            ":is(.a[data-v-x]){}"
+        );
+
+        for limits in [
+            ScopedStyleLimits {
+                max_source_bytes: source.len() - 1,
+                ..exact
+            },
+            ScopedStyleLimits {
+                max_scope_id_bytes: scope_id.len() - 1,
+                ..exact
+            },
+            ScopedStyleLimits {
+                max_syntax_depth: 0,
+                ..exact
+            },
+            ScopedStyleLimits {
+                max_recursive_scan_bytes: 14,
+                ..exact
+            },
+        ] {
+            let error = rewrite_scoped_selectors_with_limits(source, scope_id, limits)
+                .expect_err("one-short resource limit must fail");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+        }
+    }
+
+    #[test]
+    fn scoped_style_depth_combines_block_and_selector_frames() {
+        let source = "@media x { :is(:where(.a)) {} }";
+        assert!(validate_scoped_style_resources(
+            source,
+            "data-v-x",
+            ScopedStyleLimits {
+                max_syntax_depth: 3,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
+        let error = validate_scoped_style_resources(
+            source,
+            "data-v-x",
+            ScopedStyleLimits {
+                max_syntax_depth: 2,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .expect_err("combined block and selector depth must be bounded");
+        assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+
+        assert!(validate_scoped_style_resources(
+            r#".a { content: "{{(("; /* {(( */ }"#,
+            "data-v-x",
+            ScopedStyleLimits {
+                max_syntax_depth: 1,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn scoped_style_rejects_adversarial_nesting_before_recursive_passes() {
+        let depth = STYLE_SCOPED_MAX_SYNTAX_DEPTH + 1;
+        let mut source = "@media x {".repeat(depth);
+        source.push_str(".a {}");
+        source.push_str(&"}".repeat(depth));
+
+        assert!(rewrite_scoped_selectors(&source, "data-v-x").is_empty());
+        let result = compile_style(
+            &source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 17,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 17, 18))
+        );
+    }
