@@ -71,6 +71,40 @@
     }
 
     #[test]
+    fn css_module_values_replace_complete_identifier_tokens() {
+        let values = BTreeMap::from([
+            ("a".to_string(), "A".to_string()),
+            ("alpha".to_string(), "X".to_string()),
+            ("alpha-beta".to_string(), "Y".to_string()),
+            ("value_2".to_string(), "Q".to_string()),
+            ("eclair".to_string(), "Z".to_string()),
+        ]);
+        let source = r#"a alpha alpha-beta xalpha alpha2 1alpha -alpha eclair value_2 /* alpha */ "alpha" \alpha"#;
+
+        assert_eq!(
+            replace_css_module_values(source, &values),
+            r#"A X Y xalpha alpha2 1alpha -alpha Z Q /* alpha */ "X" \X"#
+        );
+    }
+
+    #[test]
+    fn css_module_values_handle_large_shared_prefix_sets() {
+        let values = (0..1024)
+            .map(|index| {
+                (
+                    format!("shared_prefix_{index}"),
+                    format!("replacement_{index}"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let source = std::iter::repeat_n("shared_prefix_missing", 1024)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert_eq!(replace_css_module_values(&source, &values), source);
+    }
+
+    #[test]
     fn compiles_css_modules_value_imports_like_official() {
         let dir = tempfile::tempdir().expect("temp dir");
         let dep = dir.path().join("tokens.css");

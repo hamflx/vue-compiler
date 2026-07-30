@@ -277,8 +277,7 @@ pub(crate) fn replace_css_module_values(source: &str, values: &BTreeMap<String, 
     if values.is_empty() {
         return source.to_string();
     }
-    let mut names = values.keys().map(String::as_str).collect::<Vec<_>>();
-    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    debug_assert!(values.keys().all(|name| is_css_module_value_name(name)));
     let mut output = String::with_capacity(source.len());
     let mut index = 0usize;
     while index < source.len() {
@@ -292,43 +291,29 @@ pub(crate) fn replace_css_module_values(source: &str, values: &BTreeMap<String, 
             index = end;
             continue;
         }
-        if let Some(name) = names
-            .iter()
-            .copied()
-            .find(|name| css_module_value_matches_at(source, index, name))
-        {
-            output.push_str(
-                values
-                    .get(name)
-                    .expect("value name came from map keys")
-                    .as_str(),
-            );
-            index += name.len();
-            continue;
-        }
         let Some(ch) = source[index..].chars().next() else {
             break;
         };
+        let starts_identifier = is_css_module_identifier_start(ch)
+            && source[..index]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !is_css_module_identifier_continue(previous));
+        if starts_identifier {
+            let mut end = index + ch.len_utf8();
+            while let Some(next) = source[end..].chars().next() {
+                if !is_css_module_identifier_continue(next) {
+                    break;
+                }
+                end += next.len_utf8();
+            }
+            let name = &source[index..end];
+            output.push_str(values.get(name).map_or(name, String::as_str));
+            index = end;
+            continue;
+        }
         output.push(ch);
         index += ch.len_utf8();
     }
     output
-}
-
-pub(crate) fn css_module_value_matches_at(source: &str, index: usize, name: &str) -> bool {
-    if !source[index..].starts_with(name) {
-        return false;
-    }
-    let before_is_ident = source[..index]
-        .chars()
-        .next_back()
-        .is_some_and(is_css_module_identifier_continue);
-    if before_is_ident {
-        return false;
-    }
-    let end = index + name.len();
-    source[end..]
-        .chars()
-        .next()
-        .is_none_or(|ch| !is_css_module_identifier_continue(ch))
 }
