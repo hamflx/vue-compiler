@@ -6,17 +6,22 @@ pub(crate) enum CssScannerState {
     BlockComment,
 }
 
-pub(crate) fn collect_scoped_keyframes(source: &str, short_id: &str) -> BTreeMap<String, String> {
+pub(crate) fn collect_scoped_keyframes(
+    source: &str,
+    short_id: &str,
+    budget: &mut ScopedStyleBudget,
+) -> Result<BTreeMap<String, String>, StylePreprocessError> {
     let mut keyframes = BTreeMap::new();
-    collect_scoped_keyframes_in(source, short_id, &mut keyframes);
-    keyframes
+    collect_scoped_keyframes_in(source, short_id, &mut keyframes, budget)?;
+    Ok(keyframes)
 }
 
 pub(crate) fn collect_scoped_keyframes_in(
     source: &str,
     short_id: &str,
     keyframes: &mut BTreeMap<String, String>,
-) {
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
     let mut cursor = 0usize;
     while cursor < source.len() {
         cursor = skip_css_whitespace(source, cursor);
@@ -44,17 +49,58 @@ pub(crate) fn collect_scoped_keyframes_in(
         if let Some((name, params)) = parse_at_rule(prelude) {
             if is_keyframes_name(name) && !scoped_keyframe_name_has_suffix(params, short_id) {
                 if !keyframes.contains_key(params) {
-                    let renamed = format!("{params}-{short_id}");
-                    keyframes.insert(params.to_string(), renamed);
+                    let renamed_bytes = params
+                        .len()
+                        .checked_add(1)
+                        .and_then(|bytes| bytes.checked_add(short_id.len()))
+                        .ok_or_else(|| {
+                            StylePreprocessError::scoped_limit(
+                                "scoped style keyframe name size overflowed",
+                            )
+                        })?;
+                    budget.claim_keyframe(params.len(), renamed_bytes)?;
+                    let raw = copy_scoped_keyframe_name(params)?;
+                    let mut renamed = String::new();
+                    renamed.try_reserve_exact(renamed_bytes).map_err(|_| {
+                        StylePreprocessError::scoped_limit(
+                            "scoped style keyframe name could not reserve capacity within the configured limit",
+                        )
+                    })?;
+                    renamed.push_str(params);
+                    renamed.push('-');
+                    renamed.push_str(short_id);
+                    keyframes.insert(raw, renamed);
                 }
             } else {
-                collect_scoped_keyframes_in(&source[delimiter + 1..close], short_id, keyframes);
+                collect_scoped_keyframes_in(
+                    &source[delimiter + 1..close],
+                    short_id,
+                    keyframes,
+                    budget,
+                )?;
             }
         } else {
-            collect_scoped_keyframes_in(&source[delimiter + 1..close], short_id, keyframes);
+            collect_scoped_keyframes_in(
+                &source[delimiter + 1..close],
+                short_id,
+                keyframes,
+                budget,
+            )?;
         }
         cursor = close + 1;
     }
+    Ok(())
+}
+
+fn copy_scoped_keyframe_name(name: &str) -> Result<String, StylePreprocessError> {
+    let mut output = String::new();
+    output.try_reserve_exact(name.len()).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style keyframe name could not reserve capacity within the configured limit",
+        )
+    })?;
+    output.push_str(name);
+    Ok(output)
 }
 
 pub(crate) fn scoped_keyframe_name_has_suffix(name: &str, short_id: &str) -> bool {

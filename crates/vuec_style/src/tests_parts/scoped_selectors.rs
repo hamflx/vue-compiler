@@ -955,6 +955,8 @@
             max_scope_id_bytes: scope_id.len(),
             max_syntax_depth: 1,
             max_recursive_scan_bytes: 15,
+            max_keyframes: 0,
+            max_keyframe_bytes: 0,
         };
         assert_eq!(
             rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
@@ -1061,7 +1063,8 @@
         }
         source.push_str(".a { animation: k0 1s; animation-name: k4095; }");
 
-        let keyframes = collect_scoped_keyframes(&source, "test");
+        let mut budget = ScopedStyleBudget::new(ScopedStyleLimits::default());
+        let keyframes = collect_scoped_keyframes(&source, "test", &mut budget).unwrap();
         assert_eq!(keyframes.len(), 4_096);
         assert_eq!(lookup_keyframe_name("k0", &keyframes).unwrap(), "k0-test");
         assert_eq!(
@@ -1082,10 +1085,98 @@
         assert!(scoped_keyframe_name_has_suffix("fade-", ""));
         assert!(!scoped_keyframe_name_has_suffix("fadecontest", "test"));
 
+        let mut budget = ScopedStyleBudget::new(ScopedStyleLimits::default());
         let keyframes = collect_scoped_keyframes(
             "@keyframes fade-test {} @keyframes fade {} @-webkit-keyframes fade {}",
             "test",
-        );
+            &mut budget,
+        )
+        .unwrap();
         assert_eq!(keyframes.len(), 1);
         assert_eq!(keyframes.get("fade").unwrap(), "fade-test");
+    }
+
+    #[test]
+    fn scoped_keyframe_state_limits_have_exact_boundaries() {
+        let source = "@keyframes a {} @keyframes bb {} @keyframes a {}";
+        let exact_limits = ScopedStyleLimits {
+            max_keyframes: 2,
+            max_keyframe_bytes: 10,
+            ..ScopedStyleLimits::default()
+        };
+        let mut exact_budget = ScopedStyleBudget::new(exact_limits);
+        let keyframes = collect_scoped_keyframes(source, "x", &mut exact_budget).unwrap();
+        assert_eq!(keyframes.len(), 2);
+        assert_eq!(
+            (exact_budget.keyframes, exact_budget.keyframe_bytes),
+            (2, 10)
+        );
+
+        for limits in [
+            ScopedStyleLimits {
+                max_keyframes: 1,
+                ..exact_limits
+            },
+            ScopedStyleLimits {
+                max_keyframe_bytes: 9,
+                ..exact_limits
+            },
+        ] {
+            let mut budget = ScopedStyleBudget::new(limits);
+            let error = collect_scoped_keyframes(source, "x", &mut budget)
+                .expect_err("one-short keyframe budget must fail");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+            assert_eq!((budget.keyframes, budget.keyframe_bytes), (1, 4));
+        }
+    }
+
+    #[test]
+    fn scoped_keyframe_limit_failure_is_atomic() {
+        let source = "@keyframes a {} @keyframes bb {} .a >>> .b {}";
+        let limits = ScopedStyleLimits {
+            max_keyframes: 2,
+            max_keyframe_bytes: 9,
+            ..ScopedStyleLimits::default()
+        };
+        let result = compile_style_with_scoped_limits(
+            source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 3,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+            limits,
+        );
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 3, 4))
+        );
+
+        let unscoped = compile_style_with_scoped_limits(
+            ".a {}",
+            StyleCompileOptions::default(),
+            ScopedStyleLimits {
+                max_source_bytes: 0,
+                max_scope_id_bytes: 0,
+                max_syntax_depth: 0,
+                max_recursive_scan_bytes: 0,
+                max_keyframes: 0,
+                max_keyframe_bytes: 0,
+            },
+        );
+        assert!(unscoped.errors.is_empty());
+        assert!(unscoped.diagnostics.is_empty());
+        assert_eq!(unscoped.code, ".a {}");
     }

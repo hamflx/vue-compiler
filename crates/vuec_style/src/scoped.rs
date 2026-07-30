@@ -4,13 +4,17 @@ pub(crate) const STYLE_SCOPED_MAX_SOURCE_BYTES: usize = STYLE_PREPROCESS_MAX_OUT
 pub(crate) const STYLE_SCOPED_MAX_SCOPE_ID_BYTES: usize = 32 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_KEYFRAMES: usize = 262_144;
+pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScopedStyleLimits {
     pub(crate) max_source_bytes: usize,
     pub(crate) max_scope_id_bytes: usize,
     pub(crate) max_syntax_depth: usize,
     pub(crate) max_recursive_scan_bytes: usize,
+    pub(crate) max_keyframes: usize,
+    pub(crate) max_keyframe_bytes: usize,
 }
 
 impl Default for ScopedStyleLimits {
@@ -20,8 +24,66 @@ impl Default for ScopedStyleLimits {
             max_scope_id_bytes: STYLE_SCOPED_MAX_SCOPE_ID_BYTES,
             max_syntax_depth: STYLE_SCOPED_MAX_SYNTAX_DEPTH,
             max_recursive_scan_bytes: STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES,
+            max_keyframes: STYLE_SCOPED_MAX_KEYFRAMES,
+            max_keyframe_bytes: STYLE_SCOPED_MAX_KEYFRAME_BYTES,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct ScopedStyleBudget {
+    pub(crate) limits: ScopedStyleLimits,
+    pub(crate) keyframes: usize,
+    pub(crate) keyframe_bytes: usize,
+}
+
+impl ScopedStyleBudget {
+    pub(crate) fn new(limits: ScopedStyleLimits) -> Self {
+        Self {
+            limits,
+            keyframes: 0,
+            keyframe_bytes: 0,
+        }
+    }
+
+    pub(crate) fn claim_keyframe(
+        &mut self,
+        raw_bytes: usize,
+        renamed_bytes: usize,
+    ) -> Result<(), StylePreprocessError> {
+        let keyframes = self.keyframes.checked_add(1).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style keyframe count overflowed")
+        })?;
+        if keyframes > self.limits.max_keyframes {
+            return Err(StylePreprocessError::scoped_limit(format!(
+                "scoped style keyframes exceed the maximum of {}",
+                self.limits.max_keyframes
+            )));
+        }
+        let retained_bytes = raw_bytes.checked_add(renamed_bytes).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style keyframe size overflowed")
+        })?;
+        let keyframe_bytes = self
+            .keyframe_bytes
+            .checked_add(retained_bytes)
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit("scoped style keyframe size overflowed")
+            })?;
+        if keyframe_bytes > self.limits.max_keyframe_bytes {
+            return Err(StylePreprocessError::scoped_limit(format!(
+                "scoped style keyframes exceed the maximum total of {} bytes",
+                self.limits.max_keyframe_bytes
+            )));
+        }
+        self.keyframes = keyframes;
+        self.keyframe_bytes = keyframe_bytes;
+        Ok(())
+    }
+}
+
+pub(crate) struct ScopedStyleTransform {
+    pub(crate) code: String,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 /// Rewrites selectors in `source` to include `scope_id`.
@@ -39,14 +101,27 @@ pub(crate) fn rewrite_scoped_selectors_with_limits(
     scope_id: &str,
     limits: ScopedStyleLimits,
 ) -> Result<String, StylePreprocessError> {
-    validate_scoped_style_resources(source, scope_id, limits)?;
-    Ok(rewrite_scoped_selectors_unchecked(source, scope_id))
+    transform_scoped_style_with_limits(source, scope_id, false, limits)
+        .map(|transform| transform.code)
 }
 
-pub(crate) fn rewrite_scoped_selectors_unchecked(source: &str, scope_id: &str) -> String {
+pub(crate) fn transform_scoped_style_with_limits(
+    source: &str,
+    scope_id: &str,
+    warn_deprecated: bool,
+    limits: ScopedStyleLimits,
+) -> Result<ScopedStyleTransform, StylePreprocessError> {
+    validate_scoped_style_resources(source, scope_id, limits)?;
     let short_id = scope_id.strip_prefix("data-v-").unwrap_or(scope_id);
-    let keyframes = collect_scoped_keyframes(source, short_id);
-    rewrite_css_items(source, scope_id, &keyframes, CssBlockContext::Root)
+    let mut budget = ScopedStyleBudget::new(limits);
+    let keyframes = collect_scoped_keyframes(source, short_id, &mut budget)?;
+    let diagnostics = if warn_deprecated {
+        scoped_selector_deprecation_warnings(source)
+    } else {
+        Vec::new()
+    };
+    let code = rewrite_css_items(source, scope_id, &keyframes, CssBlockContext::Root);
+    Ok(ScopedStyleTransform { code, diagnostics })
 }
 
 pub(crate) fn validate_scoped_style_resources(

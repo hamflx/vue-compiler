@@ -2,13 +2,37 @@ use crate::*;
 
 /// Compiles SFC style source according to `options`.
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
-    compile_style_with_input_limits(source, options, StyleInputLimits::default())
+    compile_style_with_limits(
+        source,
+        options,
+        StyleInputLimits::default(),
+        ScopedStyleLimits::default(),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn compile_style_with_input_limits(
+    source: &str,
+    options: StyleCompileOptions,
+    input_limits: StyleInputLimits,
+) -> StyleCompileResult {
+    compile_style_with_limits(source, options, input_limits, ScopedStyleLimits::default())
+}
+
+#[cfg(test)]
+pub(crate) fn compile_style_with_scoped_limits(
+    source: &str,
+    options: StyleCompileOptions,
+    scoped_limits: ScopedStyleLimits,
+) -> StyleCompileResult {
+    compile_style_with_limits(source, options, StyleInputLimits::default(), scoped_limits)
+}
+
+fn compile_style_with_limits(
     source: &str,
     mut options: StyleCompileOptions,
     input_limits: StyleInputLimits,
+    scoped_limits: ScopedStyleLimits,
 ) -> StyleCompileResult {
     let mut errors = Vec::new();
     let mut diagnostics = Vec::new();
@@ -37,22 +61,31 @@ pub(crate) fn compile_style_with_input_limits(
     };
     let option_id = options.id.clone();
     let id = option_id.clone().unwrap_or_else(|| "data-v-vuec".into());
-    if options.scoped {
-        let scoped_limits = ScopedStyleLimits::default();
-        if let Err(error) = validate_scoped_style_resources(&code, &id, scoped_limits) {
-            diagnostics.push(preprocess_error_diagnostic(&error, source, &options));
-            errors.push(error.message);
-            return StyleCompileResult {
-                code: String::new(),
-                map: None,
-                errors,
-                diagnostics,
-                modules: None,
-                vars: Vec::new(),
-                dependencies,
-            };
+    let scoped_transform = if options.scoped {
+        match transform_scoped_style_with_limits(
+            &code,
+            &id,
+            options.warn_deprecated_scoped_selectors,
+            scoped_limits,
+        ) {
+            Ok(transform) => Some(transform),
+            Err(error) => {
+                diagnostics.push(preprocess_error_diagnostic(&error, source, &options));
+                errors.push(error.message);
+                return StyleCompileResult {
+                    code: String::new(),
+                    map: None,
+                    errors,
+                    diagnostics,
+                    modules: None,
+                    vars: Vec::new(),
+                    dependencies,
+                };
+            }
         }
-    }
+    } else {
+        None
+    };
     let vars = if options.vars.is_empty() {
         collect_css_vars_with_options(
             &code,
@@ -64,11 +97,9 @@ pub(crate) fn compile_style_with_input_limits(
         options.vars.clone()
     };
 
-    if options.scoped {
-        if options.warn_deprecated_scoped_selectors {
-            diagnostics.extend(scoped_selector_deprecation_warnings(&code));
-        }
-        code = rewrite_scoped_selectors_unchecked(&code, &id);
+    if let Some(transform) = scoped_transform {
+        diagnostics.extend(transform.diagnostics);
+        code = transform.code;
     }
     if !vars.is_empty() {
         let var_id = option_id.as_deref().map(style_var_id).unwrap_or_default();
