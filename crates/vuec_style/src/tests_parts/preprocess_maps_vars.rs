@@ -605,6 +605,77 @@ gap = 8px
     }
 
     #[test]
+    fn lightweight_stylus_variables_follow_assignment_order_and_scope() {
+        let result = compile_style(
+            r#"
+tone = red
+.first
+  color tone
+tone = blue
+.second
+  color tone
+
+forward = later
+.forward
+  color forward
+later = green
+.direct-future
+  color future-tone
+future-tone = purple
+
+alias = dependency
+dependency = red
+.cached
+  color alias
+dependency = blue
+.cached-again
+  color alias
+
+.local
+  color tone
+  tone = green
+  border-color tone
+  .nested
+    color tone
+.after-local
+  color tone
+
+breakpoint = 600px
+@media (min-width: breakpoint)
+  .media-first
+    color red
+breakpoint = 700px
+@media (min-width: breakpoint)
+  .media-second
+    color blue
+"#,
+            StyleCompileOptions {
+                preprocess_lang: Some("styl".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".first {\n  color: red;"));
+        assert!(result.code.contains(".second {\n  color: blue;"));
+        assert!(result.code.contains(".forward {\n  color: later;"));
+        assert!(
+            result
+                .code
+                .contains(".direct-future {\n  color: future-tone;")
+        );
+        assert!(result.code.contains(".cached {\n  color: red;"));
+        assert!(result.code.contains(".cached-again {\n  color: red;"));
+        assert!(result.code.contains(
+            ".local {\n  color: blue;\n  border-color: green;"
+        ));
+        assert!(result.code.contains(".local .nested {\n  color: green;"));
+        assert!(result.code.contains(".after-local {\n  color: blue;"));
+        assert!(result.code.contains("@media (min-width: 600px)"));
+        assert!(result.code.contains("@media (min-width: 700px)"));
+    }
+
+    #[test]
     fn lightweight_preprocessors_bound_syntax_nesting() {
         fn nested_less(depth: usize) -> String {
             let mut source = String::new();

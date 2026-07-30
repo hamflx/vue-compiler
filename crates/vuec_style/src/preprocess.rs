@@ -971,6 +971,23 @@ impl<'variables> StyleVariableEvaluator<'variables> {
         }
     }
 
+    pub(crate) fn with_memo(
+        variables: &'variables BTreeMap<String, Arc<str>>,
+        syntax: StyleVariableSyntax,
+        memo: BTreeMap<String, Arc<str>>,
+    ) -> Self {
+        Self {
+            variables,
+            syntax,
+            memo,
+            active: Vec::new(),
+        }
+    }
+
+    pub(crate) fn into_memo(self) -> BTreeMap<String, Arc<str>> {
+        self.memo
+    }
+
     pub(crate) fn resolve(
         &mut self,
         source: &str,
@@ -1255,11 +1272,145 @@ pub(crate) fn preprocess_stylus(
     let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context, true)?;
     let nodes = parse_stylus_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
     let variables = StyleVariableEnvironment::default();
+    let mut budget = StyleVariableExpansionBudget::default();
     Ok(PreprocessResult {
-        code: render_less_nodes(&nodes, None, &variables, StyleVariableSyntax::StylusBare)?
+        code: render_stylus_nodes(&nodes, None, &variables, &mut budget)?
             .replace("#ff0000", "#f00"),
         dependencies: context.dependencies(),
     })
+}
+
+pub(crate) fn render_stylus_nodes(
+    nodes: &[LessNode],
+    parent_selector: Option<&str>,
+    inherited_variables: &StyleVariableEnvironment,
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    let mut memo = BTreeMap::new();
+    render_stylus_scope(
+        nodes,
+        parent_selector,
+        inherited_variables,
+        &mut memo,
+        budget,
+    )
+}
+
+fn render_stylus_child_scope(
+    nodes: &[LessNode],
+    parent_selector: Option<&str>,
+    inherited_variables: &StyleVariableEnvironment,
+    inherited_memo: &mut BTreeMap<String, Arc<str>>,
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    if nodes
+        .iter()
+        .any(|node| matches!(node, LessNode::Variable { .. }))
+    {
+        let mut local_memo = BTreeMap::new();
+        render_stylus_scope(
+            nodes,
+            parent_selector,
+            inherited_variables,
+            &mut local_memo,
+            budget,
+        )
+    } else {
+        render_stylus_scope(
+            nodes,
+            parent_selector,
+            inherited_variables,
+            inherited_memo,
+            budget,
+        )
+    }
+}
+
+fn render_stylus_scope(
+    nodes: &[LessNode],
+    parent_selector: Option<&str>,
+    inherited_variables: &StyleVariableEnvironment,
+    memo: &mut BTreeMap<String, Arc<str>>,
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    let mut variables = Arc::clone(inherited_variables);
+    let mut declarations = Vec::new();
+    let mut descendants = Vec::new();
+
+    for node in nodes {
+        match node {
+            LessNode::Variable { name, value } => {
+                Arc::make_mut(&mut variables).insert(name.clone(), Arc::from(value.as_str()));
+                memo.remove(name);
+            }
+            LessNode::Declaration { name, value } if parent_selector.is_some() => {
+                let value = resolve_stylus_with_state(value, &variables, memo, budget, false)?;
+                declarations.push((name.clone(), normalize_preprocessor_color(&value)));
+            }
+            LessNode::Rule { selector, children } => {
+                let selector = combine_less_selectors(parent_selector, selector);
+                let rendered =
+                    render_stylus_child_scope(children, Some(&selector), &variables, memo, budget)?;
+                descendants.push(rendered);
+            }
+            LessNode::AtRuleBlock { prelude, children } => {
+                let prelude = resolve_stylus_with_state(prelude, &variables, memo, budget, true)?;
+                let rendered_children =
+                    render_stylus_child_scope(children, parent_selector, &variables, memo, budget)?;
+                if !rendered_children.trim().is_empty() {
+                    descendants.push(format!(
+                        "{prelude} {{\n{}\n}}",
+                        indent_less_css(&rendered_children)
+                    ));
+                }
+            }
+            LessNode::AtRuleStatement(statement) => {
+                let statement =
+                    resolve_stylus_with_state(statement, &variables, memo, budget, true)?;
+                descendants.push(format!("{statement};"));
+            }
+            LessNode::Declaration { .. } | LessNode::Comment => {}
+        }
+    }
+
+    let mut output = String::new();
+    if let Some(selector) = parent_selector.filter(|_| !declarations.is_empty()) {
+        output.push_str(selector);
+        output.push_str(" {\n");
+        for (name, value) in declarations {
+            output.push_str("  ");
+            output.push_str(&name);
+            output.push_str(": ");
+            output.push_str(&value);
+            output.push_str(";\n");
+        }
+        output.push('}');
+    }
+    for rendered in descendants {
+        push_less_rendered(&mut output, &rendered);
+    }
+    Ok(output)
+}
+
+fn resolve_stylus_with_state(
+    source: &str,
+    variables: &StyleVariableEnvironment,
+    memo: &mut BTreeMap<String, Arc<str>>,
+    budget: &mut StyleVariableExpansionBudget,
+    at_rule: bool,
+) -> Result<String, StylePreprocessError> {
+    let mut evaluator = StyleVariableEvaluator::with_memo(
+        variables.as_ref(),
+        StyleVariableSyntax::StylusBare,
+        std::mem::take(memo),
+    );
+    let result = if at_rule {
+        evaluator.resolve_at_rule(source, budget)
+    } else {
+        evaluator.resolve(source, budget)
+    };
+    *memo = evaluator.into_memo();
+    result
 }
 
 pub(crate) fn inline_stylus_imports(
