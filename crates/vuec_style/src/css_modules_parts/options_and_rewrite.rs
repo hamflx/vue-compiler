@@ -64,7 +64,7 @@ pub(crate) fn rewrite_css_modules_items(
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0usize;
-    while cursor < source.len() {
+    while cursor < source.len() && context.load_state.error.is_none() {
         let output_len_before_whitespace = output.len();
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(source, cursor);
@@ -132,8 +132,9 @@ pub(crate) fn rewrite_css_modules_items(
             } else {
                 CssBlockContext::Container
             };
-            let rewritten_body =
-                rewrite_css_modules_items(body, context, next_context, native_nested_rule);
+            let rewritten_body = context.rewrite_syntax_frame(|context| {
+                rewrite_css_modules_items(body, context, next_context, native_nested_rule)
+            });
             if css_block_contains_style_rules(&rewritten_body)
                 || css_block_contains_at_rule_with_style_rules(&rewritten_body)
             {
@@ -144,15 +145,18 @@ pub(crate) fn rewrite_css_modules_items(
                 output.push_str(&rewritten_body);
             }
         } else {
-            output.push_str(&rewrite_css_module_rule_body(
-                prelude,
-                body,
-                context,
-                block_context,
-                &compose_local_names,
-                delimiter + 1,
-                native_nested_rule,
-            ));
+            let rewritten_body = context.rewrite_syntax_frame(|context| {
+                rewrite_css_module_rule_body(
+                    prelude,
+                    body,
+                    context,
+                    block_context,
+                    &compose_local_names,
+                    delimiter + 1,
+                    native_nested_rule,
+                )
+            });
+            output.push_str(&rewritten_body);
         }
         output.push('}');
         cursor = close + 1;
@@ -185,7 +189,7 @@ pub(crate) fn rewrite_css_module_rule_body(
     let mut declarations = String::new();
     let mut declarations_offset = None;
     let mut cursor = 0usize;
-    while cursor < body.len() {
+    while cursor < body.len() && context.load_state.error.is_none() {
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(body, cursor);
         if cursor > whitespace_start {
@@ -259,8 +263,9 @@ pub(crate) fn rewrite_css_module_rule_body(
             } else {
                 CssBlockContext::Container
             };
-            let nested_rewritten =
-                rewrite_css_modules_items(nested_body, context, next_context, true);
+            let nested_rewritten = context.rewrite_syntax_frame(|context| {
+                rewrite_css_modules_items(nested_body, context, next_context, true)
+            });
             block.push_str(&rewritten_prelude);
             block.push_str(brace_spacing);
             block.push('{');
@@ -282,15 +287,18 @@ pub(crate) fn rewrite_css_module_rule_body(
             block.push_str(&rewritten_prelude);
             block.push_str(brace_spacing);
             block.push('{');
-            block.push_str(&rewrite_css_module_rule_body(
-                nested_prelude,
-                nested_body,
-                context,
-                block_context,
-                &nested_compose_local_names,
-                body_offset + delimiter + 1,
-                true,
-            ));
+            let nested_rewritten = context.rewrite_syntax_frame(|context| {
+                rewrite_css_module_rule_body(
+                    nested_prelude,
+                    nested_body,
+                    context,
+                    block_context,
+                    &nested_compose_local_names,
+                    body_offset + delimiter + 1,
+                    true,
+                )
+            });
+            block.push_str(&nested_rewritten);
             block.push('}');
         }
 

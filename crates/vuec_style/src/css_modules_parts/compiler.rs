@@ -18,6 +18,8 @@ pub(crate) const CSS_MODULES_MAX_REPLACEMENT_STEPS: usize = 1_048_576;
 pub(crate) const CSS_MODULES_MAX_EXPORT_VALUES: usize = 262_144;
 pub(crate) const CSS_MODULES_MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_VALUE_COMPARISONS: usize = 1_048_576;
+pub(crate) const CSS_MODULES_MAX_SYNTAX_DEPTH: usize = 128;
+pub(crate) const CSS_MODULES_MAX_REWRITE_WORK_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CssModulesImportLimits {
@@ -37,6 +39,8 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_export_values: usize,
     pub(crate) max_export_bytes: usize,
     pub(crate) max_value_comparisons: usize,
+    pub(crate) max_syntax_depth: usize,
+    pub(crate) max_rewrite_work_bytes: usize,
 }
 
 impl Default for CssModulesImportLimits {
@@ -58,6 +62,8 @@ impl Default for CssModulesImportLimits {
             max_export_values: CSS_MODULES_MAX_EXPORT_VALUES,
             max_export_bytes: CSS_MODULES_MAX_EXPORT_BYTES,
             max_value_comparisons: CSS_MODULES_MAX_VALUE_COMPARISONS,
+            max_syntax_depth: CSS_MODULES_MAX_SYNTAX_DEPTH,
+            max_rewrite_work_bytes: CSS_MODULES_MAX_REWRITE_WORK_BYTES,
         }
     }
 }
@@ -81,6 +87,8 @@ pub(crate) struct CssModulesImportState {
     pub(crate) export_values: usize,
     pub(crate) export_bytes: usize,
     pub(crate) value_comparisons: usize,
+    pub(crate) active_syntax_depth: usize,
+    pub(crate) rewrite_work_bytes: usize,
     pub(crate) error: Option<CssModulesImportError>,
 }
 
@@ -99,6 +107,8 @@ impl CssModulesImportState {
             export_values: 0,
             export_bytes: 0,
             value_comparisons: 0,
+            active_syntax_depth: 0,
+            rewrite_work_bytes: 0,
             error: None,
         }
     }
@@ -380,6 +390,47 @@ impl CssModulesImportState {
         self.value_comparisons += 1;
         true
     }
+
+    pub(crate) fn enter_syntax_frame(&mut self) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if self.active_syntax_depth >= self.limits.max_syntax_depth {
+            self.fail(format!(
+                "CSS Modules syntax exceeds the maximum depth of {}",
+                self.limits.max_syntax_depth
+            ));
+            return false;
+        }
+        self.active_syntax_depth += 1;
+        true
+    }
+
+    pub(crate) fn leave_syntax_frame(&mut self) {
+        self.active_syntax_depth = self
+            .active_syntax_depth
+            .checked_sub(1)
+            .expect("CSS Modules syntax frames must be balanced");
+    }
+
+    pub(crate) fn claim_rewrite_work_bytes(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(rewrite_work_bytes) = self.rewrite_work_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules rewrite work size overflowed");
+            return false;
+        };
+        if rewrite_work_bytes > self.limits.max_rewrite_work_bytes {
+            self.fail(format!(
+                "CSS Modules rewriting exceeds the maximum work budget of {} bytes",
+                self.limits.max_rewrite_work_bytes
+            ));
+            return false;
+        }
+        self.rewrite_work_bytes = rewrite_work_bytes;
+        true
+    }
 }
 
 pub(crate) fn compile_css_modules(
@@ -604,6 +655,21 @@ impl<'a> CssModulesContext<'a> {
         let scoped = self.scoped_name(local);
         self.register_local(local, &scoped);
         scoped
+    }
+
+    pub(crate) fn rewrite_syntax_frame(
+        &mut self,
+        rewrite: impl FnOnce(&mut Self) -> String,
+    ) -> String {
+        if !self.load_state.enter_syntax_frame() {
+            return String::new();
+        }
+        let output = rewrite(self);
+        self.load_state.leave_syntax_frame();
+        if !self.load_state.claim_rewrite_work_bytes(output.len()) {
+            return String::new();
+        }
+        output
     }
 
     pub(crate) fn extend_composed_with_raw_export(

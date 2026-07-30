@@ -1038,6 +1038,8 @@
             max_export_values: 4096,
             max_export_bytes: 16 * 1024,
             max_value_comparisons: 4096,
+            max_syntax_depth: 16,
+            max_rewrite_work_bytes: 16 * 1024,
         }
     }
 
@@ -1220,6 +1222,226 @@
         assert!(over.code.is_empty());
         assert!(over.raw_modules.is_empty());
         assert!(over.modules.is_empty());
+    }
+
+    #[test]
+    fn css_modules_syntax_depth_has_exact_boundary() {
+        let source = ".a { .b { .c { color: red; } } }";
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("nested.css".into()),
+            modules: true,
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[local]".into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_syntax_depth: 3,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert!(exact.code.contains(".c"));
+
+        let over = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: 2,
+                ..exact_limits
+            },
+        );
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(over.diagnostics[0].message.contains("maximum depth of 2"));
+        assert!(over.code.is_empty());
+        assert!(over.raw_modules.is_empty());
+        assert!(over.modules.is_empty());
+
+        let adversarial = format!("{}{}", ".a{".repeat(4_096), "}".repeat(4_096));
+        let bounded = compile_css_modules_with_limits(
+            &adversarial,
+            &adversarial,
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: 8,
+                max_value_output_bytes: adversarial.len(),
+                max_generated_bytes: adversarial.len(),
+                ..exact_limits
+            },
+        );
+        assert_eq!(bounded.diagnostics.len(), 1);
+        assert_eq!(bounded.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(
+            bounded.diagnostics[0].message.contains("maximum depth of 8"),
+            "{}",
+            bounded.diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn css_modules_syntax_depth_restores_between_sibling_blocks() {
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("siblings.css".into()),
+            modules: true,
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_syntax_depth: 1,
+            ..css_modules_test_import_limits()
+        };
+        for source in [
+            ".a {} .b {}",
+            "@media screen {} @supports (display: grid) {}",
+        ] {
+            let result = compile_css_modules_with_limits(source, source, &options, exact_limits);
+            assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        }
+
+        let nested_at_rules = "@media screen { @supports (display: grid) { .a {} } }";
+        let exact = compile_css_modules_with_limits(
+            nested_at_rules,
+            nested_at_rules,
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: 3,
+                ..exact_limits
+            },
+        );
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+
+        let zero = compile_css_modules_with_limits(
+            ".a {}",
+            ".a {}",
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: 0,
+                ..exact_limits
+            },
+        );
+        assert_eq!(zero.diagnostics.len(), 1);
+        assert_eq!(zero.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+    }
+
+    #[test]
+    fn css_modules_syntax_depth_is_shared_across_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let entry = dir.path().join("entry.css");
+        let dependency = dir.path().join("dep.css");
+        let source =
+            "@media screen { .root { composes: dep from \"./dep.css\"; color: red; } }";
+        std::fs::write(&entry, source).expect("write entry");
+        std::fs::write(&dependency, ".dep {}").expect("write dependency");
+        let options = css_modules_test_options(&entry);
+        let exact_limits = CssModulesImportLimits {
+            max_syntax_depth: 3,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert!(exact.raw_modules.contains_key("root"));
+
+        let over = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: 2,
+                ..exact_limits
+            },
+        );
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(over.code.is_empty());
+        assert!(over.raw_modules.is_empty());
+        assert!(over.modules.is_empty());
+    }
+
+    #[test]
+    fn css_modules_rewrite_work_is_shared_across_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let entry = dir.path().join("entry.css");
+        let dependency = dir.path().join("dep.css");
+        let source = ".root { composes: dep from \"./dep.css\"; }";
+        std::fs::write(&entry, source).expect("write entry");
+        std::fs::write(&dependency, ".dep { color: red; }").expect("write dependency");
+        let mut options = css_modules_test_options(&entry);
+        options.modules_options.generate_scoped_name = Some("[local]".into());
+        let exact_limits = CssModulesImportLimits {
+            max_rewrite_work_bytes: 14,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert!(exact.code.contains("color: red"));
+
+        let over = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            CssModulesImportLimits {
+                max_rewrite_work_bytes: 13,
+                ..exact_limits
+            },
+        );
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(over.code.is_empty());
+        assert!(over.raw_modules.is_empty());
+        assert!(over.modules.is_empty());
+    }
+
+    #[test]
+    fn css_modules_rewrite_work_has_exact_boundary_and_checked_accounting() {
+        let source = ".a { color: red; }";
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("work.css".into()),
+            modules: true,
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[local]".into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_rewrite_work_bytes: 13,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert_eq!(exact.code, source);
+
+        let over = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            CssModulesImportLimits {
+                max_rewrite_work_bytes: 12,
+                ..exact_limits
+            },
+        );
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(over.code.is_empty());
+        assert!(over.raw_modules.is_empty());
+        assert!(over.modules.is_empty());
+
+        let mut overflow = CssModulesImportState::new(CssModulesImportLimits {
+            max_rewrite_work_bytes: usize::MAX,
+            ..css_modules_test_import_limits()
+        });
+        overflow.rewrite_work_bytes = usize::MAX;
+        assert!(!overflow.claim_rewrite_work_bytes(1));
+        assert!(overflow.error.is_some());
     }
 
     #[test]
