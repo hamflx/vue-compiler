@@ -1040,6 +1040,10 @@
             max_value_comparisons: 4096,
             max_syntax_depth: 16,
             max_rewrite_work_bytes: 16 * 1024,
+            max_scoped_name_pattern_bytes: 4096,
+            max_scoped_name_bytes: 4096,
+            max_scoped_name_hash_input_bytes: 4096,
+            max_default_name_work_bytes: 16 * 1024,
         }
     }
 
@@ -1270,7 +1274,7 @@
             CssModulesImportLimits {
                 max_syntax_depth: 8,
                 max_value_output_bytes: adversarial.len(),
-                max_generated_bytes: adversarial.len(),
+                max_generated_bytes: adversarial.len() * 2,
                 ..exact_limits
             },
         );
@@ -1442,6 +1446,386 @@
         overflow.rewrite_work_bytes = usize::MAX;
         assert!(!overflow.claim_rewrite_work_bytes(1));
         assert!(overflow.error.is_some());
+    }
+
+    #[test]
+    fn css_modules_scoped_name_template_has_exact_budgets() {
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[name]__[local]__[hash:base64:5]".into()),
+                hash_prefix: "alpha".into(),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_scoped_name_pattern_bytes: 32,
+            max_scoped_name_bytes: 30,
+            max_scoped_name_hash_input_bytes: 24,
+            max_generated_bytes: 159,
+            max_replacement_steps: 3,
+            ..css_modules_test_import_limits()
+        };
+        let run = |limits| {
+            let mut state = CssModulesImportState::new(limits);
+            let output = {
+                let mut context = CssModulesContext::new(
+                    &options,
+                    "src/Comp.vue".into(),
+                    String::new(),
+                    CssModulesScopeBehaviour::Local,
+                    false,
+                    &mut state,
+                );
+                context.scoped_name("button")
+            };
+            (output, state)
+        };
+
+        let (exact, exact_state) = run(exact_limits);
+        assert_eq!(exact, "Comp__button__2G66Z");
+        assert_eq!(exact_state.generated_bytes, 159);
+        assert_eq!(exact_state.replacement_steps, 3);
+        assert!(exact_state.error.is_none());
+
+        for limits in [
+            CssModulesImportLimits {
+                max_scoped_name_pattern_bytes: 31,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_scoped_name_bytes: 29,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_scoped_name_hash_input_bytes: 23,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_generated_bytes: 158,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_replacement_steps: 2,
+                ..exact_limits
+            },
+        ] {
+            let (output, state) = run(limits);
+            assert!(output.is_empty());
+            assert!(state.error.is_some());
+        }
+    }
+
+    #[test]
+    fn css_modules_scoped_name_cache_counts_each_output_use() {
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[local]".into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_scoped_name_pattern_bytes: 7,
+            max_scoped_name_bytes: 7,
+            max_generated_bytes: 35,
+            max_replacement_steps: 1,
+            ..css_modules_test_import_limits()
+        };
+
+        let mut exact_state = CssModulesImportState::new(exact_limits);
+        let mut exact = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut exact_state,
+        );
+        assert_eq!(exact.scoped_name("name"), "name");
+        assert_eq!(exact.scoped_name("name"), "name");
+        assert_eq!(
+            (
+                exact.load_state.generated_bytes,
+                exact.load_state.replacement_steps,
+                exact.scoped_names.len(),
+            ),
+            (35, 1, 1)
+        );
+
+        let mut over_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_generated_bytes: 34,
+            ..exact_limits
+        });
+        let mut over = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut over_state,
+        );
+        assert_eq!(over.scoped_name("name"), "name");
+        assert!(over.scoped_name("name").is_empty());
+        assert!(over.load_state.error.is_some());
+    }
+
+    #[test]
+    fn css_modules_default_scoped_names_cache_hashes_and_searches() {
+        let source = ".a {}\n.b {}";
+        let options = StyleCompileOptions::default();
+        let exact_limits = CssModulesImportLimits {
+            max_default_name_work_bytes: 39,
+            ..css_modules_test_import_limits()
+        };
+        let mut exact_state = CssModulesImportState::new(exact_limits);
+        let mut exact = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            source.into(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut exact_state,
+        );
+        let first = exact.scoped_name("a");
+        assert_eq!(exact.scoped_name("a"), first);
+        assert!(exact.scoped_name("b").ends_with("_2"));
+        assert_eq!(exact.load_state.default_name_work_bytes, 39);
+        assert_eq!(exact.scoped_names.len(), 2);
+        assert!(exact.load_state.error.is_none());
+
+        let mut over_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_default_name_work_bytes: 38,
+            ..exact_limits
+        });
+        let mut over = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            source.into(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut over_state,
+        );
+        assert!(!over.scoped_name("a").is_empty());
+        assert!(over.scoped_name("b").is_empty());
+        assert!(over.load_state.error.is_some());
+    }
+
+    #[test]
+    fn css_modules_default_hash_preserves_unicode_utf16_semantics() {
+        let source = "a😀b\u{0085}c";
+        let codes = source.encode_utf16().collect::<Vec<_>>();
+        let mut legacy = 5381u32;
+        for code in codes.iter().rev() {
+            legacy = legacy.wrapping_mul(33) ^ (*code as u32);
+        }
+        let mut expected = encode_base36_u32(legacy);
+        expected.truncate(5);
+
+        assert_eq!(css_module_default_hash(source), expected);
+    }
+
+    #[test]
+    fn css_modules_scoped_name_preserves_staged_template_expansion() {
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[name]".into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let mut state = CssModulesImportState::new(css_modules_test_import_limits());
+        let mut context = CssModulesContext::new(
+            &options,
+            "src/[local][local].css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut state,
+        );
+        assert_eq!(context.scoped_name("x"), "xx");
+        assert_eq!(context.load_state.replacement_steps, 3);
+
+        let mut hash_state = CssModulesImportState::new(css_modules_test_import_limits());
+        let mut hash_context = CssModulesContext::new(
+            &options,
+            "src/[hash:hex:4].css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut hash_state,
+        );
+        let hash = xxhash64(b"src/[hash:hex:4].css\0x");
+        let hash = css_module_template_hash(hash, "hex", Some(4));
+        let expected = if hash.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            format!("_{hash}")
+        } else {
+            hash
+        };
+        assert_eq!(hash_context.scoped_name("x"), expected);
+    }
+
+    #[test]
+    fn css_modules_scoped_name_rejects_multiplicative_templates_before_allocation() {
+        let pattern = "[name]".repeat(5_000);
+        let file_stem = "x".repeat(30_000);
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some(pattern.clone()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let mut state = CssModulesImportState::new(CssModulesImportLimits {
+            max_scoped_name_pattern_bytes: pattern.len(),
+            max_scoped_name_bytes: 1024,
+            ..css_modules_test_import_limits()
+        });
+        let mut context = CssModulesContext::new(
+            &options,
+            format!("{file_stem}.css"),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut state,
+        );
+        assert!(context.scoped_name("a").is_empty());
+        assert!(context
+            .load_state
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("scoped name")));
+
+        let source = ".a {}";
+        let compile_options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("test.css".into()),
+            modules: true,
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some(pattern.clone()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let result = compile_css_modules_with_limits(
+            source,
+            source,
+            &compile_options,
+            CssModulesImportLimits {
+                max_scoped_name_pattern_bytes: pattern.len() - 1,
+                ..css_modules_test_import_limits()
+            },
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(result.code.is_empty());
+        assert!(result.raw_modules.is_empty());
+        assert!(result.modules.is_empty());
+    }
+
+    #[test]
+    fn css_modules_hash_prefix_is_ignored_without_hash_tokens() {
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[local]".into()),
+                hash_prefix: "x".repeat(8_192),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let mut state = CssModulesImportState::new(CssModulesImportLimits {
+            max_scoped_name_hash_input_bytes: 0,
+            ..css_modules_test_import_limits()
+        });
+        let mut context = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut state,
+        );
+
+        assert_eq!(context.scoped_name("button"), "button");
+        assert!(context.scoped_name_hash_resource_path.is_none());
+        assert!(context.load_state.error.is_none());
+    }
+
+    #[test]
+    fn css_modules_template_hash_is_reused_across_digest_tokens() {
+        let pattern = "[hash:hex:4]-[hash:base64:4]";
+        let hash = xxhash64(b"x.css\0a");
+        let raw = format!(
+            "{}-{}",
+            css_module_template_hash(hash, "hex", Some(4)),
+            css_module_template_hash(hash, "base64", Some(4))
+        );
+        let needs_prefix = raw.chars().next().is_some_and(|ch| ch.is_ascii_digit());
+        let expected = if needs_prefix {
+            format!("_{raw}")
+        } else {
+            raw.clone()
+        };
+        let exact_generated = pattern.len() * 2 + 7 + raw.len() + expected.len() * 3;
+        let options = StyleCompileOptions {
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some(pattern.into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_scoped_name_hash_input_bytes: 7,
+            max_generated_bytes: exact_generated,
+            max_replacement_steps: 2,
+            ..css_modules_test_import_limits()
+        };
+
+        let mut exact_state = CssModulesImportState::new(exact_limits);
+        let mut exact = CssModulesContext::new(
+            &options,
+            "x.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut exact_state,
+        );
+        assert_eq!(exact.scoped_name("a"), expected);
+        assert_eq!(exact.load_state.generated_bytes, exact_generated);
+        assert_eq!(exact.load_state.replacement_steps, 2);
+
+        let mut over_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_generated_bytes: exact_generated - 1,
+            ..exact_limits
+        });
+        let mut over = CssModulesContext::new(
+            &options,
+            "x.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut over_state,
+        );
+        assert!(over.scoped_name("a").is_empty());
+        assert!(over.load_state.error.is_some());
+    }
+
+    #[test]
+    fn css_modules_hash_pattern_parser_preserves_supported_forms() {
+        for (token, digest, length) in [
+            ("hash", "hex", None),
+            ("contenthash:base64", "base64", None),
+            ("hash:hex:5", "hex", Some(5)),
+            ("xxhash64:hash", "hex", None),
+            ("XXHASH64:contenthash:base64", "base64", None),
+            ("xxhash64:hash:hex:7", "hex", Some(7)),
+        ] {
+            let parsed = parse_css_module_hash_pattern(token).expect("supported hash token");
+            assert_eq!((parsed.digest, parsed.max_length), (digest, length));
+        }
+        for token in ["sha256:hash", "hash:a:b:c", "xxhash64:hash:a:b:c"] {
+            assert!(parse_css_module_hash_pattern(token).is_none(), "{token}");
+        }
     }
 
     #[test]

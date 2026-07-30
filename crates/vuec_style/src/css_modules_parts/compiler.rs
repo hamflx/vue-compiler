@@ -20,6 +20,10 @@ pub(crate) const CSS_MODULES_MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_VALUE_COMPARISONS: usize = 1_048_576;
 pub(crate) const CSS_MODULES_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const CSS_MODULES_MAX_REWRITE_WORK_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_PATTERN_BYTES: usize = 32 * 1024;
+pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_BYTES: usize = 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_HASH_INPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_DEFAULT_NAME_WORK_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CssModulesImportLimits {
@@ -41,6 +45,10 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_value_comparisons: usize,
     pub(crate) max_syntax_depth: usize,
     pub(crate) max_rewrite_work_bytes: usize,
+    pub(crate) max_scoped_name_pattern_bytes: usize,
+    pub(crate) max_scoped_name_bytes: usize,
+    pub(crate) max_scoped_name_hash_input_bytes: usize,
+    pub(crate) max_default_name_work_bytes: usize,
 }
 
 impl Default for CssModulesImportLimits {
@@ -64,6 +72,10 @@ impl Default for CssModulesImportLimits {
             max_value_comparisons: CSS_MODULES_MAX_VALUE_COMPARISONS,
             max_syntax_depth: CSS_MODULES_MAX_SYNTAX_DEPTH,
             max_rewrite_work_bytes: CSS_MODULES_MAX_REWRITE_WORK_BYTES,
+            max_scoped_name_pattern_bytes: CSS_MODULES_MAX_SCOPED_NAME_PATTERN_BYTES,
+            max_scoped_name_bytes: CSS_MODULES_MAX_SCOPED_NAME_BYTES,
+            max_scoped_name_hash_input_bytes: CSS_MODULES_MAX_SCOPED_NAME_HASH_INPUT_BYTES,
+            max_default_name_work_bytes: CSS_MODULES_MAX_DEFAULT_NAME_WORK_BYTES,
         }
     }
 }
@@ -89,6 +101,7 @@ pub(crate) struct CssModulesImportState {
     pub(crate) value_comparisons: usize,
     pub(crate) active_syntax_depth: usize,
     pub(crate) rewrite_work_bytes: usize,
+    pub(crate) default_name_work_bytes: usize,
     pub(crate) error: Option<CssModulesImportError>,
 }
 
@@ -109,6 +122,7 @@ impl CssModulesImportState {
             value_comparisons: 0,
             active_syntax_depth: 0,
             rewrite_work_bytes: 0,
+            default_name_work_bytes: 0,
             error: None,
         }
     }
@@ -264,12 +278,54 @@ impl CssModulesImportState {
         }
         if self.replacement_steps >= self.limits.max_replacement_steps {
             self.fail(format!(
-                "CSS Modules value replacement exceeds the maximum of {} steps",
+                "CSS Modules replacement work exceeds the maximum of {} steps",
                 self.limits.max_replacement_steps
             ));
             return false;
         }
         self.replacement_steps += 1;
+        true
+    }
+
+    fn append_generated_output(
+        &mut self,
+        output: &mut String,
+        value: &str,
+        max_output_bytes: usize,
+        description: &str,
+    ) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(output_bytes) = output.len().checked_add(value.len()) else {
+            self.fail(format!("CSS Modules {description} size overflowed"));
+            return false;
+        };
+        if output_bytes > max_output_bytes {
+            self.fail(format!(
+                "CSS Modules {description} exceeds the maximum of {max_output_bytes} bytes"
+            ));
+            return false;
+        }
+        let Some(generated_bytes) = self.generated_bytes.checked_add(value.len()) else {
+            self.fail("CSS Modules generated output size overflowed");
+            return false;
+        };
+        if generated_bytes > self.limits.max_generated_bytes {
+            self.fail(format!(
+                "CSS Modules generated output exceeds the maximum total of {} bytes",
+                self.limits.max_generated_bytes
+            ));
+            return false;
+        }
+        if output.try_reserve(value.len()).is_err() {
+            self.fail(format!(
+                "CSS Modules could not reserve capacity for {description}"
+            ));
+            return false;
+        }
+        output.push_str(value);
+        self.generated_bytes = generated_bytes;
         true
     }
 
@@ -279,35 +335,51 @@ impl CssModulesImportState {
         value: &str,
         max_output_bytes: usize,
     ) -> bool {
+        self.append_generated_output(
+            output,
+            value,
+            max_output_bytes,
+            "value output",
+        )
+    }
+
+    pub(crate) fn append_scoped_name(&mut self, output: &mut String, value: &str) -> bool {
+        self.append_generated_output(
+            output,
+            value,
+            self.limits.max_scoped_name_bytes,
+            "scoped name",
+        )
+    }
+
+    pub(crate) fn append_scoped_name_hash_input(
+        &mut self,
+        output: &mut String,
+        value: &str,
+    ) -> bool {
+        self.append_generated_output(
+            output,
+            value,
+            self.limits.max_scoped_name_hash_input_bytes,
+            "scoped name hash input",
+        )
+    }
+
+    pub(crate) fn claim_generated_work_bytes(&mut self, bytes: usize) -> bool {
         if self.error.is_some() {
             return false;
         }
-        let Some(output_bytes) = output.len().checked_add(value.len()) else {
-            self.fail("CSS Modules value output size overflowed");
-            return false;
-        };
-        if output_bytes > max_output_bytes {
-            self.fail(format!(
-                "CSS Modules value output exceeds the maximum of {max_output_bytes} bytes"
-            ));
-            return false;
-        }
-        let Some(generated_bytes) = self.generated_bytes.checked_add(value.len()) else {
-            self.fail("CSS Modules generated value size overflowed");
+        let Some(generated_bytes) = self.generated_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules generated output size overflowed");
             return false;
         };
         if generated_bytes > self.limits.max_generated_bytes {
             self.fail(format!(
-                "CSS Modules generated values exceed the maximum total of {} bytes",
+                "CSS Modules generated output exceeds the maximum total of {} bytes",
                 self.limits.max_generated_bytes
             ));
             return false;
         }
-        if output.try_reserve(value.len()).is_err() {
-            self.fail("CSS Modules could not reserve value output capacity");
-            return false;
-        }
-        output.push_str(value);
         self.generated_bytes = generated_bytes;
         true
     }
@@ -431,6 +503,25 @@ impl CssModulesImportState {
         self.rewrite_work_bytes = rewrite_work_bytes;
         true
     }
+
+    pub(crate) fn claim_default_name_work_bytes(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(default_name_work_bytes) = self.default_name_work_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules default scoped name work size overflowed");
+            return false;
+        };
+        if default_name_work_bytes > self.limits.max_default_name_work_bytes {
+            self.fail(format!(
+                "CSS Modules default scoped names exceed the maximum work budget of {} bytes",
+                self.limits.max_default_name_work_bytes
+            ));
+            return false;
+        }
+        self.default_name_work_bytes = default_name_work_bytes;
+        true
+    }
 }
 
 pub(crate) fn compile_css_modules(
@@ -539,9 +630,18 @@ pub(crate) fn compile_css_modules_file(
         load_state,
     );
     let source = prepare_css_module_values(source, &mut context);
+    if context.load_state.error.is_some() {
+        return aborted_css_modules_file_result();
+    }
     let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root, false);
+    if context.load_state.error.is_some() {
+        return aborted_css_modules_file_result();
+    }
     let has_prepended_css = !context.prepended_css.is_empty();
     let code = context.finish_code(code);
+    if context.load_state.error.is_some() {
+        return aborted_css_modules_file_result();
+    }
     let raw_modules = context.raw_modules();
     let modules = context.modules();
     CssModulesCompileResult {
@@ -550,6 +650,16 @@ pub(crate) fn compile_css_modules_file(
         modules,
         diagnostics: context.diagnostics.clone(),
         has_prepended_css,
+    }
+}
+
+pub(crate) fn aborted_css_modules_file_result() -> CssModulesCompileResult {
+    CssModulesCompileResult {
+        code: String::new(),
+        raw_modules: BTreeMap::new(),
+        modules: BTreeMap::new(),
+        diagnostics: Vec::new(),
+        has_prepended_css: false,
     }
 }
 
@@ -577,6 +687,9 @@ pub(crate) struct CssModulesContext<'a> {
     pub(crate) raw_export_index: BTreeMap<String, usize>,
     pub(crate) import_symbols: BTreeMap<String, CssModuleImportSymbol>,
     pub(crate) imported_modules: BTreeMap<String, Arc<CssModulesCompileResult>>,
+    pub(crate) scoped_names: BTreeMap<String, String>,
+    pub(crate) default_scoped_name_hash: Option<String>,
+    pub(crate) scoped_name_hash_resource_path: Option<String>,
     pub(crate) prepended_css_has_nested_import: bool,
     pub(crate) value_placeholders: BTreeMap<String, String>,
     pub(crate) value_placeholder_modules: BTreeMap<String, String>,
@@ -612,6 +725,9 @@ impl<'a> CssModulesContext<'a> {
             raw_export_index: BTreeMap::new(),
             import_symbols: BTreeMap::new(),
             imported_modules: BTreeMap::new(),
+            scoped_names: BTreeMap::new(),
+            default_scoped_name_hash: None,
+            scoped_name_hash_resource_path: None,
             prepended_css_has_nested_import: false,
             value_placeholders: BTreeMap::new(),
             value_placeholder_modules: BTreeMap::new(),
@@ -627,11 +743,51 @@ impl<'a> CssModulesContext<'a> {
         matches!(self.scope_behaviour, CssModulesScopeBehaviour::Local)
     }
 
-    pub(crate) fn scoped_name(&self, local: &str) -> String {
-        if let Some(pattern) = self.generate_scoped_name {
-            return format_css_module_pattern(pattern, &self.filename, local, self.hash_prefix);
+    pub(crate) fn scoped_name(&mut self, local: &str) -> String {
+        if let Some(cached) = self.scoped_names.get(local) {
+            let mut output = String::new();
+            if !self.load_state.append_scoped_name(&mut output, cached)
+                || !self
+                    .load_state
+                    .claim_generated_work_bytes(output.len())
+            {
+                return String::new();
+            }
+            return output;
         }
-        format_css_module_default_scoped_name(local, &self.hash_source)
+
+        let scoped = if let Some(pattern) = self.generate_scoped_name {
+            format_css_module_pattern(
+                pattern,
+                &self.filename,
+                local,
+                self.hash_prefix,
+                self.load_state,
+                &mut self.scoped_name_hash_resource_path,
+            )
+        } else {
+            format_css_module_default_scoped_name(
+                local,
+                &self.hash_source,
+                self.load_state,
+                &mut self.default_scoped_name_hash,
+            )
+        }
+        .unwrap_or_default();
+        if self.load_state.error.is_some() {
+            return String::new();
+        }
+
+        let mut cached = String::new();
+        if !self.load_state.append_scoped_name(&mut cached, &scoped)
+            || !self
+                .load_state
+                .claim_generated_work_bytes(scoped.len())
+        {
+            return String::new();
+        }
+        self.scoped_names.insert(local.to_string(), cached);
+        scoped
     }
 
     pub(crate) fn register_local(&mut self, local: &str, scoped: &str) {

@@ -918,19 +918,59 @@ pub(crate) fn consume_css_module_class_name(source: &str, mut index: usize) -> u
     index
 }
 
-pub(crate) fn format_css_module_default_scoped_name(local: &str, css: &str) -> String {
-    let selector = format!(".{local}");
-    let index = css.find(&selector).unwrap_or(0);
+pub(crate) fn format_css_module_default_scoped_name(
+    local: &str,
+    css: &str,
+    load_state: &mut CssModulesImportState,
+    cached_hash: &mut Option<String>,
+) -> Option<String> {
+    if !load_state.claim_default_name_work_bytes(css.len()) {
+        return None;
+    }
+    let index = find_css_module_default_selector(css, local);
+    if !load_state.claim_default_name_work_bytes(index) {
+        return None;
+    }
     let line_number = css[..index].split(['\r', '\n']).count();
-    let hash = css_module_default_hash(css);
-    format!("_{local}_{hash}_{line_number}")
+    let hash = if let Some(hash) = cached_hash.as_ref() {
+        hash.clone()
+    } else {
+        if !load_state.claim_default_name_work_bytes(css.len()) {
+            return None;
+        }
+        let hash = css_module_default_hash(css);
+        *cached_hash = Some(hash.clone());
+        hash
+    };
+    let line_number = line_number.to_string();
+    let mut output = String::new();
+    for part in ["_", local, "_", hash.as_str(), "_", line_number.as_str()] {
+        if !load_state.append_scoped_name(&mut output, part) {
+            return None;
+        }
+    }
+    Some(output)
+}
+
+pub(crate) fn find_css_module_default_selector(css: &str, local: &str) -> usize {
+    let mut cursor = 0usize;
+    while let Some(offset) = css[cursor..].find('.') {
+        let index = cursor + offset;
+        if css[index + 1..].starts_with(local) {
+            return index;
+        }
+        cursor = index + 1;
+    }
+    0
 }
 
 pub(crate) fn css_module_default_hash(css: &str) -> String {
-    let codes = css.encode_utf16().collect::<Vec<_>>();
     let mut hash = 5381u32;
-    for code in codes.iter().rev() {
-        hash = hash.wrapping_mul(33) ^ (*code as u32);
+    for ch in css.chars().rev() {
+        let mut encoded = [0u16; 2];
+        for code in ch.encode_utf16(&mut encoded).iter().rev() {
+            hash = hash.wrapping_mul(33) ^ (*code as u32);
+        }
     }
     let mut base36 = encode_base36_u32(hash);
     base36.truncate(5);
@@ -955,16 +995,55 @@ pub(crate) fn format_css_module_pattern(
     filename: &str,
     local: &str,
     hash_prefix: &str,
-) -> String {
+    load_state: &mut CssModulesImportState,
+    cached_resource_path: &mut Option<String>,
+) -> Option<String> {
+    if pattern.len() > load_state.limits.max_scoped_name_pattern_bytes {
+        load_state.fail(format!(
+            "CSS Modules scoped name pattern exceeds the maximum of {} bytes",
+            load_state.limits.max_scoped_name_pattern_bytes
+        ));
+        return None;
+    }
     let file_stem = Path::new(filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("style");
-    let mut output = pattern
-        .replace("[name]", file_stem)
-        .replace("[local]", local);
-    output = replace_css_module_hash_patterns(&output, filename, local, hash_prefix);
-    sanitize_css_module_generic_name(&output)
+    let name_replaced = replace_css_module_pattern_token(pattern, "[name]", file_stem, load_state)?;
+    let local_replaced =
+        replace_css_module_pattern_token(&name_replaced, "[local]", local, load_state)?;
+    let hashed = replace_css_module_hash_patterns(
+        &local_replaced,
+        filename,
+        local,
+        hash_prefix,
+        load_state,
+        cached_resource_path,
+    )?;
+    sanitize_css_module_generic_name(&hashed, load_state)
+}
+
+pub(crate) fn replace_css_module_pattern_token(
+    source: &str,
+    token: &str,
+    replacement: &str,
+    load_state: &mut CssModulesImportState,
+) -> Option<String> {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = source[cursor..].find(token) {
+        let start = cursor + offset;
+        if !load_state.claim_replacement_step()
+            || !load_state.append_scoped_name(&mut output, &source[cursor..start])
+            || !load_state.append_scoped_name(&mut output, replacement)
+        {
+            return None;
+        }
+        cursor = start + token.len();
+    }
+    load_state
+        .append_scoped_name(&mut output, &source[cursor..])
+        .then_some(output)
 }
 
 pub(crate) fn replace_css_module_hash_patterns(
@@ -972,9 +1051,12 @@ pub(crate) fn replace_css_module_hash_patterns(
     filename: &str,
     local: &str,
     hash_prefix: &str,
-) -> String {
+    load_state: &mut CssModulesImportState,
+    cached_resource_path: &mut Option<String>,
+) -> Option<String> {
     let mut output = String::new();
     let mut cursor = 0usize;
+    let mut template_hash = None;
     while let Some(start_offset) = pattern[cursor..].find('[') {
         let start = cursor + start_offset;
         let Some(end_offset) = pattern[start + 1..].find(']') else {
@@ -982,64 +1064,110 @@ pub(crate) fn replace_css_module_hash_patterns(
         };
         let end = start + 1 + end_offset;
         let token = &pattern[start + 1..end];
-        let replacement = css_module_hash_pattern_replacement(token, filename, local, hash_prefix);
-        output.push_str(&pattern[cursor..start]);
-        if let Some(replacement) = replacement {
-            output.push_str(&replacement);
+        if !load_state.claim_replacement_step()
+            || !load_state.append_scoped_name(&mut output, &pattern[cursor..start])
+        {
+            return None;
+        }
+        if let Some(spec) = parse_css_module_hash_pattern(token) {
+            let hash = if let Some(hash) = template_hash {
+                hash
+            } else {
+                let hash = css_module_scoped_name_hash(
+                    filename,
+                    local,
+                    hash_prefix,
+                    load_state,
+                    cached_resource_path,
+                )?;
+                template_hash = Some(hash);
+                hash
+            };
+            let replacement = css_module_template_hash(hash, spec.digest, spec.max_length);
+            if !load_state.append_scoped_name(&mut output, &replacement) {
+                return None;
+            }
         } else {
-            output.push_str(&pattern[start..=end]);
+            if !load_state.append_scoped_name(&mut output, &pattern[start..=end]) {
+                return None;
+            }
         }
         cursor = end + 1;
     }
-    output.push_str(&pattern[cursor..]);
-    output
+    load_state
+        .append_scoped_name(&mut output, &pattern[cursor..])
+        .then_some(output)
 }
 
-pub(crate) fn css_module_hash_pattern_replacement(
-    token: &str,
-    filename: &str,
-    local: &str,
-    hash_prefix: &str,
-) -> Option<String> {
-    let parts = token.split(':').collect::<Vec<_>>();
-    let (hash_index, digest_index, length_index) = match parts.as_slice() {
-        ["hash"] | ["contenthash"] => (0usize, None, None),
-        ["hash", _] | ["contenthash", _] => (0usize, Some(1usize), None),
-        ["hash", _, _] | ["contenthash", _, _] => (0usize, Some(1usize), Some(2usize)),
-        [_, "hash"] | [_, "contenthash"] => (1usize, None, None),
-        [_, "hash", _] | [_, "contenthash", _] => (1usize, Some(2usize), None),
-        [_, "hash", _, _] | [_, "contenthash", _, _] => (1usize, Some(2usize), Some(3usize)),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CssModuleHashPattern<'a> {
+    pub(crate) digest: &'a str,
+    pub(crate) max_length: Option<usize>,
+}
+
+pub(crate) fn parse_css_module_hash_pattern(token: &str) -> Option<CssModuleHashPattern<'_>> {
+    let mut parts = token.split(':');
+    let first = parts.next()?;
+    let second = parts.next();
+    let third = parts.next();
+    let fourth = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    let (algorithm, digest, length) = match (second, third, fourth) {
+        (None, None, None) if matches!(first, "hash" | "contenthash") => {
+            ("xxhash64", "hex", None)
+        }
+        (Some(digest), None, None) if matches!(first, "hash" | "contenthash") => {
+            ("xxhash64", digest, None)
+        }
+        (Some(digest), Some(length), None) if matches!(first, "hash" | "contenthash") => {
+            ("xxhash64", digest, Some(length))
+        }
+        (Some("hash" | "contenthash"), None, None) => {
+            (first, "hex", None)
+        }
+        (Some("hash" | "contenthash"), Some(digest), None) => {
+            (first, digest, None)
+        }
+        (Some("hash" | "contenthash"), Some(digest), Some(length)) => {
+            (first, digest, Some(length))
+        }
         _ => return None,
-    };
-    let algorithm = if hash_index == 0 {
-        "xxhash64"
-    } else {
-        parts[0]
     };
     if !algorithm.eq_ignore_ascii_case("xxhash64") {
         return None;
     }
-    let digest = digest_index.map(|index| parts[index]).unwrap_or("hex");
-    let max_length = length_index.and_then(|index| parts[index].parse::<usize>().ok());
-    Some(css_module_template_hash(
-        filename,
-        local,
-        hash_prefix,
+    Some(CssModuleHashPattern {
         digest,
-        max_length,
-    ))
+        max_length: length.and_then(|length| length.parse::<usize>().ok()),
+    })
 }
 
-pub(crate) fn css_module_template_hash(
+pub(crate) fn css_module_scoped_name_hash(
     filename: &str,
     local: &str,
     hash_prefix: &str,
+    load_state: &mut CssModulesImportState,
+    cached_resource_path: &mut Option<String>,
+) -> Option<u64> {
+    let resource_path = cached_resource_path
+        .get_or_insert_with(|| css_module_hash_resource_path(filename))
+        .as_str();
+    let mut content = String::new();
+    for part in [hash_prefix, resource_path, "\0", local] {
+        if !load_state.append_scoped_name_hash_input(&mut content, part) {
+            return None;
+        }
+    }
+    Some(xxhash64(content.as_bytes()))
+}
+
+pub(crate) fn css_module_template_hash(
+    hash: u64,
     digest: &str,
     max_length: Option<usize>,
 ) -> String {
-    let relative = css_module_hash_resource_path(filename);
-    let content = format!("{hash_prefix}{relative}\0{local}");
-    let hash = xxhash64(content.as_bytes());
     let mut output = if digest.eq_ignore_ascii_case("base64") {
         base64_encode(&hash.to_be_bytes())
     } else {
@@ -1064,24 +1192,42 @@ pub(crate) fn css_module_hash_resource_path(filename: &str) -> String {
     relative.to_string_lossy().replace('\\', "/")
 }
 
-pub(crate) fn sanitize_css_module_generic_name(value: &str) -> String {
+pub(crate) fn sanitize_css_module_generic_name(
+    value: &str,
+    load_state: &mut CssModulesImportState,
+) -> Option<String> {
     let mut output = String::new();
+    let mut sanitized = value.chars().map(sanitize_css_module_generic_name_char);
+    let first = sanitized.next();
+    let second = sanitized.next();
+    if css_module_generic_name_chars_need_prefix(first, second)
+        && !load_state.append_scoped_name(&mut output, "_")
+    {
+        return None;
+    }
     for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || (ch as u32) >= 0x00a0 {
-            output.push(ch);
-        } else {
-            output.push('-');
+        let ch = sanitize_css_module_generic_name_char(ch);
+        let mut bytes = [0u8; 4];
+        if !load_state.append_scoped_name(&mut output, ch.encode_utf8(&mut bytes)) {
+            return None;
         }
     }
-    if css_module_generic_name_needs_prefix(&output) {
-        output.insert(0, '_');
-    }
-    output
+    Some(output)
 }
 
-pub(crate) fn css_module_generic_name_needs_prefix(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
+pub(crate) fn sanitize_css_module_generic_name_char(ch: char) -> char {
+    if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || (ch as u32) >= 0x00a0 {
+        ch
+    } else {
+        '-'
+    }
+}
+
+pub(crate) fn css_module_generic_name_chars_need_prefix(
+    first: Option<char>,
+    second: Option<char>,
+) -> bool {
+    let Some(first) = first else {
         return false;
     };
     if first.is_ascii_digit() {
@@ -1090,7 +1236,7 @@ pub(crate) fn css_module_generic_name_needs_prefix(value: &str) -> bool {
     if first != '-' {
         return false;
     }
-    matches!(chars.next(), Some('-') | Some('0'..='9'))
+    matches!(second, Some('-') | Some('0'..='9'))
 }
 
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
