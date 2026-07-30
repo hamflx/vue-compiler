@@ -118,6 +118,22 @@ impl StylePreprocessError {
             span,
         }
     }
+
+    pub(crate) fn variable_resolve(message: impl Into<String>) -> Self {
+        Self {
+            code: "VUEC_STYLE_VARIABLE_RESOLVE",
+            message: message.into(),
+            span: None,
+        }
+    }
+
+    pub(crate) fn variable_limit(message: impl Into<String>) -> Self {
+        Self {
+            code: "VUEC_STYLE_VARIABLE_LIMIT",
+            message: message.into(),
+            span: None,
+        }
+    }
 }
 
 pub(crate) fn preprocess_error_diagnostic(

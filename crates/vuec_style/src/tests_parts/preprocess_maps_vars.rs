@@ -315,6 +315,296 @@ gap = 8px
     }
 
     #[test]
+    fn lightweight_preprocessor_variables_respect_tokens_and_lexical_context() {
+        fn environment(entries: &[(&str, &str)]) -> StyleVariableEnvironment {
+            std::sync::Arc::new(
+                entries
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), std::sync::Arc::from(*value)))
+                    .collect(),
+            )
+        }
+
+        let stylus = environment(&[("tone", "red"), ("$tone", "blue"), ("tone-dark", "navy")]);
+        let mut stylus_evaluator =
+            StyleVariableEvaluator::new(stylus.as_ref(), StyleVariableSyntax::StylusBare);
+        let mut stylus_budget = StyleVariableExpansionBudget::default();
+        assert_eq!(
+            stylus_evaluator
+                .resolve(
+                    "tone $tone tone-dark undertone tone_ 'tone $tone' /* tone */ // tone",
+                    &mut stylus_budget,
+                )
+                .expect("resolve Stylus variables"),
+            "red blue navy undertone tone_ 'tone $tone' /* tone */ // tone"
+        );
+        assert_eq!(
+            stylus_evaluator
+                .resolve("étone tone", &mut stylus_budget)
+                .expect("resolve Unicode token boundaries"),
+            "étone red"
+        );
+
+        let less = environment(&[("tone", "red"), ("tone-dark", "blue")]);
+        let mut less_evaluator =
+            StyleVariableEvaluator::new(less.as_ref(), StyleVariableSyntax::LessAt);
+        let mut less_budget = StyleVariableExpansionBudget::default();
+        assert_eq!(
+            less_evaluator
+                .resolve(
+                    "@tone @tone-dark @undertone '@tone' \"@{tone}\" /* @tone */ // @tone",
+                    &mut less_budget,
+                )
+                .expect("resolve Less variables"),
+            "red blue @undertone '@tone' \"red\" /* @tone */ // @tone"
+        );
+        assert_eq!(
+            less_evaluator
+                .resolve("@toneé @tone", &mut less_budget)
+                .expect("resolve Unicode Less token boundaries"),
+            "@toneé red"
+        );
+
+        let stylus_result = compile_style(
+            "tone = red\n$tone = blue\n.example\n  color tone\n  border-color $tone\n  content 'tone'\n",
+            StyleCompileOptions {
+                preprocess_lang: Some("styl".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(stylus_result.errors.is_empty(), "{:?}", stylus_result.errors);
+        assert!(stylus_result.code.contains("color: red;"));
+        assert!(stylus_result.code.contains("border-color: blue;"));
+        assert!(stylus_result.code.contains("content: 'tone';"));
+
+        let less_result = compile_style(
+            "@breakpoint: 600px;\n.lazy { width: @var; @a: 9%; content: '@a'; note: \"@{a}\"; @media (min-width: @breakpoint) { height: @a; } }\n@var: @a;\n@a: 100%;",
+            StyleCompileOptions {
+                preprocess_lang: Some("less".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(less_result.errors.is_empty(), "{:?}", less_result.errors);
+        assert!(less_result.code.contains("width: 9%;"));
+        assert!(less_result.code.contains("content: '@a';"));
+        assert!(less_result.code.contains("note: \"9%\";"));
+        assert!(less_result.code.contains("@media (min-width: 600px)"));
+        assert!(less_result.code.contains("height: 9%;"));
+    }
+
+    #[test]
+    fn lightweight_preprocessor_variable_resolution_detects_cycles_and_depth() {
+        fn environment(entries: &[(&str, &str)]) -> StyleVariableEnvironment {
+            std::sync::Arc::new(
+                entries
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), std::sync::Arc::from(*value)))
+                    .collect(),
+            )
+        }
+
+        let recursive = environment(&[("a", "a a")]);
+        let mut evaluator =
+            StyleVariableEvaluator::new(recursive.as_ref(), StyleVariableSyntax::StylusBare);
+        let error = evaluator
+            .resolve("a", &mut StyleVariableExpansionBudget::default())
+            .expect_err("recursive Stylus variable must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_RESOLVE");
+        assert_eq!(
+            error.message,
+            "recursive style preprocessor variable reference: a"
+        );
+
+        let mutual = environment(&[("a", "@b"), ("b", "@a")]);
+        let mut evaluator =
+            StyleVariableEvaluator::new(mutual.as_ref(), StyleVariableSyntax::LessAt);
+        let error = evaluator
+            .resolve("@a", &mut StyleVariableExpansionBudget::default())
+            .expect_err("mutually recursive Less variables must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_RESOLVE");
+
+        let quoted = environment(&[("a", "'a'")]);
+        let mut evaluator =
+            StyleVariableEvaluator::new(quoted.as_ref(), StyleVariableSyntax::StylusBare);
+        assert_eq!(
+            evaluator
+                .resolve("a", &mut StyleVariableExpansionBudget::default())
+                .expect("quoted identifier is not recursive"),
+            "'a'"
+        );
+
+        let chain = environment(&[("a", "b"), ("b", "c"), ("c", "red")]);
+        let mut exact_budget = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_depth: 3,
+                ..StyleVariableExpansionLimits::default()
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(chain.as_ref(), StyleVariableSyntax::StylusBare);
+        assert_eq!(
+            evaluator
+                .resolve("a", &mut exact_budget)
+                .expect("exact variable depth"),
+            "red"
+        );
+
+        let mut shallow_budget = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_depth: 2,
+                ..StyleVariableExpansionLimits::default()
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(chain.as_ref(), StyleVariableSyntax::StylusBare);
+        let error = evaluator
+            .resolve("a", &mut shallow_budget)
+            .expect_err("variable beyond depth limit must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_LIMIT");
+        assert_eq!(
+            error.message,
+            "style preprocessor variable references exceed the maximum depth of 2"
+        );
+
+        let compiled = compile_style(
+            "@a: @a @a;\n.example { color: @a; }",
+            StyleCompileOptions {
+                preprocess_lang: Some("less".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert_eq!(compiled.diagnostics.len(), 1);
+        assert_eq!(
+            compiled.diagnostics[0].code,
+            "VUEC_STYLE_VARIABLE_RESOLVE"
+        );
+    }
+
+    #[test]
+    fn lightweight_preprocessor_variable_resolution_enforces_work_and_byte_budgets() {
+        let variables = std::sync::Arc::new(BTreeMap::from([(
+            "value".to_string(),
+            std::sync::Arc::<str>::from("1234"),
+        )]));
+
+        let mut exact = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_depth: 1,
+                max_steps: 1,
+                max_value_bytes: 4,
+                max_total_bytes: 8,
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(variables.as_ref(), StyleVariableSyntax::StylusBare);
+        assert_eq!(
+            evaluator
+                .resolve("value", &mut exact)
+                .expect("exact variable budgets"),
+            "1234"
+        );
+        assert_eq!(exact.steps, 1);
+        assert_eq!(exact.total_bytes, 8);
+
+        let mut short_value = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_value_bytes: 3,
+                ..StyleVariableExpansionLimits::default()
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(variables.as_ref(), StyleVariableSyntax::StylusBare);
+        let error = evaluator
+            .resolve("value", &mut short_value)
+            .expect_err("variable beyond value byte limit must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_LIMIT");
+
+        let mut short_total = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_total_bytes: 7,
+                ..StyleVariableExpansionLimits::default()
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(variables.as_ref(), StyleVariableSyntax::StylusBare);
+        let error = evaluator
+            .resolve("value", &mut short_total)
+            .expect_err("variable beyond total byte limit must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_LIMIT");
+        assert_eq!(
+            error.message,
+            "style preprocessor variable expansion exceeds the maximum total of 7 bytes"
+        );
+
+        let chain = std::sync::Arc::new(BTreeMap::from([
+            ("a".to_string(), std::sync::Arc::<str>::from("b")),
+            ("b".to_string(), std::sync::Arc::<str>::from("red")),
+        ]));
+        let mut one_step = StyleVariableExpansionBudget {
+            limits: StyleVariableExpansionLimits {
+                max_steps: 1,
+                ..StyleVariableExpansionLimits::default()
+            },
+            ..StyleVariableExpansionBudget::default()
+        };
+        let mut evaluator =
+            StyleVariableEvaluator::new(chain.as_ref(), StyleVariableSyntax::StylusBare);
+        let error = evaluator
+            .resolve("a", &mut one_step)
+            .expect_err("variable beyond work limit must fail");
+        assert_eq!(error.code, "VUEC_STYLE_VARIABLE_LIMIT");
+        assert_eq!(
+            error.message,
+            "style preprocessor variable expansion exceeds the maximum step count of 1"
+        );
+    }
+
+    #[test]
+    fn lightweight_preprocessor_variable_scopes_share_and_scale() {
+        let inherited = std::sync::Arc::new(BTreeMap::from([(
+            "inherited".to_string(),
+            std::sync::Arc::<str>::from("red"),
+        )]));
+        let declaration_only = vec![LessNode::Declaration {
+            name: "color".to_string(),
+            value: "inherited".to_string(),
+        }];
+        let shared = less_scope_variables(&declaration_only, &inherited);
+        assert!(std::sync::Arc::ptr_eq(&shared, &inherited));
+
+        let mut nodes = (0..1_024)
+            .map(|index| LessNode::Variable {
+                name: format!("shared-prefix-{index:04}"),
+                value: format!("{index}px"),
+            })
+            .collect::<Vec<_>>();
+        nodes.push(LessNode::Variable {
+            name: "alias".to_string(),
+            value: "shared-prefix-0000".to_string(),
+        });
+        let variables = less_scope_variables(&nodes, &inherited);
+        assert_eq!(variables.len(), 1_026);
+        assert_eq!(
+            variables.get("shared-prefix-0000").map(AsRef::as_ref),
+            Some("0px")
+        );
+        assert_eq!(
+            variables.get("shared-prefix-1023").map(AsRef::as_ref),
+            Some("1023px")
+        );
+        assert_eq!(variables.get("inherited").map(AsRef::as_ref), Some("red"));
+        assert_eq!(
+            variables.get("alias").map(AsRef::as_ref),
+            Some("shared-prefix-0000")
+        );
+    }
+
+    #[test]
     fn lightweight_preprocessors_bound_syntax_nesting() {
         fn nested_less(depth: usize) -> String {
             let mut source = String::new();

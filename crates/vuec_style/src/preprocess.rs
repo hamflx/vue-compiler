@@ -1,5 +1,6 @@
 use crate::*;
 use std::io::Read;
+use std::sync::Arc;
 
 pub(crate) const STYLE_PREPROCESS_MAX_NESTING_DEPTH: usize = 128;
 pub(crate) const STYLE_PREPROCESS_NESTING_ERROR: &str =
@@ -8,6 +9,10 @@ pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_DEPTH: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILES: usize = 512;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_DEPTH: usize = 64;
+pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_STEPS: usize = 262_144;
+pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_VALUE_BYTES: usize = 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct PreprocessResult {
     pub(crate) code: String,
@@ -262,8 +267,9 @@ pub(crate) fn preprocess_less(
         .map(Path::to_path_buf);
     let inlined = inline_less_imports(source, base_dir.as_deref(), &mut context, true)?;
     let nodes = parse_less_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
+    let variables = StyleVariableEnvironment::default();
     Ok(PreprocessResult {
-        code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::LessAt),
+        code: render_less_nodes(&nodes, None, &variables, StyleVariableSyntax::LessAt)?,
         dependencies: context.dependencies(),
     })
 }
@@ -290,10 +296,32 @@ pub(crate) enum LessNode {
     Comment,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LessVariable {
-    pub(crate) name: String,
-    pub(crate) value: String,
+pub(crate) type StyleVariableEnvironment = Arc<BTreeMap<String, Arc<str>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleVariableExpansionLimits {
+    pub(crate) max_depth: usize,
+    pub(crate) max_steps: usize,
+    pub(crate) max_value_bytes: usize,
+    pub(crate) max_total_bytes: usize,
+}
+
+impl Default for StyleVariableExpansionLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: STYLE_PREPROCESS_MAX_VARIABLE_DEPTH,
+            max_steps: STYLE_PREPROCESS_MAX_VARIABLE_STEPS,
+            max_value_bytes: STYLE_PREPROCESS_MAX_VARIABLE_VALUE_BYTES,
+            max_total_bytes: STYLE_PREPROCESS_MAX_VARIABLE_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StyleVariableExpansionBudget {
+    pub(crate) steps: usize,
+    pub(crate) total_bytes: usize,
+    pub(crate) limits: StyleVariableExpansionLimits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -729,26 +757,55 @@ pub(crate) fn parse_less_variable(statement: &str) -> Option<(String, String)> {
 pub(crate) fn render_less_nodes(
     nodes: &[LessNode],
     parent_selector: Option<&str>,
-    inherited_variables: &[LessVariable],
+    inherited_variables: &StyleVariableEnvironment,
     variable_syntax: StyleVariableSyntax,
-) -> String {
-    let variables = less_scope_variables(nodes, inherited_variables, variable_syntax);
+) -> Result<String, StylePreprocessError> {
+    let mut budget = StyleVariableExpansionBudget::default();
+    render_less_nodes_with_budget(
+        nodes,
+        parent_selector,
+        inherited_variables,
+        variable_syntax,
+        &mut budget,
+    )
+}
+
+pub(crate) fn render_less_nodes_with_budget(
+    nodes: &[LessNode],
+    parent_selector: Option<&str>,
+    inherited_variables: &StyleVariableEnvironment,
+    variable_syntax: StyleVariableSyntax,
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    let variables = less_scope_variables(nodes, inherited_variables);
+    let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
     if let Some(selector) = parent_selector {
-        let rendered = render_less_declarations(selector, nodes, &variables, variable_syntax);
+        let rendered = render_less_declarations(selector, nodes, &mut evaluator, budget)?;
         push_less_rendered(&mut output, &rendered);
     }
     for node in nodes {
         match node {
             LessNode::Rule { selector, children } => {
                 let full_selector = combine_less_selectors(parent_selector, selector);
-                let rendered =
-                    render_less_rule(&full_selector, children, &variables, variable_syntax);
+                let rendered = render_less_rule(
+                    &full_selector,
+                    children,
+                    &variables,
+                    variable_syntax,
+                    budget,
+                )?;
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let rendered_children =
-                    render_less_nodes(children, parent_selector, &variables, variable_syntax);
+                let prelude = evaluator.resolve_at_rule(prelude, budget)?;
+                let rendered_children = render_less_nodes_with_budget(
+                    children,
+                    parent_selector,
+                    &variables,
+                    variable_syntax,
+                    budget,
+                )?;
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
                         &mut output,
@@ -757,53 +814,52 @@ pub(crate) fn render_less_nodes(
                 }
             }
             LessNode::AtRuleStatement(statement) if parent_selector.is_none() => {
+                let statement = evaluator.resolve_at_rule(statement, budget)?;
                 push_less_rendered(&mut output, &format!("{statement};"));
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
             LessNode::AtRuleStatement(_) => {}
         }
     }
-    output
+    Ok(output)
 }
 
 pub(crate) fn less_scope_variables(
     nodes: &[LessNode],
-    inherited_variables: &[LessVariable],
-    variable_syntax: StyleVariableSyntax,
-) -> Vec<LessVariable> {
-    let mut variables = inherited_variables.to_vec();
+    inherited_variables: &StyleVariableEnvironment,
+) -> StyleVariableEnvironment {
+    if !nodes
+        .iter()
+        .any(|node| matches!(node, LessNode::Variable { .. }))
+    {
+        return Arc::clone(inherited_variables);
+    }
+
+    let mut variables = inherited_variables.as_ref().clone();
     for node in nodes {
         if let LessNode::Variable { name, value } = node {
-            upsert_less_variable(&mut variables, name, value.clone());
+            variables.insert(name.clone(), Arc::from(value.as_str()));
         }
     }
-    let snapshot = variables.clone();
-    for variable in &mut variables {
-        variable.value =
-            resolve_style_preprocess_value(&variable.value, &snapshot, variable_syntax);
-    }
-    variables
+    Arc::new(variables)
 }
 
 pub(crate) fn render_less_declarations(
     selector: &str,
     children: &[LessNode],
-    variables: &[LessVariable],
-    variable_syntax: StyleVariableSyntax,
-) -> String {
-    let declarations = children
-        .iter()
-        .filter_map(|node| match node {
-            LessNode::Declaration { name, value } => {
-                let value = resolve_style_preprocess_value(value, variables, variable_syntax);
-                Some((name.as_str(), normalize_preprocessor_color(&value)))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    evaluator: &mut StyleVariableEvaluator<'_>,
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    let mut declarations = Vec::new();
+    for node in children {
+        if let LessNode::Declaration { name, value } = node {
+            let value = evaluator.resolve(value, budget)?;
+            declarations.push((name.as_str(), normalize_preprocessor_color(&value)));
+        }
+    }
 
     if declarations.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut output = String::new();
@@ -817,18 +873,20 @@ pub(crate) fn render_less_declarations(
         output.push_str(";\n");
     }
     output.push('}');
-    output
+    Ok(output)
 }
 
 pub(crate) fn render_less_rule(
     selector: &str,
     children: &[LessNode],
-    variables: &[LessVariable],
+    variables: &StyleVariableEnvironment,
     variable_syntax: StyleVariableSyntax,
-) -> String {
-    let variables = less_scope_variables(children, variables, variable_syntax);
+    budget: &mut StyleVariableExpansionBudget,
+) -> Result<String, StylePreprocessError> {
+    let variables = less_scope_variables(children, variables);
+    let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
-    let declarations = render_less_declarations(selector, children, &variables, variable_syntax);
+    let declarations = render_less_declarations(selector, children, &mut evaluator, budget)?;
     push_less_rendered(&mut output, &declarations);
 
     for child in children {
@@ -838,13 +896,24 @@ pub(crate) fn render_less_rule(
                 children,
             } => {
                 let nested_selector = combine_less_selectors(Some(selector), child_selector);
-                let rendered =
-                    render_less_rule(&nested_selector, children, &variables, variable_syntax);
+                let rendered = render_less_rule(
+                    &nested_selector,
+                    children,
+                    &variables,
+                    variable_syntax,
+                    budget,
+                )?;
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let rendered_children =
-                    render_less_nodes(children, Some(selector), &variables, variable_syntax);
+                let prelude = evaluator.resolve_at_rule(prelude, budget)?;
+                let rendered_children = render_less_nodes_with_budget(
+                    children,
+                    Some(selector),
+                    &variables,
+                    variable_syntax,
+                    budget,
+                )?;
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
                         &mut output,
@@ -853,12 +922,13 @@ pub(crate) fn render_less_rule(
                 }
             }
             LessNode::AtRuleStatement(statement) => {
+                let statement = evaluator.resolve_at_rule(statement, budget)?;
                 push_less_rendered(&mut output, &format!("{statement};"));
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
         }
     }
-    output
+    Ok(output)
 }
 
 pub(crate) fn combine_less_selectors(parent: Option<&str>, selector: &str) -> String {
@@ -881,120 +951,268 @@ pub(crate) fn combine_less_selectors(parent: Option<&str>, selector: &str) -> St
     selectors.join(", ")
 }
 
-pub(crate) fn resolve_style_preprocess_value(
-    value: &str,
-    variables: &[LessVariable],
-    variable_syntax: StyleVariableSyntax,
-) -> String {
-    let mut output = value.to_string();
-    for _ in 0..8 {
-        let rewritten = match variable_syntax {
-            StyleVariableSyntax::LessAt => replace_less_variables_once(&output, variables),
-            StyleVariableSyntax::StylusBare => replace_stylus_variables_once(&output, variables),
-        };
-        if rewritten == output {
-            return rewritten;
+pub(crate) struct StyleVariableEvaluator<'variables> {
+    variables: &'variables BTreeMap<String, Arc<str>>,
+    syntax: StyleVariableSyntax,
+    memo: BTreeMap<String, Arc<str>>,
+    active: Vec<String>,
+}
+
+impl<'variables> StyleVariableEvaluator<'variables> {
+    pub(crate) fn new(
+        variables: &'variables BTreeMap<String, Arc<str>>,
+        syntax: StyleVariableSyntax,
+    ) -> Self {
+        Self {
+            variables,
+            syntax,
+            memo: BTreeMap::new(),
+            active: Vec::new(),
         }
-        output = rewritten;
     }
-    output
-}
 
-pub(crate) fn replace_stylus_variables_once(source: &str, variables: &[LessVariable]) -> String {
-    let mut output = source.to_string();
-    for variable in variables {
-        output = replace_style_identifier(&output, &variable.name, &variable.value);
-        output = replace_style_dollar_identifier(&output, &variable.name, &variable.value);
-    }
-    output
-}
+    pub(crate) fn resolve(
+        &mut self,
+        source: &str,
+        budget: &mut StyleVariableExpansionBudget,
+    ) -> Result<String, StylePreprocessError> {
+        let capacity = source.len().min(budget.limits.max_value_bytes).min(4_096);
+        let mut output = String::with_capacity(capacity);
+        let mut cursor = 0usize;
+        let mut literal_start = 0usize;
+        let mut quote = None;
 
-pub(crate) fn replace_style_dollar_identifier(source: &str, name: &str, value: &str) -> String {
-    let needle = format!("${name}");
-    let mut output = String::new();
-    let mut cursor = 0usize;
-    while let Some(relative) = source[cursor..].find(&needle) {
-        let start = cursor + relative;
-        let end = start + needle.len();
-        let after = source[end..].chars().next();
-        if after.is_none_or(|ch| !is_style_identifier_char(ch)) {
-            output.push_str(&source[cursor..start]);
-            output.push_str(value);
+        while cursor < source.len() {
+            let Some(ch) = source[cursor..].chars().next() else {
+                break;
+            };
+
+            if ch == '\\' {
+                cursor = skip_style_escape(source, cursor);
+                continue;
+            }
+
+            if let Some(delimiter) = quote {
+                if ch == delimiter {
+                    quote = None;
+                    cursor += ch.len_utf8();
+                    continue;
+                }
+                if self.syntax != StyleVariableSyntax::LessAt || !source[cursor..].starts_with("@{")
+                {
+                    cursor += ch.len_utf8();
+                    continue;
+                }
+            } else {
+                if source[cursor..].starts_with("/*") {
+                    cursor = skip_style_block_comment(source, cursor);
+                    continue;
+                }
+                if source[cursor..].starts_with("//") {
+                    break;
+                }
+                if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                    cursor += ch.len_utf8();
+                    continue;
+                }
+            }
+
+            let reference = match self.syntax {
+                StyleVariableSyntax::LessAt => {
+                    less_variable_reference_at(source, cursor, quote.is_none())
+                }
+                StyleVariableSyntax::StylusBare if quote.is_none() => {
+                    stylus_variable_reference_at(source, cursor)
+                }
+                StyleVariableSyntax::StylusBare => None,
+            };
+            let Some((name, end)) = reference else {
+                cursor += ch.len_utf8();
+                continue;
+            };
+            let Some(value) = self.resolve_variable(name, budget)? else {
+                cursor = end;
+                continue;
+            };
+
+            budget.append(&mut output, &source[literal_start..cursor])?;
+            budget.append(&mut output, &value)?;
             cursor = end;
-        } else {
-            output.push_str(&source[cursor..end]);
-            cursor = end;
+            literal_start = end;
         }
-    }
-    output.push_str(&source[cursor..]);
-    output
-}
 
-pub(crate) fn replace_less_variables_once(source: &str, variables: &[LessVariable]) -> String {
-    let mut output = String::new();
-    let mut cursor = 0usize;
-    while cursor < source.len() {
-        let Some(relative) = source[cursor..].find('@') else {
-            output.push_str(&source[cursor..]);
-            break;
+        budget.append(&mut output, &source[literal_start..])?;
+        Ok(output)
+    }
+
+    pub(crate) fn resolve_at_rule(
+        &mut self,
+        source: &str,
+        budget: &mut StyleVariableExpansionBudget,
+    ) -> Result<String, StylePreprocessError> {
+        let Some(rest) = source.strip_prefix('@') else {
+            return self.resolve(source, budget);
         };
-        let start = cursor + relative;
-        output.push_str(&source[cursor..start]);
-        let name_start = start + '@'.len_utf8();
-        let name_end = consume_less_variable_name(source, name_start);
-        if name_end == name_start {
-            output.push('@');
-            cursor = name_start;
-            continue;
-        }
-        let name = &source[name_start..name_end];
-        if let Some(value) = lookup_less_variable(name, variables) {
-            output.push_str(value);
-        } else {
-            output.push_str(&source[start..name_end]);
-        }
-        cursor = name_end;
+        let keyword_len = rest
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '-')
+            .map(|(index, ch)| index + ch.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let prefix_end = '@'.len_utf8() + keyword_len;
+        let resolved = self.resolve(&source[prefix_end..], budget)?;
+        Ok(format!("{}{resolved}", &source[..prefix_end]))
     }
-    output
+
+    fn resolve_variable(
+        &mut self,
+        name: &str,
+        budget: &mut StyleVariableExpansionBudget,
+    ) -> Result<Option<Arc<str>>, StylePreprocessError> {
+        let Some(raw) = self.variables.get(name).cloned() else {
+            return Ok(None);
+        };
+        budget.claim_step()?;
+        if let Some(value) = self.memo.get(name) {
+            return Ok(Some(Arc::clone(value)));
+        }
+        if self.active.iter().any(|active| active == name) {
+            return Err(StylePreprocessError::variable_resolve(format!(
+                "recursive style preprocessor variable reference: {}",
+                self.display_name(name)
+            )));
+        }
+        if self.active.len() >= budget.limits.max_depth {
+            return Err(StylePreprocessError::variable_limit(format!(
+                "style preprocessor variable references exceed the maximum depth of {}",
+                budget.limits.max_depth
+            )));
+        }
+
+        self.active.push(name.to_string());
+        let resolved = self.resolve(&raw, budget);
+        let popped = self.active.pop();
+        debug_assert_eq!(popped.as_deref(), Some(name));
+        let resolved: Arc<str> = Arc::from(resolved?);
+        self.memo.insert(name.to_string(), Arc::clone(&resolved));
+        Ok(Some(resolved))
+    }
+
+    fn display_name(&self, name: &str) -> String {
+        match self.syntax {
+            StyleVariableSyntax::LessAt => format!("@{name}"),
+            StyleVariableSyntax::StylusBare => name.to_string(),
+        }
+    }
 }
 
-pub(crate) fn consume_less_variable_name(source: &str, mut index: usize) -> usize {
+impl StyleVariableExpansionBudget {
+    fn claim_step(&mut self) -> Result<(), StylePreprocessError> {
+        if self.steps >= self.limits.max_steps {
+            return Err(StylePreprocessError::variable_limit(format!(
+                "style preprocessor variable expansion exceeds the maximum step count of {}",
+                self.limits.max_steps
+            )));
+        }
+        self.steps += 1;
+        Ok(())
+    }
+
+    fn append(&mut self, output: &mut String, value: &str) -> Result<(), StylePreprocessError> {
+        let value_bytes = output.len().checked_add(value.len()).ok_or_else(|| {
+            StylePreprocessError::variable_limit(
+                "style preprocessor variable expansion size overflowed",
+            )
+        })?;
+        if value_bytes > self.limits.max_value_bytes {
+            return Err(StylePreprocessError::variable_limit(format!(
+                "style preprocessor variable value exceeds the maximum of {} bytes",
+                self.limits.max_value_bytes
+            )));
+        }
+        let total_bytes = self.total_bytes.checked_add(value.len()).ok_or_else(|| {
+            StylePreprocessError::variable_limit(
+                "style preprocessor variable expansion size overflowed",
+            )
+        })?;
+        if total_bytes > self.limits.max_total_bytes {
+            return Err(StylePreprocessError::variable_limit(format!(
+                "style preprocessor variable expansion exceeds the maximum total of {} bytes",
+                self.limits.max_total_bytes
+            )));
+        }
+        output.push_str(value);
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+}
+
+fn less_variable_reference_at(
+    source: &str,
+    cursor: usize,
+    allow_plain_reference: bool,
+) -> Option<(&str, usize)> {
+    let rest = source.get(cursor..)?;
+    if let Some(interpolation) = rest.strip_prefix("@{") {
+        let close = interpolation.find('}')?;
+        let name = &interpolation[..close];
+        if !name.is_empty() && name.chars().all(is_less_variable_name_char) {
+            return Some((name, cursor + "@{".len() + close + '}'.len_utf8()));
+        }
+    }
+    if !allow_plain_reference || !rest.starts_with('@') {
+        return None;
+    }
+    let name_start = cursor + '@'.len_utf8();
+    let name_end = consume_variable_name(source, name_start, is_less_variable_name_char);
+    (name_end > name_start).then(|| (&source[name_start..name_end], name_end))
+}
+
+fn stylus_variable_reference_at(source: &str, cursor: usize) -> Option<(&str, usize)> {
+    let ch = source.get(cursor..)?.chars().next()?;
+    if !is_stylus_variable_name_char(ch) {
+        return None;
+    }
+    let end = consume_variable_name(source, cursor, is_stylus_variable_name_char);
+    Some((&source[cursor..end], end))
+}
+
+fn consume_variable_name(source: &str, mut index: usize, is_name_char: fn(char) -> bool) -> usize {
     while index < source.len() {
         let Some(ch) = source[index..].chars().next() else {
             break;
         };
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-            index += ch.len_utf8();
-        } else {
+        if !is_name_char(ch) {
             break;
         }
+        index += ch.len_utf8();
     }
     index
 }
 
-pub(crate) fn lookup_less_variable<'a>(
-    name: &str,
-    variables: &'a [LessVariable],
-) -> Option<&'a str> {
-    variables
-        .iter()
-        .rev()
-        .find_map(|variable| (variable.name == name).then_some(variable.value.as_str()))
+fn is_less_variable_name_char(ch: char) -> bool {
+    ch == '_' || ch == '-' || ch.is_alphanumeric() || !ch.is_ascii()
 }
 
-pub(crate) fn upsert_less_variable(variables: &mut Vec<LessVariable>, name: &str, value: String) {
-    if let Some(variable) = variables
-        .iter_mut()
-        .rev()
-        .find(|variable| variable.name == name)
-    {
-        variable.value = value;
-    } else {
-        variables.push(LessVariable {
-            name: name.to_string(),
-            value,
-        });
+fn is_stylus_variable_name_char(ch: char) -> bool {
+    ch == '$' || is_less_variable_name_char(ch)
+}
+
+fn skip_style_escape(source: &str, cursor: usize) -> usize {
+    let mut next = cursor + '\\'.len_utf8();
+    if let Some(ch) = source.get(next..).and_then(|rest| rest.chars().next()) {
+        next += ch.len_utf8();
     }
+    next
+}
+
+fn skip_style_block_comment(source: &str, cursor: usize) -> usize {
+    source[cursor + "/*".len()..]
+        .find("*/")
+        .map_or(source.len(), |relative| {
+            cursor + "/*".len() + relative + "*/".len()
+        })
 }
 
 pub(crate) fn push_less_rendered(output: &mut String, rendered: &str) {
@@ -1036,8 +1254,9 @@ pub(crate) fn preprocess_stylus(
         .map(Path::to_path_buf);
     let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context, true)?;
     let nodes = parse_stylus_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
+    let variables = StyleVariableEnvironment::default();
     Ok(PreprocessResult {
-        code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::StylusBare)
+        code: render_less_nodes(&nodes, None, &variables, StyleVariableSyntax::StylusBare)?
             .replace("#ff0000", "#f00"),
         dependencies: context.dependencies(),
     })
@@ -1273,8 +1492,8 @@ fn parse_stylus_block_at_depth(
 
 pub(crate) fn parse_stylus_variable(text: &str) -> Option<(String, String)> {
     let (raw_name, raw_value) = text.split_once('=')?;
-    let name = raw_name.trim().trim_start_matches('$');
-    if !is_style_identifier(name) {
+    let name = raw_name.trim();
+    if !is_stylus_variable_name(name) {
         return None;
     }
     Some((
@@ -1320,29 +1539,6 @@ pub(crate) fn is_style_property_name(value: &str) -> bool {
         && chars.all(|ch| ch == '-' || ch.is_ascii_alphanumeric())
 }
 
-pub(crate) fn replace_style_identifier(source: &str, name: &str, value: &str) -> String {
-    let mut output = String::new();
-    let mut cursor = 0usize;
-    while let Some(relative) = source[cursor..].find(name) {
-        let start = cursor + relative;
-        let end = start + name.len();
-        let before = source[..start].chars().next_back();
-        let after = source[end..].chars().next();
-        if before.is_none_or(|ch| !is_style_identifier_char(ch))
-            && after.is_none_or(|ch| !is_style_identifier_char(ch))
-        {
-            output.push_str(&source[cursor..start]);
-            output.push_str(value);
-            cursor = end;
-        } else {
-            output.push_str(&source[cursor..end]);
-            cursor = end;
-        }
-    }
-    output.push_str(&source[cursor..]);
-    output
-}
-
 pub(crate) fn trim_style_value(value: &str) -> &str {
     value.trim_end_matches(';').trim()
 }
@@ -1362,6 +1558,15 @@ pub(crate) fn is_style_identifier(value: &str) -> bool {
     };
     (first == '_' || first == '-' || first.is_ascii_alphabetic())
         && chars.all(is_style_identifier_char)
+}
+
+pub(crate) fn is_stylus_variable_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '-' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| is_style_identifier_char(ch) || ch == '$')
 }
 
 pub(crate) fn is_style_identifier_char(ch: char) -> bool {
