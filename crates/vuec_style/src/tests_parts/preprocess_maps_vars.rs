@@ -353,6 +353,248 @@ gap = 8px
     }
 
     #[test]
+    fn lightweight_preprocessors_bound_import_depth_and_restore_active_paths() {
+        fn context_with_depth(max_depth: usize) -> StyleImportContext {
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            context.limits = StyleImportLimits {
+                max_depth,
+                max_files: 8,
+                max_file_bytes: 1_024,
+                max_total_bytes: 8_192,
+            };
+            context
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("a.less"),
+            "@import \"./b.less\";\n.a { color: red; }",
+        )
+        .expect("write a.less");
+        std::fs::write(
+            dir.path().join("b.less"),
+            "@import \"./c.less\";\n.b { color: blue; }",
+        )
+        .expect("write b.less");
+        std::fs::write(dir.path().join("c.less"), ".c { color: green; }")
+            .expect("write c.less");
+        std::fs::write(
+            dir.path().join("a.styl"),
+            "@import \"./b.styl\"\n.a\n  color red\n",
+        )
+        .expect("write a.styl");
+        std::fs::write(
+            dir.path().join("b.styl"),
+            "@import \"./c.styl\"\n.b\n  color blue\n",
+        )
+        .expect("write b.styl");
+        std::fs::write(dir.path().join("c.styl"), ".c\n  color green\n")
+            .expect("write c.styl");
+
+        let mut exact_less = context_with_depth(3);
+        let less = inline_less_imports(
+            "@import \"./a.less\";",
+            Some(dir.path()),
+            &mut exact_less,
+            true,
+        )
+        .expect("exact Less import depth");
+        assert!(less.contains(".a { color: red; }"));
+        assert!(less.contains(".b { color: blue; }"));
+        assert!(less.contains(".c { color: green; }"));
+        assert!(exact_less.active_paths.is_empty());
+
+        let mut shallow_less = context_with_depth(2);
+        let less_error = inline_less_imports(
+            "@import \"./a.less\";",
+            Some(dir.path()),
+            &mut shallow_less,
+            true,
+        )
+        .expect_err("Less import beyond the depth limit must fail");
+        assert_eq!(less_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(
+            less_error.message,
+            "Less import nesting exceeds the maximum depth of 2"
+        );
+        assert_eq!(shallow_less.imported_files, 2);
+        assert!(shallow_less.active_paths.is_empty());
+
+        let mut exact_stylus = context_with_depth(3);
+        let stylus = inline_stylus_imports(
+            "@import \"./a.styl\"\n",
+            Some(dir.path()),
+            &mut exact_stylus,
+            true,
+        )
+        .expect("exact Stylus import depth");
+        assert!(stylus.contains(".a\n  color red"));
+        assert!(stylus.contains(".b\n  color blue"));
+        assert!(stylus.contains(".c\n  color green"));
+        assert!(exact_stylus.active_paths.is_empty());
+
+        let mut shallow_stylus = context_with_depth(2);
+        let stylus_error = inline_stylus_imports(
+            "@import \"./a.styl\"\n",
+            Some(dir.path()),
+            &mut shallow_stylus,
+            true,
+        )
+        .expect_err("Stylus import beyond the depth limit must fail");
+        assert_eq!(stylus_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(
+            stylus_error.message,
+            "Stylus import nesting exceeds the maximum depth of 2"
+        );
+        assert_eq!(shallow_stylus.imported_files, 2);
+        assert!(shallow_stylus.active_paths.is_empty());
+    }
+
+    #[test]
+    fn lightweight_preprocessors_bound_import_count_without_charging_cycles() {
+        fn context_with_file_limit(max_files: usize) -> StyleImportContext {
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            context.limits = StyleImportLimits {
+                max_depth: 4,
+                max_files,
+                max_file_bytes: 1_024,
+                max_total_bytes: 1_024,
+            };
+            context
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("first.less"), "").expect("write first.less");
+        std::fs::write(dir.path().join("second.less"), "").expect("write second.less");
+        let source = "@import \"./first.less\";@import \"./second.less\";";
+
+        let mut exact = context_with_file_limit(2);
+        exact.limits.max_file_bytes = 0;
+        exact.limits.max_total_bytes = 0;
+        inline_less_imports(source, Some(dir.path()), &mut exact, true)
+            .expect("exact import file count");
+        assert_eq!(exact.imported_files, 2);
+        assert_eq!(exact.imported_bytes, 0);
+
+        let mut limited = context_with_file_limit(1);
+        limited.limits.max_file_bytes = 0;
+        limited.limits.max_total_bytes = 0;
+        let error = inline_less_imports(source, Some(dir.path()), &mut limited, true)
+            .expect_err("import beyond the file count limit must fail");
+        assert_eq!(error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(
+            error.message,
+            "Less imports exceed the maximum file count of 1"
+        );
+        assert_eq!(limited.imported_files, 1);
+        assert!(limited.active_paths.is_empty());
+
+        let cycle_source = "@import \"./cycle.less\";\n.cycle { color: red; }";
+        std::fs::write(dir.path().join("cycle.less"), cycle_source).expect("write cycle.less");
+        let mut cycle = context_with_file_limit(1);
+        cycle.limits.max_depth = 1;
+        let output = inline_less_imports(
+            "@import \"./cycle.less\";",
+            Some(dir.path()),
+            &mut cycle,
+            true,
+        )
+        .expect("an active import cycle must be skipped");
+        assert!(output.contains(".cycle { color: red; }"));
+        assert_eq!(cycle.imported_files, 1);
+        assert_eq!(cycle.imported_bytes, cycle_source.len());
+        assert!(cycle.active_paths.is_empty());
+
+        std::fs::write(dir.path().join("empty.less"), "").expect("write empty.less");
+        std::fs::write(
+            dir.path().join("nested.less"),
+            "@import \"./empty.less\";\n.nested { color: blue; }",
+        )
+        .expect("write nested.less");
+        let mut nested = context_with_file_limit(2);
+        let nested_output = inline_less_imports(
+            "\n@import \"./nested.less\";",
+            Some(dir.path()),
+            &mut nested,
+            true,
+        )
+        .expect("nested empty import");
+        assert_eq!(
+            nested_output,
+            "\n\n\n.nested { color: blue; }\n"
+        );
+    }
+
+    #[test]
+    fn lightweight_preprocessors_bound_import_file_and_total_bytes() {
+        fn context_with_bytes(
+            max_file_bytes: usize,
+            max_total_bytes: usize,
+        ) -> StyleImportContext {
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            context.limits = StyleImportLimits {
+                max_depth: 4,
+                max_files: 4,
+                max_file_bytes,
+                max_total_bytes,
+            };
+            context
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let payload = ".payload { color: red; }";
+        std::fs::write(dir.path().join("payload.less"), payload).expect("write payload.less");
+        let source = "@import \"./payload.less\";";
+
+        let mut exact_file = context_with_bytes(payload.len(), payload.len());
+        inline_less_imports(source, Some(dir.path()), &mut exact_file, true)
+            .expect("exact import file byte limit");
+        assert_eq!(exact_file.imported_bytes, payload.len());
+
+        let mut short_file = context_with_bytes(payload.len() - 1, payload.len());
+        let file_error = inline_less_imports(source, Some(dir.path()), &mut short_file, true)
+            .expect_err("import beyond the per-file byte limit must fail");
+        assert_eq!(file_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(
+            file_error.message,
+            format!(
+                "Less import exceeds the maximum of {} bytes: ./payload.less",
+                payload.len() - 1
+            )
+        );
+        assert_eq!(file_error.span, Some((0, source.len())));
+        assert_eq!(short_file.imported_files, 0);
+        assert_eq!(short_file.imported_bytes, 0);
+
+        std::fs::write(dir.path().join("first.styl"), "a").expect("write first.styl");
+        std::fs::write(dir.path().join("second.styl"), "bc").expect("write second.styl");
+        let stylus_source = "@import \"./first.styl\"\n@import \"./second.styl\"\n";
+
+        let mut exact_total = context_with_bytes(2, 3);
+        inline_stylus_imports(stylus_source, Some(dir.path()), &mut exact_total, true)
+            .expect("exact total import byte limit");
+        assert_eq!(exact_total.imported_files, 2);
+        assert_eq!(exact_total.imported_bytes, 3);
+
+        let mut short_total = context_with_bytes(2, 2);
+        let total_error = inline_stylus_imports(
+            stylus_source,
+            Some(dir.path()),
+            &mut short_total,
+            true,
+        )
+        .expect_err("imports beyond the total byte limit must fail");
+        assert_eq!(total_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(
+            total_error.message,
+            "Stylus imports exceed the maximum total of 2 bytes"
+        );
+        assert_eq!(short_total.imported_files, 1);
+        assert_eq!(short_total.imported_bytes, 1);
+        assert!(short_total.active_paths.is_empty());
+    }
+
+    #[test]
     fn preprocesses_stylus_additional_data_imports_and_load_paths() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src_dir = dir.path().join("src");

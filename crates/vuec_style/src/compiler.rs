@@ -110,6 +110,14 @@ impl StylePreprocessError {
             span,
         }
     }
+
+    pub(crate) fn import_limit(message: impl Into<String>, span: Option<(usize, usize)>) -> Self {
+        Self {
+            code: "VUEC_STYLE_IMPORT_LIMIT",
+            message: message.into(),
+            span,
+        }
+    }
 }
 
 pub(crate) fn preprocess_error_diagnostic(

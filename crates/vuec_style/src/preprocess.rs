@@ -1,8 +1,13 @@
 use crate::*;
+use std::io::Read;
 
 pub(crate) const STYLE_PREPROCESS_MAX_NESTING_DEPTH: usize = 128;
 pub(crate) const STYLE_PREPROCESS_NESTING_ERROR: &str =
     "style preprocessor nesting exceeds the maximum supported depth";
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_DEPTH: usize = 64;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILES: usize = 512;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct PreprocessResult {
     pub(crate) code: String,
@@ -249,7 +254,7 @@ pub(crate) fn preprocess_less(
     source: &str,
     options: &StyleCompileOptions,
 ) -> Result<PreprocessResult, StylePreprocessError> {
-    let mut context = LessImportContext::new(options);
+    let mut context = StyleImportContext::new(options);
     let base_dir = options
         .filename
         .as_deref()
@@ -297,14 +302,36 @@ pub(crate) enum StyleVariableSyntax {
     StylusBare,
 }
 
-#[derive(Debug)]
-pub(crate) struct LessImportContext {
-    pub(crate) load_paths: Vec<PathBuf>,
-    pub(crate) dependencies: Vec<String>,
-    pub(crate) active_paths: Vec<PathBuf>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleImportLimits {
+    pub(crate) max_depth: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_file_bytes: usize,
+    pub(crate) max_total_bytes: usize,
 }
 
-impl LessImportContext {
+impl Default for StyleImportLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: STYLE_PREPROCESS_MAX_IMPORT_DEPTH,
+            max_files: STYLE_PREPROCESS_MAX_IMPORT_FILES,
+            max_file_bytes: STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES,
+            max_total_bytes: STYLE_PREPROCESS_MAX_IMPORT_BYTES,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct StyleImportContext {
+    pub(crate) load_paths: Vec<PathBuf>,
+    pub(crate) dependencies: BTreeSet<String>,
+    pub(crate) active_paths: Vec<PathBuf>,
+    pub(crate) imported_files: usize,
+    pub(crate) imported_bytes: usize,
+    pub(crate) limits: StyleImportLimits,
+}
+
+impl StyleImportContext {
     pub(crate) fn new(options: &StyleCompileOptions) -> Self {
         Self {
             load_paths: options
@@ -313,26 +340,20 @@ impl LessImportContext {
                 .iter()
                 .map(PathBuf::from)
                 .collect(),
-            dependencies: Vec::new(),
+            dependencies: BTreeSet::new(),
             active_paths: Vec::new(),
+            imported_files: 0,
+            imported_bytes: 0,
+            limits: StyleImportLimits::default(),
         }
     }
 
-    pub(crate) fn dependencies(mut self) -> Vec<String> {
-        self.dependencies.sort();
-        self.dependencies.dedup();
-        self.dependencies
+    pub(crate) fn dependencies(self) -> Vec<String> {
+        self.dependencies.into_iter().collect()
     }
 
     pub(crate) fn push_dependency(&mut self, path: &Path) {
-        let normalized = normalize_dependency_path(path);
-        if !self
-            .dependencies
-            .iter()
-            .any(|existing| existing == &normalized)
-        {
-            self.dependencies.push(normalized);
-        }
+        self.dependencies.insert(normalize_dependency_path(path));
     }
 
     pub(crate) fn is_active(&self, path: &Path) -> bool {
@@ -343,10 +364,28 @@ impl LessImportContext {
 pub(crate) fn inline_less_imports(
     source: &str,
     base_dir: Option<&Path>,
-    context: &mut LessImportContext,
+    context: &mut StyleImportContext,
     spans_apply_to_source: bool,
 ) -> Result<String, StylePreprocessError> {
     let mut output = String::new();
+    inline_less_imports_into(
+        source,
+        base_dir,
+        context,
+        spans_apply_to_source,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+fn inline_less_imports_into(
+    source: &str,
+    base_dir: Option<&Path>,
+    context: &mut StyleImportContext,
+    spans_apply_to_source: bool,
+    output: &mut String,
+) -> Result<(), StylePreprocessError> {
+    let output_start = output.len();
     let mut cursor = 0usize;
     while cursor < source.len() {
         let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
@@ -397,23 +436,142 @@ pub(crate) fn inline_less_imports(
             cursor = delimiter + 1;
             continue;
         }
+        let imported = read_style_import(&canonical, &import, "Less", import_span, context)?;
         context.active_paths.push(canonical.clone());
-        let imported = std::fs::read_to_string(&canonical).map_err(|error| {
-            StylePreprocessError::import_resolve(
-                format!("Less import could not be read: {import}: {error}"),
-                import_span,
-            )
-        })?;
         let imported_base = canonical.parent();
-        let inlined = inline_less_imports(&imported, imported_base, context, false)?;
-        context.active_paths.pop();
-        output.push_str(&inlined);
-        if !output.ends_with('\n') {
+        let result = inline_less_imports_into(&imported, imported_base, context, false, output);
+        let popped = context.active_paths.pop();
+        debug_assert_eq!(popped.as_deref(), Some(canonical.as_path()));
+        result?;
+        if output.len() == output_start || !output.ends_with('\n') {
             output.push('\n');
         }
         cursor = delimiter + 1;
     }
-    Ok(output)
+    Ok(())
+}
+
+fn read_style_import(
+    path: &Path,
+    import: &str,
+    preprocessor: &str,
+    span: Option<(usize, usize)>,
+    context: &mut StyleImportContext,
+) -> Result<String, StylePreprocessError> {
+    if context.active_paths.len() >= context.limits.max_depth {
+        return Err(StylePreprocessError::import_limit(
+            format!(
+                "{preprocessor} import nesting exceeds the maximum depth of {}",
+                context.limits.max_depth
+            ),
+            span,
+        ));
+    }
+    if context.imported_files >= context.limits.max_files {
+        return Err(StylePreprocessError::import_limit(
+            format!(
+                "{preprocessor} imports exceed the maximum file count of {}",
+                context.limits.max_files
+            ),
+            span,
+        ));
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|error| style_import_read_error(preprocessor, import, error, span))?;
+    let declared_bytes = file
+        .metadata()
+        .map_err(|error| style_import_read_error(preprocessor, import, error, span))?;
+    let max_file_bytes = u64::try_from(context.limits.max_file_bytes).unwrap_or(u64::MAX);
+    if declared_bytes.len() > max_file_bytes {
+        return Err(style_import_file_bytes_error(
+            preprocessor,
+            import,
+            context.limits.max_file_bytes,
+            span,
+        ));
+    }
+    let remaining_bytes = context
+        .limits
+        .max_total_bytes
+        .saturating_sub(context.imported_bytes);
+    let remaining_bytes_u64 = u64::try_from(remaining_bytes).unwrap_or(u64::MAX);
+    if declared_bytes.len() > remaining_bytes_u64 {
+        return Err(style_import_total_bytes_error(
+            preprocessor,
+            context.limits.max_total_bytes,
+            span,
+        ));
+    }
+
+    let read_limit = context.limits.max_file_bytes.min(remaining_bytes);
+    let initial_capacity = usize::try_from(declared_bytes.len())
+        .unwrap_or(read_limit)
+        .min(read_limit);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    // Metadata rejects known oversize files; `take` also catches files that grow during the read.
+    file.take(
+        u64::try_from(read_limit)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut bytes)
+    .map_err(|error| style_import_read_error(preprocessor, import, error, span))?;
+    if bytes.len() > read_limit {
+        if context.limits.max_file_bytes <= remaining_bytes {
+            return Err(style_import_file_bytes_error(
+                preprocessor,
+                import,
+                context.limits.max_file_bytes,
+                span,
+            ));
+        }
+        return Err(style_import_total_bytes_error(
+            preprocessor,
+            context.limits.max_total_bytes,
+            span,
+        ));
+    }
+
+    context.imported_files += 1;
+    context.imported_bytes += bytes.len();
+    String::from_utf8(bytes)
+        .map_err(|error| style_import_read_error(preprocessor, import, error, span))
+}
+
+fn style_import_read_error(
+    preprocessor: &str,
+    import: &str,
+    error: impl fmt::Display,
+    span: Option<(usize, usize)>,
+) -> StylePreprocessError {
+    StylePreprocessError::import_resolve(
+        format!("{preprocessor} import could not be read: {import}: {error}"),
+        span,
+    )
+}
+
+fn style_import_file_bytes_error(
+    preprocessor: &str,
+    import: &str,
+    limit: usize,
+    span: Option<(usize, usize)>,
+) -> StylePreprocessError {
+    StylePreprocessError::import_limit(
+        format!("{preprocessor} import exceeds the maximum of {limit} bytes: {import}"),
+        span,
+    )
+}
+
+fn style_import_total_bytes_error(
+    preprocessor: &str,
+    limit: usize,
+    span: Option<(usize, usize)>,
+) -> StylePreprocessError {
+    StylePreprocessError::import_limit(
+        format!("{preprocessor} imports exceed the maximum total of {limit} bytes"),
+        span,
+    )
 }
 
 pub(crate) fn parse_less_import_statement(statement: &str) -> Option<String> {
@@ -434,7 +592,7 @@ pub(crate) fn less_at_keyword_boundary(source: &str, index: usize) -> bool {
 pub(crate) fn resolve_less_import(
     import: &str,
     base_dir: Option<&Path>,
-    context: &LessImportContext,
+    context: &StyleImportContext,
 ) -> Option<PathBuf> {
     let import_path = Path::new(import);
     let mut bases = Vec::new();
@@ -870,7 +1028,7 @@ pub(crate) fn preprocess_stylus(
     source: &str,
     options: &StyleCompileOptions,
 ) -> Result<PreprocessResult, StylePreprocessError> {
-    let mut context = LessImportContext::new(options);
+    let mut context = StyleImportContext::new(options);
     let base_dir = options
         .filename
         .as_deref()
@@ -888,10 +1046,28 @@ pub(crate) fn preprocess_stylus(
 pub(crate) fn inline_stylus_imports(
     source: &str,
     base_dir: Option<&Path>,
-    context: &mut LessImportContext,
+    context: &mut StyleImportContext,
     spans_apply_to_source: bool,
 ) -> Result<String, StylePreprocessError> {
     let mut output = String::new();
+    inline_stylus_imports_into(
+        source,
+        base_dir,
+        context,
+        spans_apply_to_source,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+fn inline_stylus_imports_into(
+    source: &str,
+    base_dir: Option<&Path>,
+    context: &mut StyleImportContext,
+    spans_apply_to_source: bool,
+    output: &mut String,
+) -> Result<(), StylePreprocessError> {
+    let output_start = output.len();
     let mut line_start = 0usize;
     for line in source.split_inclusive('\n') {
         let content = line.trim_end_matches(['\r', '\n']);
@@ -930,23 +1106,19 @@ pub(crate) fn inline_stylus_imports(
             line_start += line.len();
             continue;
         }
+        let imported = read_style_import(&canonical, &import, "Stylus", import_span, context)?;
         context.active_paths.push(canonical.clone());
-        let imported = std::fs::read_to_string(&canonical).map_err(|error| {
-            StylePreprocessError::import_resolve(
-                format!("Stylus import could not be read: {import}: {error}"),
-                import_span,
-            )
-        })?;
         let imported_base = canonical.parent();
-        let inlined = inline_stylus_imports(&imported, imported_base, context, false)?;
-        context.active_paths.pop();
-        output.push_str(&inlined);
-        if !output.ends_with('\n') {
+        let result = inline_stylus_imports_into(&imported, imported_base, context, false, output);
+        let popped = context.active_paths.pop();
+        debug_assert_eq!(popped.as_deref(), Some(canonical.as_path()));
+        result?;
+        if output.len() == output_start || !output.ends_with('\n') {
             output.push('\n');
         }
         line_start += line.len();
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(crate) fn parse_stylus_import_statement(line: &str) -> Option<String> {
@@ -967,7 +1139,7 @@ pub(crate) fn parse_stylus_import_statement(line: &str) -> Option<String> {
 pub(crate) fn resolve_stylus_import(
     import: &str,
     base_dir: Option<&Path>,
-    context: &LessImportContext,
+    context: &StyleImportContext,
 ) -> Option<PathBuf> {
     let import_path = Path::new(import);
     let mut bases = Vec::new();
