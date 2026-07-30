@@ -1626,6 +1626,49 @@
     }
 
     #[test]
+    fn css_modules_default_name_search_handles_overlapping_arbitrary_locals() {
+        let prefix = ".".repeat(8_192);
+        let local = format!("{}x", ".".repeat(8_191));
+        let source = format!("{prefix} {{}} @keyframes {local} {{}}");
+        let options = StyleCompileOptions::default();
+        let mut state = CssModulesImportState::new(CssModulesImportLimits {
+            max_scoped_name_bytes: source.len(),
+            max_generated_bytes: source.len() * 8,
+            max_default_name_work_bytes: source.len() * 3,
+            ..css_modules_test_import_limits()
+        });
+        let mut context = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            source.clone(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut state,
+        );
+
+        let scoped = context.scoped_name(&local);
+        assert!(scoped.starts_with('_'));
+        assert!(scoped.ends_with("_1"));
+        assert!(context.load_state.error.is_none());
+
+        let mut bounded_state = CssModulesImportState::new(CssModulesImportLimits {
+            max_scoped_name_bytes: local.len(),
+            max_generated_bytes: source.len() * 8,
+            ..css_modules_test_import_limits()
+        });
+        let mut bounded = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            source,
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut bounded_state,
+        );
+        assert!(bounded.scoped_name(&local).is_empty());
+        assert!(bounded.load_state.error.is_some());
+    }
+
+    #[test]
     fn css_modules_scoped_name_preserves_staged_template_expansion() {
         let options = StyleCompileOptions {
             modules_options: CssModulesOptions {

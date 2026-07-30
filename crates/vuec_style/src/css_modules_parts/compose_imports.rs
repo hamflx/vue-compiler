@@ -927,7 +927,7 @@ pub(crate) fn format_css_module_default_scoped_name(
     if !load_state.claim_default_name_work_bytes(css.len()) {
         return None;
     }
-    let index = find_css_module_default_selector(css, local);
+    let index = find_css_module_default_selector(css, local, load_state)?;
     if !load_state.claim_default_name_work_bytes(index) {
         return None;
     }
@@ -952,16 +952,18 @@ pub(crate) fn format_css_module_default_scoped_name(
     Some(output)
 }
 
-pub(crate) fn find_css_module_default_selector(css: &str, local: &str) -> usize {
-    let mut cursor = 0usize;
-    while let Some(offset) = css[cursor..].find('.') {
-        let index = cursor + offset;
-        if css[index + 1..].starts_with(local) {
-            return index;
-        }
-        cursor = index + 1;
+pub(crate) fn find_css_module_default_selector(
+    css: &str,
+    local: &str,
+    load_state: &mut CssModulesImportState,
+) -> Option<usize> {
+    let mut selector = String::new();
+    if !load_state.append_scoped_name(&mut selector, ".")
+        || !load_state.append_scoped_name(&mut selector, local)
+    {
+        return None;
     }
-    0
+    Some(css.find(&selector).unwrap_or(0))
 }
 
 pub(crate) fn css_module_default_hash(css: &str) -> String {
