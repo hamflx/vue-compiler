@@ -17,6 +17,8 @@ pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_BRANCHES: usize = 4_096;
 pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_EXPANSIONS: usize = 262_144;
 pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_BYTES: usize = 1024 * 1024;
 pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_RENDER_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct PreprocessResult {
     pub(crate) code: String,
@@ -352,6 +354,27 @@ pub(crate) struct StyleSelectorExpansionBudget {
     pub(crate) expansions: usize,
     pub(crate) total_bytes: usize,
     pub(crate) limits: StyleSelectorExpansionLimits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleRenderLimits {
+    pub(crate) max_output_bytes: usize,
+    pub(crate) max_total_bytes: usize,
+}
+
+impl Default for StyleRenderLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: STYLE_PREPROCESS_MAX_OUTPUT_BYTES,
+            max_total_bytes: STYLE_PREPROCESS_MAX_RENDER_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StyleRenderBudget {
+    pub(crate) total_bytes: usize,
+    pub(crate) limits: StyleRenderLimits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -792,6 +815,7 @@ pub(crate) fn render_less_nodes(
 ) -> Result<String, StylePreprocessError> {
     let mut variable_budget = StyleVariableExpansionBudget::default();
     let mut selector_budget = StyleSelectorExpansionBudget::default();
+    let mut render_budget = StyleRenderBudget::default();
     render_less_nodes_with_budgets(
         nodes,
         parent_selector,
@@ -799,6 +823,7 @@ pub(crate) fn render_less_nodes(
         variable_syntax,
         &mut variable_budget,
         &mut selector_budget,
+        &mut render_budget,
     )
 }
 
@@ -809,13 +834,20 @@ pub(crate) fn render_less_nodes_with_budgets(
     variable_syntax: StyleVariableSyntax,
     variable_budget: &mut StyleVariableExpansionBudget,
     selector_budget: &mut StyleSelectorExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     let variables = less_scope_variables(nodes, inherited_variables);
     let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
     if let Some(selector) = parent_selector {
-        let rendered = render_less_declarations(selector, nodes, &mut evaluator, variable_budget)?;
-        push_less_rendered(&mut output, &rendered);
+        let rendered = render_less_declarations(
+            selector,
+            nodes,
+            &mut evaluator,
+            variable_budget,
+            render_budget,
+        )?;
+        push_less_rendered(&mut output, &rendered, render_budget)?;
     }
     for node in nodes {
         match node {
@@ -829,8 +861,9 @@ pub(crate) fn render_less_nodes_with_budgets(
                     variable_syntax,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
-                push_less_rendered(&mut output, &rendered);
+                push_less_rendered(&mut output, &rendered, render_budget)?;
             }
             LessNode::AtRuleBlock { prelude, children } => {
                 let prelude = evaluator.resolve_at_rule(prelude, variable_budget)?;
@@ -841,17 +874,18 @@ pub(crate) fn render_less_nodes_with_budgets(
                     variable_syntax,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
                 if !rendered_children.trim().is_empty() {
-                    push_less_rendered(
-                        &mut output,
-                        &format!("{prelude} {{\n{}\n}}", indent_less_css(&rendered_children)),
-                    );
+                    let rendered =
+                        render_less_at_rule_block(&prelude, &rendered_children, render_budget)?;
+                    push_less_rendered(&mut output, &rendered, render_budget)?;
                 }
             }
             LessNode::AtRuleStatement(statement) if parent_selector.is_none() => {
                 let statement = evaluator.resolve_at_rule(statement, variable_budget)?;
-                push_less_rendered(&mut output, &format!("{statement};"));
+                let rendered = render_less_at_rule_statement(&statement, render_budget)?;
+                push_less_rendered(&mut output, &rendered, render_budget)?;
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
             LessNode::AtRuleStatement(_) => {}
@@ -884,12 +918,13 @@ pub(crate) fn render_less_declarations(
     selector: &str,
     children: &[LessNode],
     evaluator: &mut StyleVariableEvaluator<'_>,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     let mut declarations = Vec::new();
     for node in children {
         if let LessNode::Declaration { name, value } = node {
-            let value = evaluator.resolve(value, budget)?;
+            let value = evaluator.resolve(value, variable_budget)?;
             declarations.push((name.as_str(), normalize_preprocessor_color(&value)));
         }
     }
@@ -899,16 +934,11 @@ pub(crate) fn render_less_declarations(
     }
 
     let mut output = String::new();
-    output.push_str(selector);
-    output.push_str(" {\n");
+    render_budget.append_parts(&mut output, &[selector, " {\n"])?;
     for (name, value) in declarations {
-        output.push_str("  ");
-        output.push_str(name);
-        output.push_str(": ");
-        output.push_str(&value);
-        output.push_str(";\n");
+        render_budget.append_parts(&mut output, &["  ", name, ": ", &value, ";\n"])?;
     }
-    output.push('}');
+    render_budget.append_parts(&mut output, &["}"])?;
     Ok(output)
 }
 
@@ -919,13 +949,19 @@ pub(crate) fn render_less_rule(
     variable_syntax: StyleVariableSyntax,
     variable_budget: &mut StyleVariableExpansionBudget,
     selector_budget: &mut StyleSelectorExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     let variables = less_scope_variables(children, variables);
     let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
-    let declarations =
-        render_less_declarations(selector, children, &mut evaluator, variable_budget)?;
-    push_less_rendered(&mut output, &declarations);
+    let declarations = render_less_declarations(
+        selector,
+        children,
+        &mut evaluator,
+        variable_budget,
+        render_budget,
+    )?;
+    push_less_rendered(&mut output, &declarations, render_budget)?;
 
     for child in children {
         match child {
@@ -942,8 +978,9 @@ pub(crate) fn render_less_rule(
                     variable_syntax,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
-                push_less_rendered(&mut output, &rendered);
+                push_less_rendered(&mut output, &rendered, render_budget)?;
             }
             LessNode::AtRuleBlock { prelude, children } => {
                 let prelude = evaluator.resolve_at_rule(prelude, variable_budget)?;
@@ -954,17 +991,18 @@ pub(crate) fn render_less_rule(
                     variable_syntax,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
                 if !rendered_children.trim().is_empty() {
-                    push_less_rendered(
-                        &mut output,
-                        &format!("{prelude} {{\n{}\n}}", indent_less_css(&rendered_children)),
-                    );
+                    let rendered =
+                        render_less_at_rule_block(&prelude, &rendered_children, render_budget)?;
+                    push_less_rendered(&mut output, &rendered, render_budget)?;
                 }
             }
             LessNode::AtRuleStatement(statement) => {
                 let statement = evaluator.resolve_at_rule(statement, variable_budget)?;
-                push_less_rendered(&mut output, &format!("{statement};"));
+                let rendered = render_less_at_rule_statement(&statement, render_budget)?;
+                push_less_rendered(&mut output, &rendered, render_budget)?;
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
         }
@@ -1435,6 +1473,56 @@ impl StyleSelectorExpansionBudget {
     }
 }
 
+impl StyleRenderBudget {
+    pub(crate) fn append_parts(
+        &mut self,
+        output: &mut String,
+        parts: &[&str],
+    ) -> Result<(), StylePreprocessError> {
+        let additional = parts.iter().try_fold(0usize, |bytes, part| {
+            bytes.checked_add(part.len()).ok_or_else(|| {
+                StylePreprocessError::output_limit("style preprocessor output size overflowed")
+            })
+        })?;
+        let output_bytes = output.len().checked_add(additional).ok_or_else(|| {
+            StylePreprocessError::output_limit("style preprocessor output size overflowed")
+        })?;
+        if output_bytes > self.limits.max_output_bytes {
+            return Err(StylePreprocessError::output_limit(format!(
+                "style preprocessor output exceeds the maximum of {} bytes",
+                self.limits.max_output_bytes
+            )));
+        }
+        let total_bytes = self.total_bytes.checked_add(additional).ok_or_else(|| {
+            StylePreprocessError::output_limit("style preprocessor render work size overflowed")
+        })?;
+        if total_bytes > self.limits.max_total_bytes {
+            return Err(StylePreprocessError::output_limit(format!(
+                "style preprocessor render work exceeds the maximum total of {} bytes",
+                self.limits.max_total_bytes
+            )));
+        }
+        if output_bytes > output.capacity() {
+            let target_capacity = output_bytes
+                .checked_next_power_of_two()
+                .unwrap_or(self.limits.max_output_bytes)
+                .min(self.limits.max_output_bytes);
+            output
+                .try_reserve_exact(target_capacity.saturating_sub(output.len()))
+                .map_err(|_| {
+                    StylePreprocessError::output_limit(
+                        "style preprocessor could not reserve output capacity",
+                    )
+                })?;
+        }
+        for part in parts {
+            output.push_str(part);
+        }
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+}
+
 fn less_variable_reference_at(
     source: &str,
     cursor: usize,
@@ -1502,31 +1590,59 @@ fn skip_style_block_comment(source: &str, cursor: usize) -> usize {
         })
 }
 
-pub(crate) fn push_less_rendered(output: &mut String, rendered: &str) {
+pub(crate) fn push_less_rendered(
+    output: &mut String,
+    rendered: &str,
+    budget: &mut StyleRenderBudget,
+) -> Result<(), StylePreprocessError> {
     if rendered.trim().is_empty() {
-        return;
+        return Ok(());
     }
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(rendered.trim());
+    let separator = if output.is_empty() {
+        ""
+    } else if output.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    budget.append_parts(output, &[separator, rendered.trim()])
 }
 
-pub(crate) fn indent_less_css(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            if line.trim().is_empty() {
-                String::new()
-            } else {
-                format!("  {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn render_less_at_rule_block(
+    prelude: &str,
+    children: &str,
+    budget: &mut StyleRenderBudget,
+) -> Result<String, StylePreprocessError> {
+    let mut output = String::new();
+    budget.append_parts(&mut output, &[prelude, " {\n"])?;
+    append_indented_less_css(&mut output, children, budget)?;
+    budget.append_parts(&mut output, &["\n}"])?;
+    Ok(output)
+}
+
+fn append_indented_less_css(
+    output: &mut String,
+    source: &str,
+    budget: &mut StyleRenderBudget,
+) -> Result<(), StylePreprocessError> {
+    for (index, line) in source.lines().enumerate() {
+        let separator = if index == 0 { "" } else { "\n" };
+        if line.trim().is_empty() {
+            budget.append_parts(output, &[separator])?;
+        } else {
+            budget.append_parts(output, &[separator, "  ", line])?;
+        }
+    }
+    Ok(())
+}
+
+fn render_less_at_rule_statement(
+    statement: &str,
+    budget: &mut StyleRenderBudget,
+) -> Result<String, StylePreprocessError> {
+    let mut output = String::new();
+    budget.append_parts(&mut output, &[statement, ";"])?;
+    Ok(output)
 }
 
 pub(crate) fn preprocess_stylus(
@@ -1544,6 +1660,7 @@ pub(crate) fn preprocess_stylus(
     let variables = StyleVariableEnvironment::default();
     let mut variable_budget = StyleVariableExpansionBudget::default();
     let mut selector_budget = StyleSelectorExpansionBudget::default();
+    let mut render_budget = StyleRenderBudget::default();
     Ok(PreprocessResult {
         code: render_stylus_nodes(
             &nodes,
@@ -1551,6 +1668,7 @@ pub(crate) fn preprocess_stylus(
             &variables,
             &mut variable_budget,
             &mut selector_budget,
+            &mut render_budget,
         )?
         .replace("#ff0000", "#f00"),
         dependencies: context.dependencies(),
@@ -1563,6 +1681,7 @@ pub(crate) fn render_stylus_nodes(
     inherited_variables: &StyleVariableEnvironment,
     variable_budget: &mut StyleVariableExpansionBudget,
     selector_budget: &mut StyleSelectorExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     let mut memo = BTreeMap::new();
     render_stylus_scope(
@@ -1572,6 +1691,7 @@ pub(crate) fn render_stylus_nodes(
         &mut memo,
         variable_budget,
         selector_budget,
+        render_budget,
     )
 }
 
@@ -1582,6 +1702,7 @@ fn render_stylus_child_scope(
     inherited_memo: &mut BTreeMap<String, Arc<str>>,
     variable_budget: &mut StyleVariableExpansionBudget,
     selector_budget: &mut StyleSelectorExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     if nodes
         .iter()
@@ -1595,6 +1716,7 @@ fn render_stylus_child_scope(
             &mut local_memo,
             variable_budget,
             selector_budget,
+            render_budget,
         )
     } else {
         render_stylus_scope(
@@ -1604,6 +1726,7 @@ fn render_stylus_child_scope(
             inherited_memo,
             variable_budget,
             selector_budget,
+            render_budget,
         )
     }
 }
@@ -1615,6 +1738,7 @@ fn render_stylus_scope(
     memo: &mut BTreeMap<String, Arc<str>>,
     variable_budget: &mut StyleVariableExpansionBudget,
     selector_budget: &mut StyleSelectorExpansionBudget,
+    render_budget: &mut StyleRenderBudget,
 ) -> Result<String, StylePreprocessError> {
     let mut variables = Arc::clone(inherited_variables);
     let mut declarations = Vec::new();
@@ -1629,7 +1753,7 @@ fn render_stylus_scope(
             LessNode::Declaration { name, value } if parent_selector.is_some() => {
                 let value =
                     resolve_stylus_with_state(value, &variables, memo, variable_budget, false)?;
-                declarations.push((name.clone(), normalize_preprocessor_color(&value)));
+                declarations.push((name.as_str(), normalize_preprocessor_color(&value)));
             }
             LessNode::Rule { selector, children } => {
                 let selector = combine_less_selectors(parent_selector, selector, selector_budget)?;
@@ -1640,6 +1764,7 @@ fn render_stylus_scope(
                     memo,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
                 descendants.push(rendered);
             }
@@ -1653,18 +1778,20 @@ fn render_stylus_scope(
                     memo,
                     variable_budget,
                     selector_budget,
+                    render_budget,
                 )?;
                 if !rendered_children.trim().is_empty() {
-                    descendants.push(format!(
-                        "{prelude} {{\n{}\n}}",
-                        indent_less_css(&rendered_children)
-                    ));
+                    descendants.push(render_less_at_rule_block(
+                        &prelude,
+                        &rendered_children,
+                        render_budget,
+                    )?);
                 }
             }
             LessNode::AtRuleStatement(statement) => {
                 let statement =
                     resolve_stylus_with_state(statement, &variables, memo, variable_budget, true)?;
-                descendants.push(format!("{statement};"));
+                descendants.push(render_less_at_rule_statement(&statement, render_budget)?);
             }
             LessNode::Declaration { .. } | LessNode::Comment => {}
         }
@@ -1672,19 +1799,14 @@ fn render_stylus_scope(
 
     let mut output = String::new();
     if let Some(selector) = parent_selector.filter(|_| !declarations.is_empty()) {
-        output.push_str(selector);
-        output.push_str(" {\n");
+        render_budget.append_parts(&mut output, &[selector, " {\n"])?;
         for (name, value) in declarations {
-            output.push_str("  ");
-            output.push_str(&name);
-            output.push_str(": ");
-            output.push_str(&value);
-            output.push_str(";\n");
+            render_budget.append_parts(&mut output, &["  ", name, ": ", &value, ";\n"])?;
         }
-        output.push('}');
+        render_budget.append_parts(&mut output, &["}"])?;
     }
     for rendered in descendants {
-        push_less_rendered(&mut output, &rendered);
+        push_less_rendered(&mut output, &rendered, render_budget)?;
     }
     Ok(output)
 }

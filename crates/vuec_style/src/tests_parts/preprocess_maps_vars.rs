@@ -912,6 +912,164 @@ breakpoint = 700px
     }
 
     #[test]
+    fn lightweight_render_budget_enforces_output_and_work_bytes_atomically() {
+        let mut output_limited = StyleRenderBudget {
+            limits: StyleRenderLimits {
+                max_output_bytes: 5,
+                max_total_bytes: 10,
+            },
+            ..StyleRenderBudget::default()
+        };
+        let mut output = String::new();
+        output_limited
+            .append_parts(&mut output, &["ab", "cde"])
+            .expect("exact output byte budget");
+        assert_eq!(output, "abcde");
+        assert_eq!(output_limited.total_bytes, 5);
+        let output_error = output_limited
+            .append_parts(&mut output, &["f"])
+            .expect_err("output beyond buffer byte budget must fail");
+        assert_eq!(output_error.code, "VUEC_STYLE_OUTPUT_LIMIT");
+        assert_eq!(output, "abcde");
+        assert_eq!(output_limited.total_bytes, 5);
+
+        let mut work_limited = StyleRenderBudget {
+            limits: StyleRenderLimits {
+                max_output_bytes: 2,
+                max_total_bytes: 3,
+            },
+            ..StyleRenderBudget::default()
+        };
+        let mut first = String::new();
+        let mut second = String::new();
+        work_limited
+            .append_parts(&mut first, &["ab"])
+            .expect("first render work bytes");
+        work_limited
+            .append_parts(&mut second, &["c"])
+            .expect("exact render work byte budget");
+        let work_error = work_limited
+            .append_parts(&mut second, &["d"])
+            .expect_err("render work beyond cumulative byte budget must fail");
+        assert_eq!(work_error.code, "VUEC_STYLE_OUTPUT_LIMIT");
+        assert_eq!(first, "ab");
+        assert_eq!(second, "c");
+        assert_eq!(work_limited.total_bytes, 3);
+
+        let mut overflow = StyleRenderBudget {
+            total_bytes: usize::MAX,
+            limits: StyleRenderLimits {
+                max_output_bytes: 1,
+                max_total_bytes: usize::MAX,
+            },
+        };
+        let mut overflow_output = String::new();
+        let overflow_error = overflow
+            .append_parts(&mut overflow_output, &["x"])
+            .expect_err("render work arithmetic overflow must fail");
+        assert_eq!(overflow_error.code, "VUEC_STYLE_OUTPUT_LIMIT");
+        assert!(overflow_output.is_empty());
+        assert_eq!(overflow.total_bytes, usize::MAX);
+    }
+
+    #[test]
+    fn lightweight_less_and_stylus_bound_nested_at_rule_rendering() {
+        fn render_with_limits(
+            source: &str,
+            stylus: bool,
+            limits: StyleRenderLimits,
+        ) -> (Result<String, StylePreprocessError>, usize) {
+            let nodes = if stylus {
+                parse_stylus_nodes(source).expect("parse Stylus")
+            } else {
+                parse_less_nodes(source).expect("parse Less")
+            };
+            let variables = StyleVariableEnvironment::default();
+            let mut variable_budget = StyleVariableExpansionBudget::default();
+            let mut selector_budget = StyleSelectorExpansionBudget::default();
+            let mut render_budget = StyleRenderBudget {
+                limits,
+                ..StyleRenderBudget::default()
+            };
+            let result = if stylus {
+                render_stylus_nodes(
+                    &nodes,
+                    None,
+                    &variables,
+                    &mut variable_budget,
+                    &mut selector_budget,
+                    &mut render_budget,
+                )
+            } else {
+                render_less_nodes_with_budgets(
+                    &nodes,
+                    None,
+                    &variables,
+                    StyleVariableSyntax::LessAt,
+                    &mut variable_budget,
+                    &mut selector_budget,
+                    &mut render_budget,
+                )
+            };
+            (result, render_budget.total_bytes)
+        }
+
+        let less = ".a { @media (min-width: 1px) { @supports (display: grid) { color: red; } } }";
+        let stylus = ".a\n  @media (min-width: 1px)\n    @supports (display: grid)\n      color red\n";
+        for (language, source, is_stylus) in
+            [("less", less, false), ("stylus", stylus, true)]
+        {
+            let (baseline, total_bytes) =
+                render_with_limits(source, is_stylus, StyleRenderLimits::default());
+            let expected = baseline.expect("baseline nested at-rule rendering");
+            assert!(expected.contains("@media (min-width: 1px)"), "{language}");
+            assert!(expected.contains("@supports (display: grid)"), "{language}");
+            assert!(total_bytes > expected.len(), "{language}");
+
+            let exact_limits = StyleRenderLimits {
+                max_output_bytes: expected.len(),
+                max_total_bytes: total_bytes,
+            };
+            let (exact, exact_total) = render_with_limits(source, is_stylus, exact_limits);
+            assert_eq!(exact.expect("exact render budgets"), expected, "{language}");
+            assert_eq!(exact_total, total_bytes, "{language}");
+
+            let (output_short, _) = render_with_limits(
+                source,
+                is_stylus,
+                StyleRenderLimits {
+                    max_output_bytes: expected.len() - 1,
+                    ..exact_limits
+                },
+            );
+            assert_eq!(
+                output_short
+                    .expect_err("render beyond output byte budget must fail")
+                    .code,
+                "VUEC_STYLE_OUTPUT_LIMIT",
+                "{language}"
+            );
+
+            let (work_short, work_total) = render_with_limits(
+                source,
+                is_stylus,
+                StyleRenderLimits {
+                    max_total_bytes: total_bytes - 1,
+                    ..exact_limits
+                },
+            );
+            assert_eq!(
+                work_short
+                    .expect_err("render beyond work byte budget must fail")
+                    .code,
+                "VUEC_STYLE_OUTPUT_LIMIT",
+                "{language}"
+            );
+            assert!(work_total < total_bytes, "{language}");
+        }
+    }
+
+    #[test]
     fn lightweight_preprocessors_bound_syntax_nesting() {
         fn nested_less(depth: usize) -> String {
             let mut source = String::new();
