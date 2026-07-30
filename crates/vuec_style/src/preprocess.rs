@@ -1,5 +1,9 @@
 use crate::*;
 
+pub(crate) const STYLE_PREPROCESS_MAX_NESTING_DEPTH: usize = 128;
+pub(crate) const STYLE_PREPROCESS_NESTING_ERROR: &str =
+    "style preprocessor nesting exceeds the maximum supported depth";
+
 pub(crate) struct PreprocessResult {
     pub(crate) code: String,
     pub(crate) dependencies: Vec<String>,
@@ -460,6 +464,10 @@ pub(crate) fn less_import_candidates(base: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn parse_less_nodes(source: &str) -> Result<Vec<LessNode>, String> {
+    parse_less_nodes_at_depth(source, 0)
+}
+
+fn parse_less_nodes_at_depth(source: &str, depth: usize) -> Result<Vec<LessNode>, String> {
     let mut nodes = Vec::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -507,7 +515,10 @@ pub(crate) fn parse_less_nodes(source: &str) -> Result<Vec<LessNode>, String> {
             return Err(format!("unclosed Less block `{prelude}`"));
         };
         let body = &source[delimiter + 1..close];
-        let children = parse_less_nodes(body)?;
+        if depth >= STYLE_PREPROCESS_MAX_NESTING_DEPTH {
+            return Err(STYLE_PREPROCESS_NESTING_ERROR.to_string());
+        }
+        let children = parse_less_nodes_at_depth(body, depth + 1)?;
         if prelude.starts_with('@') {
             nodes.push(LessNode::AtRuleBlock {
                 prelude: prelude.to_string(),
@@ -1021,6 +1032,15 @@ pub(crate) fn parse_stylus_block(
     cursor: &mut usize,
     indent: usize,
 ) -> Result<Vec<LessNode>, String> {
+    parse_stylus_block_at_depth(lines, cursor, indent, 0)
+}
+
+fn parse_stylus_block_at_depth(
+    lines: &[StylusLine],
+    cursor: &mut usize,
+    indent: usize,
+    depth: usize,
+) -> Result<Vec<LessNode>, String> {
     let mut nodes = Vec::new();
     while *cursor < lines.len() {
         let line = &lines[*cursor];
@@ -1041,7 +1061,11 @@ pub(crate) fn parse_stylus_block(
         }
         let has_children = *cursor < lines.len() && lines[*cursor].indent > line.indent;
         if has_children {
-            let children = parse_stylus_block(lines, cursor, lines[*cursor].indent)?;
+            if depth >= STYLE_PREPROCESS_MAX_NESTING_DEPTH {
+                return Err(STYLE_PREPROCESS_NESTING_ERROR.to_string());
+            }
+            let children =
+                parse_stylus_block_at_depth(lines, cursor, lines[*cursor].indent, depth + 1)?;
             if text.starts_with('@') {
                 nodes.push(LessNode::AtRuleBlock {
                     prelude: text.to_string(),

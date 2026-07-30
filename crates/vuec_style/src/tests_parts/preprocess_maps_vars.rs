@@ -315,6 +315,44 @@ gap = 8px
     }
 
     #[test]
+    fn lightweight_preprocessors_bound_syntax_nesting() {
+        fn nested_less(depth: usize) -> String {
+            let mut source = String::new();
+            for index in 0..depth {
+                source.push_str(&format!(".level-{index} {{"));
+            }
+            source.push_str("color: red;");
+            source.push_str(&"}".repeat(depth));
+            source
+        }
+
+        fn nested_stylus(depth: usize) -> String {
+            let mut source = String::new();
+            for index in 0..depth {
+                source.push_str(&"  ".repeat(index));
+                source.push_str(&format!(".level-{index}\n"));
+            }
+            source.push_str(&"  ".repeat(depth));
+            source.push_str("color red\n");
+            source
+        }
+
+        assert!(parse_less_nodes(&nested_less(STYLE_PREPROCESS_MAX_NESTING_DEPTH)).is_ok());
+        assert!(parse_stylus_nodes(&nested_stylus(STYLE_PREPROCESS_MAX_NESTING_DEPTH)).is_ok());
+
+        let less_error = parse_less_nodes(&nested_less(
+            STYLE_PREPROCESS_MAX_NESTING_DEPTH.saturating_add(1),
+        ))
+        .expect_err("overly nested Less must fail");
+        let stylus_error = parse_stylus_nodes(&nested_stylus(
+            STYLE_PREPROCESS_MAX_NESTING_DEPTH.saturating_add(1),
+        ))
+        .expect_err("overly nested Stylus must fail");
+        assert_eq!(less_error, STYLE_PREPROCESS_NESTING_ERROR);
+        assert_eq!(stylus_error, STYLE_PREPROCESS_NESTING_ERROR);
+    }
+
+    #[test]
     fn preprocesses_stylus_additional_data_imports_and_load_paths() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src_dir = dir.path().join("src");
