@@ -199,8 +199,9 @@ pub(crate) fn rewrite_css_items(
 pub(crate) fn collect_scoped_selector_deprecation_warnings(
     source: &str,
     context: CssBlockContext,
-    warnings: &mut Vec<String>,
-) {
+    warnings: &mut Vec<Diagnostic>,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
     let mut cursor = 0usize;
     while cursor < source.len() {
         cursor = skip_css_whitespace(source, cursor);
@@ -234,16 +235,18 @@ pub(crate) fn collect_scoped_selector_deprecation_warnings(
                     body,
                     CssBlockContext::Container,
                     warnings,
-                );
+                    budget,
+                )?;
             }
         } else if !matches!(context, CssBlockContext::Keyframes)
             && !css_prelude_is_block_declaration(prelude)
         {
-            collect_selector_list_deprecation_warnings(prelude, warnings);
-            collect_scoped_selector_deprecation_warnings(body, context, warnings);
+            collect_selector_list_deprecation_warnings(prelude, warnings, budget)?;
+            collect_scoped_selector_deprecation_warnings(body, context, warnings, budget)?;
         }
         cursor = close + 1;
     }
+    Ok(())
 }
 
 pub(crate) fn rewrite_deep_passthrough_body(

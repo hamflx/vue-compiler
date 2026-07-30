@@ -714,6 +714,97 @@
     }
 
     #[test]
+    fn scoped_warning_limits_have_exact_boundaries() {
+        let source = ">>> .foo {} ::v-deep .bar {}";
+        let warning_bytes = DEPRECATED_DEEP_COMBINATOR_MESSAGE.len()
+            + deprecated_deep_pseudo_message_bytes("::v-deep").unwrap();
+        let exact_limits = ScopedStyleLimits {
+            max_warnings: 2,
+            max_warning_bytes: warning_bytes,
+            ..ScopedStyleLimits::default()
+        };
+        let mut exact_budget = ScopedStyleBudget::new(exact_limits);
+        let diagnostics =
+            scoped_selector_deprecation_warnings(source, &mut exact_budget).unwrap();
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            (exact_budget.warnings, exact_budget.warning_bytes),
+            (2, warning_bytes)
+        );
+
+        for limits in [
+            ScopedStyleLimits {
+                max_warnings: 1,
+                ..exact_limits
+            },
+            ScopedStyleLimits {
+                max_warning_bytes: warning_bytes - 1,
+                ..exact_limits
+            },
+        ] {
+            let mut budget = ScopedStyleBudget::new(limits);
+            let error = scoped_selector_deprecation_warnings(source, &mut budget)
+                .expect_err("one-short warning limit must fail");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+            assert_eq!(
+                (budget.warnings, budget.warning_bytes),
+                (1, DEPRECATED_DEEP_COMBINATOR_MESSAGE.len())
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_warning_limit_failure_is_atomic() {
+        let source = ">>> .a {} ::v-deep .b {} :deep .c {}";
+        let result = compile_style_with_scoped_limits(
+            source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 29,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+            ScopedStyleLimits {
+                max_warnings: 2,
+                ..ScopedStyleLimits::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("warnings exceed"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 29, 30))
+        );
+
+        let warnings_disabled = compile_style_with_scoped_limits(
+            source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                ..StyleCompileOptions::default()
+            },
+            ScopedStyleLimits {
+                max_warnings: 0,
+                max_warning_bytes: 0,
+                ..ScopedStyleLimits::default()
+            },
+        );
+        assert!(warnings_disabled.errors.is_empty());
+        assert!(warnings_disabled.diagnostics.is_empty());
+        assert!(!warnings_disabled.code.is_empty());
+    }
+
+    #[test]
     fn skips_deprecated_deep_warnings_outside_vue3_warning_mode() {
         let result = compile_style(
             ">>> .foo { color: red; } @keyframes fade { >>> { opacity: 1; } } :global(>>> .bar) { color: blue; }",
@@ -957,6 +1048,8 @@
             max_recursive_scan_bytes: 15,
             max_keyframes: 0,
             max_keyframe_bytes: 0,
+            max_warnings: 0,
+            max_warning_bytes: 0,
             max_selector_work_bytes: 161,
         };
         assert_eq!(
@@ -1003,6 +1096,8 @@
             max_recursive_scan_bytes: 9,
             max_keyframes: 0,
             max_keyframe_bytes: 0,
+            max_warnings: 0,
+            max_warning_bytes: 0,
             max_selector_work_bytes: 87,
         };
         assert_eq!(
@@ -1358,6 +1453,8 @@
                 max_recursive_scan_bytes: 0,
                 max_keyframes: 0,
                 max_keyframe_bytes: 0,
+                max_warnings: 0,
+                max_warning_bytes: 0,
                 max_selector_work_bytes: 0,
             },
         );

@@ -6,6 +6,8 @@ pub(crate) const STYLE_SCOPED_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAMES: usize = 262_144;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_WARNINGS: usize = 65_536;
+pub(crate) const STYLE_SCOPED_MAX_WARNING_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES: usize = 256 * 1024 * 1024;
 // Selector rewriting performs several full scans and can retain both formatted
 // and scope-injected copies. These weights bound cumulative work before either
@@ -22,6 +24,8 @@ pub(crate) struct ScopedStyleLimits {
     pub(crate) max_recursive_scan_bytes: usize,
     pub(crate) max_keyframes: usize,
     pub(crate) max_keyframe_bytes: usize,
+    pub(crate) max_warnings: usize,
+    pub(crate) max_warning_bytes: usize,
     pub(crate) max_selector_work_bytes: usize,
 }
 
@@ -34,6 +38,8 @@ impl Default for ScopedStyleLimits {
             max_recursive_scan_bytes: STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES,
             max_keyframes: STYLE_SCOPED_MAX_KEYFRAMES,
             max_keyframe_bytes: STYLE_SCOPED_MAX_KEYFRAME_BYTES,
+            max_warnings: STYLE_SCOPED_MAX_WARNINGS,
+            max_warning_bytes: STYLE_SCOPED_MAX_WARNING_BYTES,
             max_selector_work_bytes: STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES,
         }
     }
@@ -44,6 +50,8 @@ pub(crate) struct ScopedStyleBudget {
     pub(crate) limits: ScopedStyleLimits,
     pub(crate) keyframes: usize,
     pub(crate) keyframe_bytes: usize,
+    pub(crate) warnings: usize,
+    pub(crate) warning_bytes: usize,
 }
 
 impl ScopedStyleBudget {
@@ -52,6 +60,8 @@ impl ScopedStyleBudget {
             limits,
             keyframes: 0,
             keyframe_bytes: 0,
+            warnings: 0,
+            warning_bytes: 0,
         }
     }
 
@@ -86,6 +96,30 @@ impl ScopedStyleBudget {
         }
         self.keyframes = keyframes;
         self.keyframe_bytes = keyframe_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn claim_warning(&mut self, bytes: usize) -> Result<(), StylePreprocessError> {
+        let warnings = self.warnings.checked_add(1).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style warning count overflowed")
+        })?;
+        if warnings > self.limits.max_warnings {
+            return Err(StylePreprocessError::scoped_limit(format!(
+                "scoped style warnings exceed the maximum of {}",
+                self.limits.max_warnings
+            )));
+        }
+        let warning_bytes = self.warning_bytes.checked_add(bytes).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style warning size overflowed")
+        })?;
+        if warning_bytes > self.limits.max_warning_bytes {
+            return Err(StylePreprocessError::scoped_limit(format!(
+                "scoped style warnings exceed the maximum total of {} bytes",
+                self.limits.max_warning_bytes
+            )));
+        }
+        self.warnings = warnings;
+        self.warning_bytes = warning_bytes;
         Ok(())
     }
 }
@@ -131,7 +165,7 @@ pub(crate) fn transform_scoped_style_with_limits(
     let mut budget = ScopedStyleBudget::new(limits);
     let keyframes = collect_scoped_keyframes(source, short_id, &mut budget)?;
     let diagnostics = if warn_deprecated {
-        scoped_selector_deprecation_warnings(source)
+        scoped_selector_deprecation_warnings(source, &mut budget)?
     } else {
         Vec::new()
     };
@@ -605,7 +639,7 @@ fn scoped_deep_container_copy_bytes(selector: &str) -> Result<usize, StylePrepro
     Ok(copy_bytes)
 }
 
-fn visit_scoped_selector_branches(
+pub(crate) fn visit_scoped_selector_branches(
     selector: &str,
     mut visitor: impl FnMut(&str) -> Result<(), StylePreprocessError>,
 ) -> Result<usize, StylePreprocessError> {
@@ -636,22 +670,50 @@ fn scoped_selector_work_limit_error(limits: ScopedStyleLimits) -> StylePreproces
 
 pub(crate) const DEPRECATED_DEEP_COMBINATOR_MESSAGE: &str =
     "the >>> and /deep/ combinators have been deprecated. Use :deep() instead.";
+pub(crate) const DEPRECATED_DEEP_PSEUDO_MIDDLE: &str =
+    " usage as a combinator has been deprecated. Use :deep(<inner-selector>) instead of ";
+pub(crate) const DEPRECATED_DEEP_PSEUDO_SUFFIX: &str = " <inner-selector>.";
 
-pub(crate) fn deprecated_deep_pseudo_message(value: &str) -> String {
-    format!(
-        "{value} usage as a combinator has been deprecated. Use :deep(<inner-selector>) instead of {value} <inner-selector>."
-    )
+pub(crate) fn deprecated_deep_pseudo_message_bytes(
+    value: &str,
+) -> Result<usize, StylePreprocessError> {
+    value
+        .len()
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(DEPRECATED_DEEP_PSEUDO_MIDDLE.len()))
+        .and_then(|bytes| bytes.checked_add(DEPRECATED_DEEP_PSEUDO_SUFFIX.len()))
+        .ok_or_else(|| StylePreprocessError::scoped_limit("scoped style warning size overflowed"))
+}
+
+pub(crate) fn deprecated_deep_pseudo_message(value: &str) -> Result<String, StylePreprocessError> {
+    let bytes = deprecated_deep_pseudo_message_bytes(value)?;
+    let mut message = String::new();
+    message.try_reserve_exact(bytes).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style warning could not reserve capacity within the configured limit",
+        )
+    })?;
+    message.push_str(value);
+    message.push_str(DEPRECATED_DEEP_PSEUDO_MIDDLE);
+    message.push_str(value);
+    message.push_str(DEPRECATED_DEEP_PSEUDO_SUFFIX);
+    Ok(message)
 }
 
 pub(crate) fn deprecated_scoped_selector_diagnostic(message: impl Into<String>) -> Diagnostic {
     Diagnostic::warning("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR", message)
 }
 
-pub(crate) fn scoped_selector_deprecation_warnings(source: &str) -> Vec<Diagnostic> {
+pub(crate) fn scoped_selector_deprecation_warnings(
+    source: &str,
+    budget: &mut ScopedStyleBudget,
+) -> Result<Vec<Diagnostic>, StylePreprocessError> {
     let mut warnings = Vec::new();
-    collect_scoped_selector_deprecation_warnings(source, CssBlockContext::Root, &mut warnings);
-    warnings
-        .into_iter()
-        .map(deprecated_scoped_selector_diagnostic)
-        .collect()
+    collect_scoped_selector_deprecation_warnings(
+        source,
+        CssBlockContext::Root,
+        &mut warnings,
+        budget,
+    )?;
+    Ok(warnings)
 }

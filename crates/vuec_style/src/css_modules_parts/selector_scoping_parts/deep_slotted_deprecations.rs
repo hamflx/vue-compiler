@@ -66,14 +66,20 @@ pub(crate) fn selector_has_deep_pseudo(selector: &str) -> bool {
 
 pub(crate) fn collect_selector_list_deprecation_warnings(
     selector: &str,
-    warnings: &mut Vec<String>,
-) {
-    for part in split_selector_list(selector) {
-        collect_selector_deprecation_warnings(part.trim(), warnings);
-    }
+    warnings: &mut Vec<Diagnostic>,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
+    visit_scoped_selector_branches(selector, |part| {
+        collect_selector_deprecation_warnings(part.trim(), warnings, budget)
+    })?;
+    Ok(())
 }
 
-pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &mut Vec<String>) {
+pub(crate) fn collect_selector_deprecation_warnings(
+    selector: &str,
+    warnings: &mut Vec<Diagnostic>,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
     let mut state = SelectorScannerState::Normal;
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
@@ -102,8 +108,12 @@ pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &m
                     if selector[index..].starts_with(">>>")
                         || selector[index..].starts_with("/deep/")
                     {
-                        warnings.push(DEPRECATED_DEEP_COMBINATOR_MESSAGE.to_string());
-                        return;
+                        push_scoped_selector_warning(
+                            warnings,
+                            budget,
+                            DEPRECATED_DEEP_COMBINATOR_MESSAGE,
+                        )?;
+                        return Ok(());
                     }
                     if let Some(deep) =
                         match_selector_pseudo_function(selector, index, &[":deep", "::v-deep"])
@@ -112,14 +122,14 @@ pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &m
                             let value =
                                 matched_selector_name(selector, deep.start, &[":deep", "::v-deep"])
                                     .unwrap_or(":deep");
-                            warnings.push(deprecated_deep_pseudo_message(value));
+                            push_deprecated_deep_pseudo_warning(warnings, budget, value)?;
                         }
-                        return;
+                        return Ok(());
                     }
                     if match_selector_pseudo_function(selector, index, &[":global", "::v-global"])
                         .is_some()
                     {
-                        return;
+                        return Ok(());
                     }
                     if let Some(slotted) = match_selector_pseudo_function(
                         selector,
@@ -128,9 +138,13 @@ pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &m
                     ) {
                         if let Some((open, close)) = slotted.parens {
                             let inner = first_selector_branch(selector[open + 1..close].trim());
-                            collect_selector_deprecation_warnings(inner.trim(), warnings);
+                            collect_selector_deprecation_warnings(
+                                inner.trim(),
+                                warnings,
+                                budget,
+                            )?;
                         }
-                        return;
+                        return Ok(());
                     }
                     if let Some(container) = match_selector_pseudo_function(
                         selector,
@@ -138,12 +152,18 @@ pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &m
                         &[":is", ":where", ":not", ":has"],
                     ) {
                         if let Some((open, close)) = container.parens {
-                            for branch in split_selector_list(&selector[open + 1..close]) {
-                                let branch = branch.trim();
-                                if selector_has_deep_pseudo(branch) {
-                                    collect_selector_deprecation_warnings(branch, warnings);
-                                }
-                            }
+                            visit_scoped_selector_branches(
+                                &selector[open + 1..close],
+                                |branch| {
+                                    let branch = branch.trim();
+                                    if selector_has_deep_pseudo(branch) {
+                                        collect_selector_deprecation_warnings(
+                                            branch, warnings, budget,
+                                        )?;
+                                    }
+                                    Ok(())
+                                },
+                            )?;
                         }
                         index = container.end;
                         continue;
@@ -178,6 +198,47 @@ pub(crate) fn collect_selector_deprecation_warnings(selector: &str, warnings: &m
         }
         index += ch.len_utf8();
     }
+    Ok(())
+}
+
+fn push_scoped_selector_warning(
+    warnings: &mut Vec<Diagnostic>,
+    budget: &mut ScopedStyleBudget,
+    message: &str,
+) -> Result<(), StylePreprocessError> {
+    budget.claim_warning(message.len())?;
+    warnings.try_reserve(1).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style warning list could not reserve capacity within the configured limit",
+        )
+    })?;
+    let mut owned = String::new();
+    owned.try_reserve_exact(message.len()).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style warning could not reserve capacity within the configured limit",
+        )
+    })?;
+    owned.push_str(message);
+    warnings.push(deprecated_scoped_selector_diagnostic(owned));
+    Ok(())
+}
+
+fn push_deprecated_deep_pseudo_warning(
+    warnings: &mut Vec<Diagnostic>,
+    budget: &mut ScopedStyleBudget,
+    value: &str,
+) -> Result<(), StylePreprocessError> {
+    let bytes = deprecated_deep_pseudo_message_bytes(value)?;
+    budget.claim_warning(bytes)?;
+    warnings.try_reserve(1).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style warning list could not reserve capacity within the configured limit",
+        )
+    })?;
+    warnings.push(deprecated_scoped_selector_diagnostic(
+        deprecated_deep_pseudo_message(value)?,
+    ));
+    Ok(())
 }
 
 pub(crate) fn matched_selector_name<'a>(
