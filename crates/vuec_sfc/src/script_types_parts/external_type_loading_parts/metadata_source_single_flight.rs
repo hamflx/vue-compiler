@@ -303,21 +303,7 @@ fn vue3_block_metadata_state(
     state.metadata_blocked = true;
     state.metadata_generation = state.metadata_generation.saturating_add(1);
 
-    let loading_keys = state
-        .metadata_source_cache
-        .iter()
-        .filter_map(|(key, entry)| match entry {
-            Vue3MetadataSourceCacheEntry::Loading(_) => Some(key.clone()),
-            Vue3MetadataSourceCacheEntry::Ready(_) | Vue3MetadataSourceCacheEntry::Missing => None,
-        })
-        .collect::<Vec<_>>();
-    let sources = loading_keys
-        .into_iter()
-        .filter_map(|key| match state.metadata_source_cache.remove(&key) {
-            Some(Vue3MetadataSourceCacheEntry::Loading(flight)) => Some(flight),
-            _ => None,
-        })
-        .collect();
+    let sources = vue3_take_metadata_source_flights(&mut state.metadata_source_cache);
     let tsconfigs = vue3_take_metadata_parse_flights(&mut state.tsconfig_cache);
     let tsconfig_settings =
         vue3_take_tsconfig_module_resolution_flights(&mut state.tsconfig_module_resolution_cache);
@@ -347,23 +333,32 @@ fn vue3_take_tsconfig_module_resolution_flights(
     flights
 }
 
+fn vue3_take_metadata_source_flights(
+    cache: &mut BTreeMap<PathBuf, Vue3MetadataSourceCacheEntry>,
+) -> Vec<std::sync::Arc<Vue3MetadataSourceFlight>> {
+    let mut flights = Vec::new();
+    cache.retain(|_, entry| match entry {
+        Vue3MetadataSourceCacheEntry::Loading(flight) => {
+            flights.push(flight.clone());
+            false
+        }
+        Vue3MetadataSourceCacheEntry::Ready(_) | Vue3MetadataSourceCacheEntry::Missing => true,
+    });
+    flights
+}
+
 fn vue3_take_metadata_parse_flights<T>(
     cache: &mut BTreeMap<PathBuf, Vue3MetadataParseCacheEntry<T>>,
 ) -> Vec<std::sync::Arc<Vue3SingleFlight<T>>> {
-    let loading_keys = cache
-        .iter()
-        .filter_map(|(key, entry)| match entry {
-            Vue3MetadataParseCacheEntry::Loading(_) => Some(key.clone()),
-            Vue3MetadataParseCacheEntry::Ready(_) => None,
-        })
-        .collect::<Vec<_>>();
-    loading_keys
-        .into_iter()
-        .filter_map(|key| match cache.remove(&key) {
-            Some(Vue3MetadataParseCacheEntry::Loading(flight)) => Some(flight),
-            _ => None,
-        })
-        .collect()
+    let mut flights = Vec::new();
+    cache.retain(|_, entry| match entry {
+        Vue3MetadataParseCacheEntry::Loading(flight) => {
+            flights.push(flight.clone());
+            false
+        }
+        Vue3MetadataParseCacheEntry::Ready(_) => true,
+    });
+    flights
 }
 
 fn vue3_abort_metadata_flights(flights: Vue3MetadataFlightsToAbort) {
@@ -396,6 +391,71 @@ mod metadata_source_single_flight_tests {
     fn budget(session: &Vue3ExternalTypeLoadSession) -> (usize, usize) {
         let state = session.lock();
         (state.stats.metadata_bytes, state.reserved_metadata_bytes)
+    }
+
+    #[test]
+    fn metadata_flight_extraction_preserves_completed_entries() {
+        let owner = std::thread::current().id();
+        let source_flight = std::sync::Arc::new(Vue3MetadataSourceFlight::new(1, owner, 0));
+        let ready_source = std::sync::Arc::new(String::from("cached"));
+        let mut source_cache = BTreeMap::from([
+            (
+                PathBuf::from("loading-source"),
+                Vue3MetadataSourceCacheEntry::Loading(source_flight.clone()),
+            ),
+            (
+                PathBuf::from("ready-source"),
+                Vue3MetadataSourceCacheEntry::Ready(ready_source.clone()),
+            ),
+            (
+                PathBuf::from("missing-source"),
+                Vue3MetadataSourceCacheEntry::Missing,
+            ),
+        ]);
+
+        let source_flights = vue3_take_metadata_source_flights(&mut source_cache);
+
+        assert_eq!(source_flights.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &source_flights[0],
+            &source_flight
+        ));
+        assert!(matches!(
+            source_cache.get(Path::new("ready-source")),
+            Some(Vue3MetadataSourceCacheEntry::Ready(source))
+                if std::sync::Arc::ptr_eq(source, &ready_source)
+        ));
+        assert!(matches!(
+            source_cache.get(Path::new("missing-source")),
+            Some(Vue3MetadataSourceCacheEntry::Missing)
+        ));
+        assert!(!source_cache.contains_key(Path::new("loading-source")));
+
+        let parse_flight = std::sync::Arc::new(Vue3SingleFlight::<serde_json::Value>::new(
+            2, owner, 0,
+        ));
+        let ready_value = std::sync::Arc::new(serde_json::json!({ "cached": true }));
+        let mut parse_cache = BTreeMap::from([
+            (
+                PathBuf::from("loading-parse"),
+                Vue3MetadataParseCacheEntry::Loading(parse_flight.clone()),
+            ),
+            (
+                PathBuf::from("ready-parse"),
+                Vue3MetadataParseCacheEntry::Ready(ready_value.clone()),
+            ),
+        ]);
+
+        let parse_flights = vue3_take_metadata_parse_flights(&mut parse_cache);
+
+        assert_eq!(parse_flights.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&parse_flights[0], &parse_flight));
+        assert!(matches!(
+            parse_cache.get(Path::new("ready-parse")),
+            Some(Vue3MetadataParseCacheEntry::Ready(value))
+                if std::sync::Arc::ptr_eq(value, &ready_value)
+        ));
+        assert!(!parse_cache.contains_key(Path::new("loading-parse")));
     }
 
     #[test]
