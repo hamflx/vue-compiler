@@ -13,6 +13,10 @@ pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_DEPTH: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_STEPS: usize = 262_144;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_VALUE_BYTES: usize = 1024 * 1024;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_BRANCHES: usize = 4_096;
+pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_EXPANSIONS: usize = 262_144;
+pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_BYTES: usize = 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_SELECTOR_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct PreprocessResult {
     pub(crate) code: String,
@@ -322,6 +326,32 @@ pub(crate) struct StyleVariableExpansionBudget {
     pub(crate) steps: usize,
     pub(crate) total_bytes: usize,
     pub(crate) limits: StyleVariableExpansionLimits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StyleSelectorExpansionLimits {
+    pub(crate) max_branches: usize,
+    pub(crate) max_expansions: usize,
+    pub(crate) max_bytes: usize,
+    pub(crate) max_total_bytes: usize,
+}
+
+impl Default for StyleSelectorExpansionLimits {
+    fn default() -> Self {
+        Self {
+            max_branches: STYLE_PREPROCESS_MAX_SELECTOR_BRANCHES,
+            max_expansions: STYLE_PREPROCESS_MAX_SELECTOR_EXPANSIONS,
+            max_bytes: STYLE_PREPROCESS_MAX_SELECTOR_BYTES,
+            max_total_bytes: STYLE_PREPROCESS_MAX_SELECTOR_TOTAL_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StyleSelectorExpansionBudget {
+    pub(crate) expansions: usize,
+    pub(crate) total_bytes: usize,
+    pub(crate) limits: StyleSelectorExpansionLimits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,51 +790,57 @@ pub(crate) fn render_less_nodes(
     inherited_variables: &StyleVariableEnvironment,
     variable_syntax: StyleVariableSyntax,
 ) -> Result<String, StylePreprocessError> {
-    let mut budget = StyleVariableExpansionBudget::default();
-    render_less_nodes_with_budget(
+    let mut variable_budget = StyleVariableExpansionBudget::default();
+    let mut selector_budget = StyleSelectorExpansionBudget::default();
+    render_less_nodes_with_budgets(
         nodes,
         parent_selector,
         inherited_variables,
         variable_syntax,
-        &mut budget,
+        &mut variable_budget,
+        &mut selector_budget,
     )
 }
 
-pub(crate) fn render_less_nodes_with_budget(
+pub(crate) fn render_less_nodes_with_budgets(
     nodes: &[LessNode],
     parent_selector: Option<&str>,
     inherited_variables: &StyleVariableEnvironment,
     variable_syntax: StyleVariableSyntax,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    selector_budget: &mut StyleSelectorExpansionBudget,
 ) -> Result<String, StylePreprocessError> {
     let variables = less_scope_variables(nodes, inherited_variables);
     let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
     if let Some(selector) = parent_selector {
-        let rendered = render_less_declarations(selector, nodes, &mut evaluator, budget)?;
+        let rendered = render_less_declarations(selector, nodes, &mut evaluator, variable_budget)?;
         push_less_rendered(&mut output, &rendered);
     }
     for node in nodes {
         match node {
             LessNode::Rule { selector, children } => {
-                let full_selector = combine_less_selectors(parent_selector, selector);
+                let full_selector =
+                    combine_less_selectors(parent_selector, selector, selector_budget)?;
                 let rendered = render_less_rule(
                     &full_selector,
                     children,
                     &variables,
                     variable_syntax,
-                    budget,
+                    variable_budget,
+                    selector_budget,
                 )?;
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let prelude = evaluator.resolve_at_rule(prelude, budget)?;
-                let rendered_children = render_less_nodes_with_budget(
+                let prelude = evaluator.resolve_at_rule(prelude, variable_budget)?;
+                let rendered_children = render_less_nodes_with_budgets(
                     children,
                     parent_selector,
                     &variables,
                     variable_syntax,
-                    budget,
+                    variable_budget,
+                    selector_budget,
                 )?;
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
@@ -814,7 +850,7 @@ pub(crate) fn render_less_nodes_with_budget(
                 }
             }
             LessNode::AtRuleStatement(statement) if parent_selector.is_none() => {
-                let statement = evaluator.resolve_at_rule(statement, budget)?;
+                let statement = evaluator.resolve_at_rule(statement, variable_budget)?;
                 push_less_rendered(&mut output, &format!("{statement};"));
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
@@ -881,12 +917,14 @@ pub(crate) fn render_less_rule(
     children: &[LessNode],
     variables: &StyleVariableEnvironment,
     variable_syntax: StyleVariableSyntax,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    selector_budget: &mut StyleSelectorExpansionBudget,
 ) -> Result<String, StylePreprocessError> {
     let variables = less_scope_variables(children, variables);
     let mut evaluator = StyleVariableEvaluator::new(variables.as_ref(), variable_syntax);
     let mut output = String::new();
-    let declarations = render_less_declarations(selector, children, &mut evaluator, budget)?;
+    let declarations =
+        render_less_declarations(selector, children, &mut evaluator, variable_budget)?;
     push_less_rendered(&mut output, &declarations);
 
     for child in children {
@@ -895,24 +933,27 @@ pub(crate) fn render_less_rule(
                 selector: child_selector,
                 children,
             } => {
-                let nested_selector = combine_less_selectors(Some(selector), child_selector);
+                let nested_selector =
+                    combine_less_selectors(Some(selector), child_selector, selector_budget)?;
                 let rendered = render_less_rule(
                     &nested_selector,
                     children,
                     &variables,
                     variable_syntax,
-                    budget,
+                    variable_budget,
+                    selector_budget,
                 )?;
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let prelude = evaluator.resolve_at_rule(prelude, budget)?;
-                let rendered_children = render_less_nodes_with_budget(
+                let prelude = evaluator.resolve_at_rule(prelude, variable_budget)?;
+                let rendered_children = render_less_nodes_with_budgets(
                     children,
                     Some(selector),
                     &variables,
                     variable_syntax,
-                    budget,
+                    variable_budget,
+                    selector_budget,
                 )?;
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
@@ -922,7 +963,7 @@ pub(crate) fn render_less_rule(
                 }
             }
             LessNode::AtRuleStatement(statement) => {
-                let statement = evaluator.resolve_at_rule(statement, budget)?;
+                let statement = evaluator.resolve_at_rule(statement, variable_budget)?;
                 push_less_rendered(&mut output, &format!("{statement};"));
             }
             LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
@@ -931,24 +972,182 @@ pub(crate) fn render_less_rule(
     Ok(output)
 }
 
-pub(crate) fn combine_less_selectors(parent: Option<&str>, selector: &str) -> String {
+pub(crate) fn combine_less_selectors(
+    parent: Option<&str>,
+    selector: &str,
+    budget: &mut StyleSelectorExpansionBudget,
+) -> Result<String, StylePreprocessError> {
     let selector = selector.trim();
+    budget.validate_input_bytes(selector)?;
+    let child_branches = split_selector_list(selector);
     let Some(parent) = parent.map(str::trim).filter(|parent| !parent.is_empty()) else {
-        return selector.to_string();
+        budget.claim(child_branches.len(), child_branches.len(), selector.len())?;
+        return Ok(selector.to_string());
     };
-    let mut selectors = Vec::new();
-    for parent_branch in split_selector_list(parent) {
+
+    budget.validate_input_bytes(parent)?;
+    let parent_branches = split_selector_list(parent);
+    let branch_count = parent_branches
+        .len()
+        .checked_mul(child_branches.len())
+        .ok_or_else(|| {
+            StylePreprocessError::selector_limit(
+                "style preprocessor selector branch count overflowed",
+            )
+        })?;
+    budget.validate_branches(branch_count)?;
+    let child_metadata = child_branches
+        .iter()
+        .map(|branch| SelectorBranchMetadata::new(branch.trim()))
+        .collect::<Vec<_>>();
+    let expansion_work =
+        selector_expansion_work(parent_branches.len(), &child_metadata, branch_count)?;
+    budget.validate_claim(branch_count, expansion_work)?;
+    let projected_bytes = projected_combined_selector_bytes(
+        &parent_branches,
+        &child_metadata,
+        branch_count,
+        budget.limits.max_bytes,
+    )?;
+    budget.claim(branch_count, expansion_work, projected_bytes)?;
+
+    let mut combined = String::with_capacity(projected_bytes);
+    let mut first = true;
+    for parent_branch in parent_branches {
         let parent_branch = parent_branch.trim();
-        for child_branch in split_selector_list(selector) {
-            let child_branch = child_branch.trim();
-            if child_branch.contains('&') {
-                selectors.push(child_branch.replace('&', parent_branch));
-            } else {
-                selectors.push(format!("{parent_branch} {child_branch}"));
+        for child_branch in &child_metadata {
+            if !first {
+                combined.push_str(", ");
             }
+            if child_branch.ampersands > 0 {
+                append_replaced_parent_selector(&mut combined, child_branch.value, parent_branch);
+            } else {
+                combined.push_str(parent_branch);
+                combined.push(' ');
+                combined.push_str(child_branch.value);
+            }
+            first = false;
         }
     }
-    selectors.join(", ")
+    debug_assert_eq!(combined.len(), projected_bytes);
+    Ok(combined)
+}
+
+fn selector_expansion_work(
+    parent_branches: usize,
+    child_branches: &[SelectorBranchMetadata<'_>],
+    combined_branches: usize,
+) -> Result<usize, StylePreprocessError> {
+    let child_replacements = child_branches.iter().try_fold(0usize, |total, branch| {
+        total.checked_add(branch.ampersands).ok_or_else(|| {
+            StylePreprocessError::selector_limit(
+                "style preprocessor selector expansion count overflowed",
+            )
+        })
+    })?;
+    parent_branches
+        .checked_mul(child_replacements)
+        .and_then(|replacements| replacements.checked_add(combined_branches))
+        .ok_or_else(|| {
+            StylePreprocessError::selector_limit(
+                "style preprocessor selector expansion count overflowed",
+            )
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectorBranchMetadata<'selector> {
+    value: &'selector str,
+    ampersands: usize,
+}
+
+impl<'selector> SelectorBranchMetadata<'selector> {
+    fn new(value: &'selector str) -> Self {
+        Self {
+            value,
+            ampersands: value.bytes().filter(|byte| *byte == b'&').count(),
+        }
+    }
+}
+
+fn projected_combined_selector_bytes(
+    parent_branches: &[&str],
+    child_branches: &[SelectorBranchMetadata<'_>],
+    branch_count: usize,
+    max_bytes: usize,
+) -> Result<usize, StylePreprocessError> {
+    let parent_bytes = parent_branches.iter().try_fold(0usize, |total, branch| {
+        checked_selector_bytes(total, branch.trim().len(), max_bytes)
+    })?;
+    let parent_count = parent_branches.len();
+    let mut total = branch_count
+        .saturating_sub(1)
+        .checked_mul(", ".len())
+        .ok_or_else(selector_size_overflow)?;
+    if total > max_bytes {
+        return Err(selector_byte_limit(max_bytes));
+    }
+
+    for child_branch in child_branches {
+        let child_total = if child_branch.ampersands == 0 {
+            let suffix_bytes = ' '
+                .len_utf8()
+                .checked_add(child_branch.value.len())
+                .and_then(|bytes| bytes.checked_mul(parent_count))
+                .ok_or_else(selector_size_overflow)?;
+            parent_bytes
+                .checked_add(suffix_bytes)
+                .ok_or_else(selector_size_overflow)?
+        } else {
+            let literal_bytes = child_branch
+                .value
+                .len()
+                .checked_sub(child_branch.ampersands)
+                .and_then(|bytes| bytes.checked_mul(parent_count))
+                .ok_or_else(selector_size_overflow)?;
+            let replacement_bytes = parent_bytes
+                .checked_mul(child_branch.ampersands)
+                .ok_or_else(selector_size_overflow)?;
+            literal_bytes
+                .checked_add(replacement_bytes)
+                .ok_or_else(selector_size_overflow)?
+        };
+        total = checked_selector_bytes(total, child_total, max_bytes)?;
+    }
+    Ok(total)
+}
+
+fn checked_selector_bytes(
+    current: usize,
+    additional: usize,
+    max_bytes: usize,
+) -> Result<usize, StylePreprocessError> {
+    let bytes = current
+        .checked_add(additional)
+        .ok_or_else(selector_size_overflow)?;
+    if bytes > max_bytes {
+        return Err(selector_byte_limit(max_bytes));
+    }
+    Ok(bytes)
+}
+
+fn selector_byte_limit(max_bytes: usize) -> StylePreprocessError {
+    StylePreprocessError::selector_limit(format!(
+        "style preprocessor selector exceeds the maximum of {max_bytes} bytes"
+    ))
+}
+
+fn selector_size_overflow() -> StylePreprocessError {
+    StylePreprocessError::selector_limit("style preprocessor selector size overflowed")
+}
+
+fn append_replaced_parent_selector(output: &mut String, child: &str, parent: &str) {
+    let mut parts = child.split('&');
+    output.push_str(parts.next().unwrap_or_default());
+    for part in parts {
+        output.push_str(parent);
+        output.push_str(part);
+    }
 }
 
 pub(crate) struct StyleVariableEvaluator<'variables> {
@@ -1165,6 +1364,77 @@ impl StyleVariableExpansionBudget {
     }
 }
 
+impl StyleSelectorExpansionBudget {
+    fn validate_input_bytes(&self, bytes: &str) -> Result<(), StylePreprocessError> {
+        if bytes.len() > self.limits.max_bytes {
+            return Err(StylePreprocessError::selector_limit(format!(
+                "style preprocessor selector exceeds the maximum of {} bytes",
+                self.limits.max_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_branches(&self, branches: usize) -> Result<(), StylePreprocessError> {
+        if branches > self.limits.max_branches {
+            return Err(StylePreprocessError::selector_limit(format!(
+                "style preprocessor selector exceeds the maximum of {} branches",
+                self.limits.max_branches
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_claim(
+        &self,
+        branches: usize,
+        expansion_work: usize,
+    ) -> Result<usize, StylePreprocessError> {
+        self.validate_branches(branches)?;
+        let expansions = self.expansions.checked_add(expansion_work).ok_or_else(|| {
+            StylePreprocessError::selector_limit(
+                "style preprocessor selector expansion count overflowed",
+            )
+        })?;
+        if expansions > self.limits.max_expansions {
+            return Err(StylePreprocessError::selector_limit(format!(
+                "style preprocessor selector expansion exceeds the maximum total of {} operations",
+                self.limits.max_expansions
+            )));
+        }
+        Ok(expansions)
+    }
+
+    fn claim(
+        &mut self,
+        branches: usize,
+        expansion_work: usize,
+        bytes: usize,
+    ) -> Result<(), StylePreprocessError> {
+        let expansions = self.validate_claim(branches, expansion_work)?;
+        if bytes > self.limits.max_bytes {
+            return Err(StylePreprocessError::selector_limit(format!(
+                "style preprocessor selector exceeds the maximum of {} bytes",
+                self.limits.max_bytes
+            )));
+        }
+        let total_bytes = self.total_bytes.checked_add(bytes).ok_or_else(|| {
+            StylePreprocessError::selector_limit(
+                "style preprocessor selector expansion size overflowed",
+            )
+        })?;
+        if total_bytes > self.limits.max_total_bytes {
+            return Err(StylePreprocessError::selector_limit(format!(
+                "style preprocessor selector expansion exceeds the maximum total of {} bytes",
+                self.limits.max_total_bytes
+            )));
+        }
+        self.expansions = expansions;
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+}
+
 fn less_variable_reference_at(
     source: &str,
     cursor: usize,
@@ -1272,10 +1542,17 @@ pub(crate) fn preprocess_stylus(
     let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context, true)?;
     let nodes = parse_stylus_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
     let variables = StyleVariableEnvironment::default();
-    let mut budget = StyleVariableExpansionBudget::default();
+    let mut variable_budget = StyleVariableExpansionBudget::default();
+    let mut selector_budget = StyleSelectorExpansionBudget::default();
     Ok(PreprocessResult {
-        code: render_stylus_nodes(&nodes, None, &variables, &mut budget)?
-            .replace("#ff0000", "#f00"),
+        code: render_stylus_nodes(
+            &nodes,
+            None,
+            &variables,
+            &mut variable_budget,
+            &mut selector_budget,
+        )?
+        .replace("#ff0000", "#f00"),
         dependencies: context.dependencies(),
     })
 }
@@ -1284,7 +1561,8 @@ pub(crate) fn render_stylus_nodes(
     nodes: &[LessNode],
     parent_selector: Option<&str>,
     inherited_variables: &StyleVariableEnvironment,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    selector_budget: &mut StyleSelectorExpansionBudget,
 ) -> Result<String, StylePreprocessError> {
     let mut memo = BTreeMap::new();
     render_stylus_scope(
@@ -1292,7 +1570,8 @@ pub(crate) fn render_stylus_nodes(
         parent_selector,
         inherited_variables,
         &mut memo,
-        budget,
+        variable_budget,
+        selector_budget,
     )
 }
 
@@ -1301,7 +1580,8 @@ fn render_stylus_child_scope(
     parent_selector: Option<&str>,
     inherited_variables: &StyleVariableEnvironment,
     inherited_memo: &mut BTreeMap<String, Arc<str>>,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    selector_budget: &mut StyleSelectorExpansionBudget,
 ) -> Result<String, StylePreprocessError> {
     if nodes
         .iter()
@@ -1313,7 +1593,8 @@ fn render_stylus_child_scope(
             parent_selector,
             inherited_variables,
             &mut local_memo,
-            budget,
+            variable_budget,
+            selector_budget,
         )
     } else {
         render_stylus_scope(
@@ -1321,7 +1602,8 @@ fn render_stylus_child_scope(
             parent_selector,
             inherited_variables,
             inherited_memo,
-            budget,
+            variable_budget,
+            selector_budget,
         )
     }
 }
@@ -1331,7 +1613,8 @@ fn render_stylus_scope(
     parent_selector: Option<&str>,
     inherited_variables: &StyleVariableEnvironment,
     memo: &mut BTreeMap<String, Arc<str>>,
-    budget: &mut StyleVariableExpansionBudget,
+    variable_budget: &mut StyleVariableExpansionBudget,
+    selector_budget: &mut StyleSelectorExpansionBudget,
 ) -> Result<String, StylePreprocessError> {
     let mut variables = Arc::clone(inherited_variables);
     let mut declarations = Vec::new();
@@ -1344,19 +1627,33 @@ fn render_stylus_scope(
                 memo.remove(name);
             }
             LessNode::Declaration { name, value } if parent_selector.is_some() => {
-                let value = resolve_stylus_with_state(value, &variables, memo, budget, false)?;
+                let value =
+                    resolve_stylus_with_state(value, &variables, memo, variable_budget, false)?;
                 declarations.push((name.clone(), normalize_preprocessor_color(&value)));
             }
             LessNode::Rule { selector, children } => {
-                let selector = combine_less_selectors(parent_selector, selector);
-                let rendered =
-                    render_stylus_child_scope(children, Some(&selector), &variables, memo, budget)?;
+                let selector = combine_less_selectors(parent_selector, selector, selector_budget)?;
+                let rendered = render_stylus_child_scope(
+                    children,
+                    Some(&selector),
+                    &variables,
+                    memo,
+                    variable_budget,
+                    selector_budget,
+                )?;
                 descendants.push(rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let prelude = resolve_stylus_with_state(prelude, &variables, memo, budget, true)?;
-                let rendered_children =
-                    render_stylus_child_scope(children, parent_selector, &variables, memo, budget)?;
+                let prelude =
+                    resolve_stylus_with_state(prelude, &variables, memo, variable_budget, true)?;
+                let rendered_children = render_stylus_child_scope(
+                    children,
+                    parent_selector,
+                    &variables,
+                    memo,
+                    variable_budget,
+                    selector_budget,
+                )?;
                 if !rendered_children.trim().is_empty() {
                     descendants.push(format!(
                         "{prelude} {{\n{}\n}}",
@@ -1366,7 +1663,7 @@ fn render_stylus_scope(
             }
             LessNode::AtRuleStatement(statement) => {
                 let statement =
-                    resolve_stylus_with_state(statement, &variables, memo, budget, true)?;
+                    resolve_stylus_with_state(statement, &variables, memo, variable_budget, true)?;
                 descendants.push(format!("{statement};"));
             }
             LessNode::Declaration { .. } | LessNode::Comment => {}

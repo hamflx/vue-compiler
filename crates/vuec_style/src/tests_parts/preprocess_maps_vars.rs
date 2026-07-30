@@ -676,6 +676,242 @@ breakpoint = 700px
     }
 
     #[test]
+    fn lightweight_selector_expansion_enforces_exact_budgets() {
+        let first = ".a, .b";
+        let expected = ".a:hover, .a > .c, .b:hover, .b > .c";
+        let mut exact = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_branches: 4,
+                max_expansions: 8,
+                max_bytes: expected.len(),
+                max_total_bytes: first.len() + expected.len(),
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+
+        assert_eq!(
+            combine_less_selectors(None, first, &mut exact).expect("exact top-level branches"),
+            first
+        );
+        assert_eq!(
+            combine_less_selectors(Some(first), "&:hover, > .c", &mut exact)
+                .expect("exact nested selector budgets"),
+            expected
+        );
+        assert_eq!(exact.expansions, 8);
+        assert_eq!(exact.total_bytes, first.len() + expected.len());
+
+        let expansion_error = combine_less_selectors(None, ".c", &mut exact)
+            .expect_err("selector beyond cumulative branch budget must fail");
+        assert_eq!(expansion_error.code, "VUEC_STYLE_SELECTOR_LIMIT");
+        assert_eq!(exact.expansions, 8);
+        assert_eq!(exact.total_bytes, first.len() + expected.len());
+
+        let mut branch_limited = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_branches: 3,
+                max_expansions: 100,
+                max_bytes: 100,
+                max_total_bytes: 100,
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        let branch_error =
+            combine_less_selectors(Some(".a, .b"), ".c, .d", &mut branch_limited)
+                .expect_err("selector product beyond branch budget must fail");
+        assert_eq!(branch_error.code, "VUEC_STYLE_SELECTOR_LIMIT");
+        assert_eq!(branch_limited.expansions, 0);
+        assert_eq!(branch_limited.total_bytes, 0);
+
+        let mut byte_exact = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_branches: 1,
+                max_expansions: 3,
+                max_bytes: ".parent.parent".len(),
+                max_total_bytes: ".parent.parent".len(),
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        assert_eq!(
+            combine_less_selectors(Some(".parent"), "&&", &mut byte_exact)
+                .expect("exact parent replacement bytes"),
+            ".parent.parent"
+        );
+
+        let mut byte_short = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_bytes: ".parent.parent".len() - 1,
+                ..byte_exact.limits
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        let byte_error = combine_less_selectors(Some(".parent"), "&&", &mut byte_short)
+            .expect_err("parent replacement beyond byte budget must fail");
+        assert_eq!(byte_error.code, "VUEC_STYLE_SELECTOR_LIMIT");
+        assert_eq!(byte_short.expansions, 0);
+        assert_eq!(byte_short.total_bytes, 0);
+
+        let mut work_exact = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_branches: 2,
+                max_expansions: 6,
+                max_bytes: 2,
+                max_total_bytes: 2,
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        assert_eq!(
+            combine_less_selectors(Some(","), "&&", &mut work_exact)
+                .expect("exact selector replacement work"),
+            ", "
+        );
+        assert_eq!(work_exact.expansions, 6);
+
+        let mut work_short = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_expansions: 5,
+                ..work_exact.limits
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        let work_error = combine_less_selectors(Some(","), "&&", &mut work_short)
+            .expect_err("selector replacement beyond work budget must fail");
+        assert_eq!(work_error.code, "VUEC_STYLE_SELECTOR_LIMIT");
+        assert_eq!(work_short.expansions, 0);
+        assert_eq!(work_short.total_bytes, 0);
+
+        let mut total_bytes = StyleSelectorExpansionBudget {
+            limits: StyleSelectorExpansionLimits {
+                max_branches: 1,
+                max_expansions: 3,
+                max_bytes: 1,
+                max_total_bytes: 2,
+            },
+            ..StyleSelectorExpansionBudget::default()
+        };
+        combine_less_selectors(None, "a", &mut total_bytes).expect("first selector byte");
+        combine_less_selectors(None, "b", &mut total_bytes).expect("second selector byte");
+        let total_error = combine_less_selectors(None, "c", &mut total_bytes)
+            .expect_err("selector beyond cumulative byte budget must fail");
+        assert_eq!(total_error.code, "VUEC_STYLE_SELECTOR_LIMIT");
+        assert_eq!(total_bytes.expansions, 2);
+        assert_eq!(total_bytes.total_bytes, 2);
+    }
+
+    #[test]
+    fn lightweight_less_and_stylus_bound_selector_products() {
+        fn nested_less(depth: usize) -> String {
+            format!(
+                "{}color: red;{}",
+                ".a, .b {".repeat(depth),
+                "}".repeat(depth)
+            )
+        }
+
+        fn nested_stylus(depth: usize) -> String {
+            let mut source = String::new();
+            for level in 0..depth {
+                source.push_str(&"  ".repeat(level));
+                source.push_str(".a, .b\n");
+            }
+            source.push_str(&"  ".repeat(depth));
+            source.push_str("color red\n");
+            source
+        }
+
+        fn amplifying_less(depth: usize) -> String {
+            format!(
+                ".a, .b {{{}color: red;{}",
+                "&&, && {".repeat(depth),
+                "}".repeat(depth + 1)
+            )
+        }
+
+        fn amplifying_stylus(depth: usize) -> String {
+            let mut source = String::from(".a, .b\n");
+            for level in 0..depth {
+                source.push_str(&"  ".repeat(level + 1));
+                source.push_str("&&, &&\n");
+            }
+            source.push_str(&"  ".repeat(depth + 1));
+            source.push_str("color red\n");
+            source
+        }
+
+        for language in ["less", "styl"] {
+            let exact_source = if language == "less" {
+                nested_less(12)
+            } else {
+                nested_stylus(12)
+            };
+            let exact = compile_style(
+                &exact_source,
+                StyleCompileOptions {
+                    preprocess_lang: Some(language.into()),
+                    ..StyleCompileOptions::default()
+                },
+            );
+            assert!(exact.errors.is_empty(), "{language}: {:?}", exact.errors);
+
+            let overflowing_source = if language == "less" {
+                nested_less(13)
+            } else {
+                nested_stylus(13)
+            };
+            let overflowing = compile_style(
+                &overflowing_source,
+                StyleCompileOptions {
+                    preprocess_lang: Some(language.into()),
+                    ..StyleCompileOptions::default()
+                },
+            );
+            assert_eq!(overflowing.errors.len(), 1, "{language}");
+            assert_eq!(overflowing.diagnostics.len(), 1, "{language}");
+            assert_eq!(
+                overflowing.diagnostics[0].code,
+                "VUEC_STYLE_SELECTOR_LIMIT"
+            );
+
+            let byte_exact_source = if language == "less" {
+                amplifying_less(8)
+            } else {
+                amplifying_stylus(8)
+            };
+            let byte_exact = compile_style(
+                &byte_exact_source,
+                StyleCompileOptions {
+                    preprocess_lang: Some(language.into()),
+                    ..StyleCompileOptions::default()
+                },
+            );
+            assert!(
+                byte_exact.errors.is_empty(),
+                "{language}: {:?}",
+                byte_exact.errors
+            );
+
+            let byte_overflow_source = if language == "less" {
+                amplifying_less(9)
+            } else {
+                amplifying_stylus(9)
+            };
+            let byte_overflow = compile_style(
+                &byte_overflow_source,
+                StyleCompileOptions {
+                    preprocess_lang: Some(language.into()),
+                    ..StyleCompileOptions::default()
+                },
+            );
+            assert_eq!(byte_overflow.errors.len(), 1, "{language}");
+            assert_eq!(byte_overflow.diagnostics.len(), 1, "{language}");
+            assert_eq!(
+                byte_overflow.diagnostics[0].code,
+                "VUEC_STYLE_SELECTOR_LIMIT"
+            );
+        }
+    }
+
+    #[test]
     fn lightweight_preprocessors_bound_syntax_nesting() {
         fn nested_less(depth: usize) -> String {
             let mut source = String::new();
