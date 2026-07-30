@@ -475,8 +475,8 @@ pub struct SourceMapMapping {
 impl SourceMapMapping {
     fn generated_position(&self) -> GeneratedPosition {
         GeneratedPosition::new(
-            self.generated_line.saturating_sub(1) as u32,
-            self.generated_column as u32,
+            usize_to_u32_saturating(self.generated_line.saturating_sub(1)),
+            usize_to_u32_saturating(self.generated_column),
         )
     }
 }
@@ -625,7 +625,7 @@ impl SourceMapBuilder {
     pub fn merge(mut self, mut other: SourceMapBuilder, line_offset: usize) -> Self {
         for mapping in other.mappings.drain(..) {
             self.mappings.push(SourceMapMapping {
-                generated_line: mapping.generated_line + line_offset,
+                generated_line: mapping.generated_line.saturating_add(line_offset),
                 ..mapping
             });
         }
@@ -673,31 +673,55 @@ impl SourceMapBuilder {
             .iter()
             .map(|name| encoded.add_name(name))
             .collect::<Vec<_>>();
+        let source_indices = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| (source.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
+        let name_indices = self
+            .names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
         let mut mappings = self.mappings.iter().collect::<Vec<_>>();
         mappings.sort_by_key(|mapping| (mapping.generated_line, mapping.generated_column));
-        for mapping in mappings {
+        let mut location_requests = vec![Vec::new(); self.sources.len()];
+        for (mapping_index, mapping) in mappings.iter().enumerate() {
+            let (Some(original), Some(source_name)) =
+                (mapping.original, mapping.source_name.as_deref())
+            else {
+                continue;
+            };
+            let Some(source_index) = source_indices.get(source_name).copied() else {
+                continue;
+            };
+            location_requests[source_index].push((original.start.0, mapping_index));
+        }
+        let mut original_locations = vec![None; mappings.len()];
+        for (source_index, requests) in location_requests.iter_mut().enumerate() {
+            let Some(content) = self
+                .sources
+                .get(source_index)
+                .and_then(|source| self.sources_content.get(source))
+            else {
+                continue;
+            };
+            fill_source_map_locations(content, requests, &mut original_locations);
+        }
+        for (mapping_index, mapping) in mappings.into_iter().enumerate() {
             let source_id = mapping
                 .source_name
-                .as_ref()
-                .and_then(|name| self.sources.iter().position(|source| source == name))
+                .as_deref()
+                .and_then(|name| source_indices.get(name).copied())
                 .and_then(|index| source_ids.get(index).copied());
             let name_id = mapping
                 .name
-                .as_ref()
-                .and_then(|name| self.names.iter().position(|existing| existing == name))
+                .as_deref()
+                .and_then(|name| name_indices.get(name).copied())
                 .and_then(|index| name_ids.get(index).copied());
-            let original_loc = mapping.original.and_then(|span| {
-                mapping.source_name.as_ref().and_then(|source_name| {
-                    self.sources_content.get(source_name).and_then(|content| {
-                        loc_for_byte_offset(content, span.start.0).map(|loc| {
-                            (
-                                loc.line.saturating_sub(1) as u32,
-                                loc.column.saturating_sub(1) as u32,
-                            )
-                        })
-                    })
-                })
-            });
+            let original_loc = original_locations[mapping_index];
             let (original_line, original_column, token_source_id, token_name_id) =
                 if let Some((line, column)) = original_loc {
                     (line, column, source_id, name_id)
@@ -705,8 +729,8 @@ impl SourceMapBuilder {
                     (0, 0, None, None)
                 };
             encoded.add_token(
-                mapping.generated_line.saturating_sub(1) as u32,
-                mapping.generated_column as u32,
+                usize_to_u32_saturating(mapping.generated_line.saturating_sub(1)),
+                usize_to_u32_saturating(mapping.generated_column),
                 original_line,
                 original_column,
                 token_source_id,
@@ -1007,41 +1031,62 @@ where
     emitter.emit_mir(mir, &EmitOptions::for_mir(mir))
 }
 
-fn loc_for_byte_offset(source: &str, offset: usize) -> Option<Loc> {
-    if offset > source.len() || !source.is_char_boundary(offset) {
-        return None;
-    }
-    let mut line = 1usize;
-    let mut line_start = 0usize;
+fn fill_source_map_locations(
+    source: &str,
+    requests: &mut [(usize, usize)],
+    locations: &mut [Option<(u32, u32)>],
+) {
+    requests.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut line = 0u32;
+    let mut column = 0u32;
     let bytes = source.as_bytes();
     let mut index = 0usize;
-    while index < offset {
-        match bytes[index] {
-            b'\r' => {
-                if index + 1 < source.len() && bytes[index + 1] == b'\n' {
-                    index += 2;
-                    line += 1;
-                    line_start = index;
-                } else {
+    for &(offset, mapping_index) in requests.iter() {
+        if offset > source.len()
+            || !source.is_char_boundary(offset)
+            || mapping_index >= locations.len()
+        {
+            continue;
+        }
+        let mut valid = true;
+        while index < offset {
+            match bytes[index] {
+                b'\r' => {
+                    if index + 1 < source.len() && bytes[index + 1] == b'\n' {
+                        if offset == index + 1 {
+                            valid = false;
+                            break;
+                        }
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                    line = line.saturating_add(1);
+                    column = 0;
+                }
+                b'\n' => {
                     index += 1;
-                    line += 1;
-                    line_start = index;
+                    line = line.saturating_add(1);
+                    column = 0;
+                }
+                _ => {
+                    let Some(ch) = source[index..].chars().next() else {
+                        valid = false;
+                        break;
+                    };
+                    index += ch.len_utf8();
+                    column = column.saturating_add(ch.len_utf16() as u32);
                 }
             }
-            b'\n' => {
-                index += 1;
-                line += 1;
-                line_start = index;
-            }
-            _ => {
-                index += 1;
-            }
+        }
+        if valid && index == offset {
+            locations[mapping_index] = Some((line, column));
         }
     }
-    Some(Loc {
-        line,
-        column: source[line_start..offset].encode_utf16().count() + 1,
-    })
+}
+
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn find_source_file_id(sources: &SourceMap, source_name: &str) -> Option<vuec_source::FileId> {
@@ -1158,6 +1203,120 @@ mod tests {
         assert_eq!(
             map.original_position(GeneratedPosition::new(0, 0)).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn source_map_locations_batch_unicode_and_crlf_offsets() {
+        let source = "a\r\nβ😀z\n";
+        let mut requests = vec![
+            (9, 4),
+            (0, 0),
+            (2, 1),
+            (3, 2),
+            (5, 3),
+            (11, 5),
+            (4, 6),
+            (5, 7),
+        ];
+        let mut locations = vec![None; 8];
+
+        fill_source_map_locations(source, &mut requests, &mut locations);
+
+        assert_eq!(
+            locations,
+            vec![
+                Some((0, 0)),
+                None,
+                Some((1, 0)),
+                Some((1, 1)),
+                Some((1, 3)),
+                Some((2, 0)),
+                None,
+                Some((1, 1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_map_builder_omits_crlf_midpoint_without_panicking() {
+        let mut builder = SourceMapBuilder::new().file("test.js");
+        builder.add_source_content("src.vue", "a\r\nb");
+        builder.add_mapping(
+            1,
+            0,
+            Some(Span::new(FileId(0), 2, 2)),
+            Some("src.vue".into()),
+        );
+        builder.add_mapping(
+            2,
+            0,
+            Some(Span::new(FileId(0), 3, 3)),
+            Some("src.vue".into()),
+        );
+
+        let map = builder.build();
+
+        assert_eq!(
+            map.original_position(GeneratedPosition::new(0, 0)).unwrap(),
+            None
+        );
+        let valid = map
+            .original_position(GeneratedPosition::new(1, 0))
+            .unwrap()
+            .expect("mapping after CRLF");
+        assert_eq!(valid.line, 1);
+        assert_eq!(valid.column, 0);
+    }
+
+    #[test]
+    fn source_map_builder_scales_across_many_original_lines() {
+        let mut source = String::new();
+        let mut offsets = Vec::new();
+        for _ in 0..4_096 {
+            offsets.push(source.len());
+            source.push_str("😀 value\r\n");
+        }
+        let mut builder = SourceMapBuilder::new().file("generated.js");
+        builder.add_source_content("large.vue", source);
+        for (line, offset) in offsets.into_iter().enumerate() {
+            builder.add_mapping(
+                line + 1,
+                0,
+                Some(Span::new(FileId(0), offset, offset)),
+                Some("large.vue".into()),
+            );
+        }
+
+        let map = builder.build();
+
+        for line in [0, 2_048, 4_095] {
+            let original = map
+                .original_position(GeneratedPosition::new(line, 0))
+                .unwrap()
+                .expect("large source mapping");
+            assert_eq!(original.source, "large.vue");
+            assert_eq!(original.line, line);
+            assert_eq!(original.column, 0);
+        }
+    }
+
+    #[test]
+    fn source_map_generated_positions_saturate_instead_of_wrapping() {
+        let mut other = SourceMapBuilder::new();
+        other.add_mapping(
+            usize::MAX,
+            usize::MAX,
+            Some(Span::new(FileId(0), 0, 0)),
+            None,
+        );
+
+        let merged = SourceMapBuilder::new().merge(other, 1);
+        let trace = merged.trace();
+
+        assert_eq!(
+            trace.entries()[0].generated,
+            GeneratedPosition::new(u32::MAX, u32::MAX)
         );
     }
 
