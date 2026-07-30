@@ -727,7 +727,9 @@ fn rewrite_css_module_declaration_segment(
             }
 
             for local_name in compose_local_names {
-                context.compose(local_name, composed_values.clone());
+                if !context.compose(local_name, &composed_values) {
+                    return;
+                }
             }
         }
         CssModuleComposeResolution::Unsupported => {

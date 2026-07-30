@@ -1035,6 +1035,9 @@
             max_value_output_bytes: 4096,
             max_generated_bytes: 16 * 1024,
             max_replacement_steps: 4096,
+            max_export_values: 4096,
+            max_export_bytes: 16 * 1024,
+            max_value_comparisons: 4096,
         }
     }
 
@@ -1094,6 +1097,129 @@
             assert!(result.raw_modules.is_empty());
             assert!(result.modules.is_empty());
         }
+    }
+
+    #[test]
+    fn css_modules_composition_enforces_exact_export_budgets() {
+        let source = ".c0 {} .c1 { composes: c0; } .c2 { composes: c1; }";
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("compose.css".into()),
+            modules: true,
+            modules_options: CssModulesOptions {
+                generate_scoped_name: Some("[local]".into()),
+                ..CssModulesOptions::default()
+            },
+            ..StyleCompileOptions::default()
+        };
+        let exact_limits = CssModulesImportLimits {
+            max_export_values: 6,
+            max_export_bytes: 12,
+            max_value_comparisons: 5,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert_eq!(exact.raw_modules.get("c2").map(String::as_str), Some("c2 c1 c0"));
+
+        for limits in [
+            CssModulesImportLimits {
+                max_export_values: 5,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_export_bytes: 11,
+                ..exact_limits
+            },
+            CssModulesImportLimits {
+                max_value_comparisons: 4,
+                ..exact_limits
+            },
+        ] {
+            let result = compile_css_modules_with_limits(source, source, &options, limits);
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+            assert!(result.code.is_empty());
+            assert!(result.raw_modules.is_empty());
+            assert!(result.modules.is_empty());
+        }
+    }
+
+    #[test]
+    fn css_modules_export_accounting_is_cumulative_and_deduplicated() {
+        let options = StyleCompileOptions::default();
+        let mut state = CssModulesImportState::new(CssModulesImportLimits {
+            max_export_values: 5,
+            max_export_bytes: 5,
+            max_value_comparisons: 3,
+            ..css_modules_test_import_limits()
+        });
+        let mut context = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut state,
+        );
+
+        assert!(context.push_raw_export_value("a", "x"));
+        assert!(context.push_raw_export_value("a", "y"));
+        assert!(context.push_raw_export_value("a", "y"));
+        context.set_raw_export_values("a", vec!["z".into()]);
+        context.set_raw_export_values("a", vec!["w".into(), "q".into()]);
+
+        assert_eq!(context.raw_modules().get("a").map(String::as_str), Some("w q"));
+        assert_eq!(
+            (
+                context.load_state.export_values,
+                context.load_state.export_bytes,
+                context.load_state.value_comparisons,
+            ),
+            (5, 5, 3)
+        );
+        assert!(context.load_state.error.is_none());
+    }
+
+    #[test]
+    fn css_modules_export_budget_is_shared_across_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let entry = dir.path().join("entry.css");
+        let dependency = dir.path().join("dep.css");
+        let source = ".root { composes: dep from \"./dep.css\"; }";
+        std::fs::write(&entry, source).expect("write entry");
+        std::fs::write(&dependency, ".dep {}").expect("write dependency");
+        let mut options = css_modules_test_options(&entry);
+        options.modules_options.generate_scoped_name = Some("[local]".into());
+        let exact_limits = CssModulesImportLimits {
+            max_export_values: 3,
+            max_export_bytes: 10,
+            max_value_comparisons: 1,
+            ..css_modules_test_import_limits()
+        };
+
+        let exact = compile_css_modules_with_limits(source, source, &options, exact_limits);
+        assert!(exact.diagnostics.is_empty(), "{:?}", exact.diagnostics);
+        assert_eq!(
+            exact.raw_modules.get("root").map(String::as_str),
+            Some("root dep")
+        );
+
+        let over = compile_css_modules_with_limits(
+            source,
+            source,
+            &options,
+            CssModulesImportLimits {
+                max_export_values: 2,
+                ..exact_limits
+            },
+        );
+        assert_eq!(over.diagnostics.len(), 1);
+        assert_eq!(over.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(over.code.is_empty());
+        assert!(over.raw_modules.is_empty());
+        assert!(over.modules.is_empty());
     }
 
     #[test]

@@ -40,16 +40,35 @@ pub(crate) fn css_module_composed_values(
             let import = tokens[from_index + 1].value;
             if import == "global" {
                 for token in &tokens[..from_index] {
-                    push_unique_css_module_value(&mut composed, token.value.to_string());
+                    if !push_unique_css_module_value(
+                        &mut composed,
+                        token.value,
+                        context.load_state,
+                    ) {
+                        return unsupported_css_module_compose();
+                    }
                 }
             } else {
                 let Some(result) = context.load_imported_module(import) else {
                     return unsupported_css_module_compose();
                 };
                 for token in &tokens[..from_index] {
-                    let values = css_module_external_composed_values(token.value, &result);
-                    for value in values {
-                        push_unique_css_module_value(&mut composed, value);
+                    if let Some(values) = result.raw_modules.get(token.value) {
+                        for value in values.split_whitespace() {
+                            if !push_unique_css_module_value(
+                                &mut composed,
+                                value,
+                                context.load_state,
+                            ) {
+                                return unsupported_css_module_compose();
+                            }
+                        }
+                    } else if !push_unique_css_module_value(
+                        &mut composed,
+                        "undefined",
+                        context.load_state,
+                    ) {
+                        return unsupported_css_module_compose();
                     }
                 }
             }
@@ -58,15 +77,25 @@ pub(crate) fn css_module_composed_values(
         for token in tokens {
             let class_name = token.value;
             if let Some(global) = parse_css_module_global_compose(class_name) {
-                push_unique_css_module_value(&mut composed, global);
-            } else if let Some(values) = context.raw_export_values(class_name) {
-                for value in values {
-                    push_unique_css_module_value(&mut composed, value);
+                if !push_unique_css_module_value(&mut composed, global, context.load_state) {
+                    return unsupported_css_module_compose();
                 }
-            } else if let Some(value) = context.value_placeholder_module_value(class_name) {
-                push_unique_css_module_value(&mut composed, value.to_string());
+                continue;
+            }
+            match context.extend_composed_with_raw_export(class_name, &mut composed) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(()) => return unsupported_css_module_compose(),
+            }
+            if let Some(value) = context.value_placeholder_module_value(class_name) {
+                let value = value.to_string();
+                if !push_unique_css_module_value(&mut composed, &value, context.load_state) {
+                    return unsupported_css_module_compose();
+                }
             } else if let Some(value) = context.import_symbol_module_value(class_name) {
-                push_unique_css_module_value(&mut composed, value);
+                if !push_unique_css_module_value(&mut composed, &value, context.load_state) {
+                    return unsupported_css_module_compose();
+                }
             } else if class_name.starts_with('"') || class_name.starts_with('\'') {
                 return unsupported_css_module_compose();
             } else {
@@ -158,30 +187,30 @@ pub(crate) fn css_module_single_class_selector_name(selector: &str) -> Option<St
         .then(|| token.name.to_string())
 }
 
-pub(crate) fn css_module_external_composed_values(
-    class_name: &str,
-    result: &CssModulesCompileResult,
-) -> Vec<String> {
-    result
-        .raw_modules
-        .get(class_name)
-        .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
-        .unwrap_or_else(|| vec!["undefined".to_string()])
-}
-
-pub(crate) fn parse_css_module_global_compose(value: &str) -> Option<String> {
+pub(crate) fn parse_css_module_global_compose(value: &str) -> Option<&str> {
     let inner = value.strip_prefix("global(")?.strip_suffix(')')?;
     if inner.is_empty() {
         None
     } else {
-        Some(inner.to_string())
+        Some(inner)
     }
 }
 
-pub(crate) fn push_unique_css_module_value(values: &mut Vec<String>, value: String) {
-    if !values.iter().any(|existing| existing == &value) {
-        values.push(value);
+pub(crate) fn push_unique_css_module_value(
+    values: &mut Vec<String>,
+    value: &str,
+    load_state: &mut CssModulesImportState,
+) -> bool {
+    for existing in values.iter() {
+        if !load_state.claim_value_comparison() {
+            return false;
+        }
+        if existing == value {
+            return true;
+        }
     }
+    values.push(value.to_string());
+    true
 }
 
 pub(crate) fn replace_css_module_import_symbols(

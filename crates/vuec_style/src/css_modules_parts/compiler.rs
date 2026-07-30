@@ -15,6 +15,9 @@ pub(crate) const CSS_MODULES_MAX_TOTAL_VALUE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_VALUE_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_GENERATED_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_REPLACEMENT_STEPS: usize = 1_048_576;
+pub(crate) const CSS_MODULES_MAX_EXPORT_VALUES: usize = 262_144;
+pub(crate) const CSS_MODULES_MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_VALUE_COMPARISONS: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CssModulesImportLimits {
@@ -31,6 +34,9 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_value_output_bytes: usize,
     pub(crate) max_generated_bytes: usize,
     pub(crate) max_replacement_steps: usize,
+    pub(crate) max_export_values: usize,
+    pub(crate) max_export_bytes: usize,
+    pub(crate) max_value_comparisons: usize,
 }
 
 impl Default for CssModulesImportLimits {
@@ -49,6 +55,9 @@ impl Default for CssModulesImportLimits {
             max_value_output_bytes: CSS_MODULES_MAX_VALUE_OUTPUT_BYTES,
             max_generated_bytes: CSS_MODULES_MAX_GENERATED_BYTES,
             max_replacement_steps: CSS_MODULES_MAX_REPLACEMENT_STEPS,
+            max_export_values: CSS_MODULES_MAX_EXPORT_VALUES,
+            max_export_bytes: CSS_MODULES_MAX_EXPORT_BYTES,
+            max_value_comparisons: CSS_MODULES_MAX_VALUE_COMPARISONS,
         }
     }
 }
@@ -69,6 +78,9 @@ pub(crate) struct CssModulesImportState {
     pub(crate) value_bytes: usize,
     pub(crate) generated_bytes: usize,
     pub(crate) replacement_steps: usize,
+    pub(crate) export_values: usize,
+    pub(crate) export_bytes: usize,
+    pub(crate) value_comparisons: usize,
     pub(crate) error: Option<CssModulesImportError>,
 }
 
@@ -84,6 +96,9 @@ impl CssModulesImportState {
             value_bytes: 0,
             generated_bytes: 0,
             replacement_steps: 0,
+            export_values: 0,
+            export_bytes: 0,
+            value_comparisons: 0,
             error: None,
         }
     }
@@ -319,6 +334,52 @@ impl CssModulesImportState {
         }
         true
     }
+
+    pub(crate) fn claim_export_value(&mut self, bytes: usize) -> bool {
+        if !self.validate_value_bytes(bytes) {
+            return false;
+        }
+        let Some(export_values) = self.export_values.checked_add(1) else {
+            self.fail("CSS Modules export value count overflowed");
+            return false;
+        };
+        if export_values > self.limits.max_export_values {
+            self.fail(format!(
+                "CSS Modules exports exceed the maximum of {} values",
+                self.limits.max_export_values
+            ));
+            return false;
+        }
+        let Some(export_bytes) = self.export_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules export value size overflowed");
+            return false;
+        };
+        if export_bytes > self.limits.max_export_bytes {
+            self.fail(format!(
+                "CSS Modules exports exceed the maximum total of {} bytes",
+                self.limits.max_export_bytes
+            ));
+            return false;
+        }
+        self.export_values = export_values;
+        self.export_bytes = export_bytes;
+        true
+    }
+
+    pub(crate) fn claim_value_comparison(&mut self) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if self.value_comparisons >= self.limits.max_value_comparisons {
+            self.fail(format!(
+                "CSS Modules value deduplication exceeds the maximum of {} comparisons",
+                self.limits.max_value_comparisons
+            ));
+            return false;
+        }
+        self.value_comparisons += 1;
+        true
+    }
 }
 
 pub(crate) fn compile_css_modules(
@@ -530,10 +591,13 @@ impl<'a> CssModulesContext<'a> {
         self.set_raw_export_values(name, vec![name.to_string()]);
     }
 
-    pub(crate) fn compose(&mut self, local: &str, values: Vec<String>) {
+    pub(crate) fn compose(&mut self, local: &str, values: &[String]) -> bool {
         for value in values {
-            self.push_raw_export_value(local, &value);
+            if !self.push_raw_export_value(local, value) {
+                return false;
+            }
         }
+        true
     }
 
     pub(crate) fn scoped_local_value(&mut self, local: &str) -> String {
@@ -542,10 +606,21 @@ impl<'a> CssModulesContext<'a> {
         scoped
     }
 
-    pub(crate) fn raw_export_values(&self, local: &str) -> Option<Vec<String>> {
-        self.raw_export_index
-            .get(local)
-            .map(|index| self.raw_exports[*index].values.clone())
+    pub(crate) fn extend_composed_with_raw_export(
+        &mut self,
+        local: &str,
+        output: &mut Vec<String>,
+    ) -> Result<bool, ()> {
+        let Some(index) = self.raw_export_index.get(local).copied() else {
+            return Ok(false);
+        };
+        let values = &self.raw_exports[index].values;
+        for value in values {
+            if !push_unique_css_module_value(output, value, self.load_state) {
+                return Err(());
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn raw_modules(&self) -> BTreeMap<String, String> {
@@ -573,24 +648,42 @@ impl<'a> CssModulesContext<'a> {
         self.import_symbols.contains_key(local)
     }
 
-    pub(crate) fn push_raw_export_value(&mut self, local: &str, value: &str) {
+    pub(crate) fn push_raw_export_value(&mut self, local: &str, value: &str) -> bool {
         if let Some(index) = self.raw_export_index.get(local).copied() {
             let export = &mut self.raw_exports[index];
-            if !export.values.iter().any(|existing| existing == value) {
-                export.values.push(value.to_string());
+            for existing in &export.values {
+                if !self.load_state.claim_value_comparison() {
+                    return false;
+                }
+                if existing == value {
+                    return true;
+                }
             }
-            return;
+            if !self.load_state.claim_export_value(value.len()) {
+                return false;
+            }
+            export.values.push(value.to_string());
+            return true;
         }
 
+        if !self.load_state.claim_export_value(value.len()) {
+            return false;
+        }
         let index = self.raw_exports.len();
         self.raw_exports.push(CssModuleExport {
             local: local.to_string(),
             values: vec![value.to_string()],
         });
         self.raw_export_index.insert(local.to_string(), index);
+        true
     }
 
     pub(crate) fn set_raw_export_values(&mut self, local: &str, values: Vec<String>) {
+        for value in &values {
+            if !self.load_state.claim_export_value(value.len()) {
+                return;
+            }
+        }
         if let Some(index) = self.raw_export_index.get(local).copied() {
             self.raw_exports[index].values = values;
             return;
