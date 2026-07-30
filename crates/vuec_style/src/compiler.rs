@@ -2,16 +2,35 @@ use crate::*;
 
 /// Compiles SFC style source according to `options`.
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
+    compile_style_with_input_limits(source, options, StyleInputLimits::default())
+}
+
+pub(crate) fn compile_style_with_input_limits(
+    source: &str,
+    options: StyleCompileOptions,
+    input_limits: StyleInputLimits,
+) -> StyleCompileResult {
     let mut errors = Vec::new();
     let mut diagnostics = Vec::new();
     let mut dependencies = Vec::new();
-    let mut code = match preprocess_style(source, &options) {
+    let mut code = match preprocess_style_with_limits(source, &options, input_limits) {
         Ok(result) => {
             dependencies.extend(result.dependencies);
             result.code
         }
         Err(error) => {
             diagnostics.push(preprocess_error_diagnostic(&error, source, &options));
+            if error.is_input_limit() {
+                return StyleCompileResult {
+                    code: String::new(),
+                    map: None,
+                    errors: vec![error.message],
+                    diagnostics,
+                    modules: None,
+                    vars: Vec::new(),
+                    dependencies,
+                };
+            }
             errors.push(error.message);
             source.to_string()
         }
@@ -95,6 +114,14 @@ pub(crate) struct StylePreprocessError {
 }
 
 impl StylePreprocessError {
+    pub(crate) fn input_limit(message: impl Into<String>) -> Self {
+        Self {
+            code: "VUEC_STYLE_INPUT_LIMIT",
+            message: message.into(),
+            span: None,
+        }
+    }
+
     pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self {
             code: "VUEC_STYLE_UNSUPPORTED_PREPROCESSOR",
@@ -149,6 +176,10 @@ impl StylePreprocessError {
             message: message.into(),
             span: None,
         }
+    }
+
+    pub(crate) fn is_input_limit(&self) -> bool {
+        self.code == "VUEC_STYLE_INPUT_LIMIT"
     }
 }
 

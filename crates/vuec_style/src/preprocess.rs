@@ -5,6 +5,8 @@ use std::sync::Arc;
 pub(crate) const STYLE_PREPROCESS_MAX_NESTING_DEPTH: usize = 128;
 pub(crate) const STYLE_PREPROCESS_NESTING_ERROR: &str =
     "style preprocessor nesting exceeds the maximum supported depth";
+pub(crate) const STYLE_PREPROCESS_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_LANGUAGE_BYTES: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_DEPTH: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILES: usize = 512;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -29,62 +31,136 @@ pub(crate) struct PreprocessResult {
     pub(crate) dependencies: Vec<String>,
 }
 
-pub(crate) fn preprocess_style(
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StyleInputLimits {
+    pub(crate) max_bytes: usize,
+    pub(crate) max_language_bytes: usize,
+}
+
+impl Default for StyleInputLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: STYLE_PREPROCESS_MAX_INPUT_BYTES,
+            max_language_bytes: STYLE_PREPROCESS_MAX_LANGUAGE_BYTES,
+        }
+    }
+}
+
+pub(crate) fn preprocess_style_with_limits(
     source: &str,
     options: &StyleCompileOptions,
+    limits: StyleInputLimits,
 ) -> Result<PreprocessResult, StylePreprocessError> {
+    validate_style_source_bytes(source.len(), limits.max_bytes)?;
     let lang = options.preprocess_lang.as_deref();
     let Some(lang) = lang.filter(|lang| !lang.is_empty()) else {
         return Ok(PreprocessResult {
-            code: source.to_string(),
+            code: prepare_style_input(source, None, limits.max_bytes)?,
             dependencies: Vec::new(),
         });
     };
-    let prepared = apply_additional_style_data(source, &options.preprocess_options);
-    let result = match lang.to_ascii_lowercase().as_str() {
-        "css" => Ok(PreprocessResult {
-            code: prepared.clone(),
-            dependencies: Vec::new(),
-        }),
-        "less" => preprocess_less(&prepared, options),
-        "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss)
-            .map_err(StylePreprocessError::unsupported)
-            .map(|code| PreprocessResult {
-                code,
-                dependencies: sass_dependencies(source, options),
-            }),
-        "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass)
-            .map_err(StylePreprocessError::unsupported)
-            .map(|code| PreprocessResult {
-                code,
-                dependencies: sass_dependencies(source, options),
-            }),
-        "styl" | "stylus" => preprocess_stylus(&prepared, options),
-        _ => Err(StylePreprocessError::unsupported(format!(
+    if lang.len() > limits.max_language_bytes {
+        return Err(StylePreprocessError::input_limit(format!(
+            "style preprocessor language exceeds the maximum of {} bytes",
+            limits.max_language_bytes
+        )));
+    }
+    let is_css = lang.eq_ignore_ascii_case("css");
+    let is_less = lang.eq_ignore_ascii_case("less");
+    let is_scss = lang.eq_ignore_ascii_case("scss");
+    let is_sass = lang.eq_ignore_ascii_case("sass");
+    let is_stylus = lang.eq_ignore_ascii_case("styl") || lang.eq_ignore_ascii_case("stylus");
+    if !is_css && !is_less && !is_scss && !is_sass && !is_stylus {
+        return Err(StylePreprocessError::unsupported(format!(
             "unsupported style preprocessor `{lang}`"
-        ))),
+        )));
+    }
+    let prepared = prepare_style_input(
+        source,
+        options.preprocess_options.additional_data.as_deref(),
+        limits.max_bytes,
+    )?;
+    let result = if is_css {
+        Ok(PreprocessResult {
+            code: prepared,
+            dependencies: Vec::new(),
+        })
+    } else if is_less {
+        preprocess_less(&prepared, options)
+    } else if is_scss {
+        preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss)
+            .map_err(StylePreprocessError::unsupported)
+            .map(|code| PreprocessResult {
+                code,
+                dependencies: sass_dependencies(source, options),
+            })
+    } else if is_sass {
+        preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass)
+            .map_err(StylePreprocessError::unsupported)
+            .map(|code| PreprocessResult {
+                code,
+                dependencies: sass_dependencies(source, options),
+            })
+    } else {
+        preprocess_stylus(&prepared, options)
     }?;
     Ok(result)
 }
 
-pub(crate) fn apply_additional_style_data(
+pub(crate) fn prepare_style_input(
     source: &str,
-    options: &StylePreprocessOptions,
-) -> String {
-    let Some(additional_data) = options
-        .additional_data
-        .as_deref()
-        .filter(|data| !data.is_empty())
-    else {
-        return source.to_string();
-    };
-    let mut prepared = String::with_capacity(additional_data.len() + 1 + source.len());
-    prepared.push_str(additional_data);
-    if !additional_data.ends_with('\n') {
-        prepared.push('\n');
+    additional_data: Option<&str>,
+    max_bytes: usize,
+) -> Result<String, StylePreprocessError> {
+    let additional_data = additional_data.filter(|data| !data.is_empty());
+    let additional_bytes = additional_data.map_or(0, str::len);
+    let separator_bytes = usize::from(additional_data.is_some_and(|data| !data.ends_with('\n')));
+    let prepared_bytes =
+        checked_style_input_bytes(source.len(), additional_bytes, separator_bytes, max_bytes)?;
+    let mut prepared = String::new();
+    prepared.try_reserve_exact(prepared_bytes).map_err(|_| {
+        StylePreprocessError::input_limit(
+            "style input could not reserve capacity within the configured limit",
+        )
+    })?;
+    if let Some(additional_data) = additional_data {
+        prepared.push_str(additional_data);
+        if separator_bytes != 0 {
+            prepared.push('\n');
+        }
     }
     prepared.push_str(source);
-    prepared
+    Ok(prepared)
+}
+
+pub(crate) fn checked_style_input_bytes(
+    source_bytes: usize,
+    additional_bytes: usize,
+    separator_bytes: usize,
+    max_bytes: usize,
+) -> Result<usize, StylePreprocessError> {
+    let prepared_bytes = source_bytes
+        .checked_add(additional_bytes)
+        .and_then(|bytes| bytes.checked_add(separator_bytes))
+        .ok_or_else(|| StylePreprocessError::input_limit("style input size overflowed"))?;
+    if prepared_bytes > max_bytes {
+        return Err(StylePreprocessError::input_limit(format!(
+            "style input exceeds the maximum of {max_bytes} bytes"
+        )));
+    }
+    Ok(prepared_bytes)
+}
+
+fn validate_style_source_bytes(
+    source_bytes: usize,
+    max_bytes: usize,
+) -> Result<(), StylePreprocessError> {
+    if source_bytes > max_bytes {
+        return Err(StylePreprocessError::input_limit(format!(
+            "style source exceeds the maximum of {max_bytes} bytes"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn preprocess_sass_with_grass(

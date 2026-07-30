@@ -1750,3 +1750,117 @@ $red: red;
             "v4003f1a6"
         );
     }
+    #[test]
+    fn bounds_style_source_and_preprocessor_input_before_compilation() {
+        let limits = StyleInputLimits {
+            max_bytes: 8,
+            max_language_bytes: 6,
+        };
+
+        let plain_exact = compile_style_with_input_limits(
+            "12345678",
+            StyleCompileOptions::default(),
+            limits,
+        );
+        assert!(plain_exact.errors.is_empty());
+        assert_eq!(plain_exact.code, "12345678");
+
+        let plain_overflow = compile_style_with_input_limits(
+            "123456789",
+            StyleCompileOptions {
+                scoped: true,
+                modules: true,
+                vars: vec!["never-cloned".into()],
+                source_map: true,
+                ..StyleCompileOptions::default()
+            },
+            limits,
+        );
+        assert!(plain_overflow.code.is_empty());
+        assert!(plain_overflow.map.is_none());
+        assert!(plain_overflow.modules.is_none());
+        assert!(plain_overflow.vars.is_empty());
+        assert!(plain_overflow.dependencies.is_empty());
+        assert_eq!(plain_overflow.diagnostics.len(), 1);
+        assert_eq!(
+            plain_overflow.diagnostics[0].code,
+            "VUEC_STYLE_INPUT_LIMIT"
+        );
+        assert_eq!(plain_overflow.diagnostics[0].span, Some(Span::new(FileId(0), 0, 1)));
+        assert_eq!(
+            plain_overflow.errors,
+            vec!["style source exceeds the maximum of 8 bytes"]
+        );
+
+        let combined_exact = compile_style_with_input_limits(
+            "1234",
+            StyleCompileOptions {
+                preprocess_lang: Some("CsS".into()),
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some("abc".into()),
+                    ..StylePreprocessOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+            limits,
+        );
+        assert!(combined_exact.errors.is_empty());
+        assert_eq!(combined_exact.code, "abc\n1234");
+
+        let combined_overflow = compile_style_with_input_limits(
+            "12345",
+            StyleCompileOptions {
+                preprocess_lang: Some("css".into()),
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some("abc".into()),
+                    ..StylePreprocessOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+            limits,
+        );
+        assert!(combined_overflow.code.is_empty());
+        assert_eq!(
+            combined_overflow.diagnostics[0].code,
+            "VUEC_STYLE_INPUT_LIMIT"
+        );
+        assert_eq!(
+            combined_overflow.errors,
+            vec!["style input exceeds the maximum of 8 bytes"]
+        );
+
+        let language_overflow = compile_style_with_input_limits(
+            "a",
+            StyleCompileOptions {
+                preprocess_lang: Some("stylusx".into()),
+                ..StyleCompileOptions::default()
+            },
+            limits,
+        );
+        assert!(language_overflow.code.is_empty());
+        assert_eq!(
+            language_overflow.errors,
+            vec!["style preprocessor language exceeds the maximum of 6 bytes"]
+        );
+        assert_eq!(
+            language_overflow.diagnostics[0].code,
+            "VUEC_STYLE_INPUT_LIMIT"
+        );
+    }
+
+    #[test]
+    fn style_input_size_accounting_is_checked_and_newline_aware() {
+        assert_eq!(
+            checked_style_input_bytes(4, 3, 1, 8).expect("exact input budget"),
+            8
+        );
+        assert_eq!(
+            prepare_style_input("1234", Some("abc\n"), 8).expect("existing newline"),
+            "abc\n1234"
+        );
+
+        let overflow = checked_style_input_bytes(usize::MAX, 1, 0, usize::MAX)
+            .expect_err("input byte arithmetic must not wrap");
+        assert_eq!(overflow.code, "VUEC_STYLE_INPUT_LIMIT");
+        assert_eq!(overflow.message, "style input size overflowed");
+    }
