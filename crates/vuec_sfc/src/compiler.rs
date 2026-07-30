@@ -538,10 +538,10 @@ impl SfcCompiler {
                     css_var_name_style: options.css_var_name_style,
                     css_var_ignore_line_comments: options.css_var_ignore_line_comments,
                     filename: Some(descriptor.filename.clone()),
-                    source_map_source: Some(descriptor.source.clone()),
+                    source_map_source: None,
                     source_map_file_id: Some(descriptor.source_file),
                     source_map_base_offset: style.content_start,
-                    source_map: options.source_map,
+                    source_map: false,
                     preprocess_lang: style
                         .attrs
                         .lang

@@ -7,7 +7,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
 
 pub(crate) fn compile_style_with_input_limits(
     source: &str,
-    options: StyleCompileOptions,
+    mut options: StyleCompileOptions,
     input_limits: StyleInputLimits,
 ) -> StyleCompileResult {
     let mut errors = Vec::new();
@@ -66,10 +66,14 @@ pub(crate) fn compile_style_with_input_limits(
             },
         );
     }
-    let css_modules_hash_source = code.clone();
+    let css_modules_hash_source = options.modules.then(|| code.clone());
     code = normalize_style_output(&code);
     let modules = if options.modules {
-        let result = compile_css_modules(&code, &css_modules_hash_source, &options);
+        let result = compile_css_modules(
+            &code,
+            css_modules_hash_source.as_deref().unwrap_or_default(),
+            &options,
+        );
         errors.extend(
             result
                 .diagnostics
@@ -90,7 +94,22 @@ pub(crate) fn compile_style_with_input_limits(
         None
     };
     let map = if options.source_map {
-        Some(style_source_map(&code, source, &options))
+        let filename = options
+            .filename
+            .take()
+            .unwrap_or_else(|| "style.css".into());
+        let source_content = options
+            .source_map_source
+            .take()
+            .unwrap_or_else(|| source.to_string());
+        Some(style_source_map(
+            &code,
+            source,
+            filename,
+            source_content,
+            options.source_map_file_id.unwrap_or(FileId(0)),
+            options.source_map_base_offset,
+        ))
     } else {
         None
     };
@@ -205,26 +224,20 @@ pub(crate) fn style_source_span(
     let file_id = options.source_map_file_id.unwrap_or(FileId(0));
     Span::new(
         file_id,
-        options.source_map_base_offset + local_start,
-        options.source_map_base_offset + local_end,
+        options.source_map_base_offset.saturating_add(local_start),
+        options.source_map_base_offset.saturating_add(local_end),
     )
 }
 
 pub(crate) fn style_source_map(
     generated: &str,
     original_style_source: &str,
-    options: &StyleCompileOptions,
+    filename: String,
+    source_content: String,
+    file_id: FileId,
+    source_map_base_offset: usize,
 ) -> SourceMapArtifact {
-    let filename = options
-        .filename
-        .clone()
-        .unwrap_or_else(|| "style.css".into());
-    let source_content = options
-        .source_map_source
-        .clone()
-        .unwrap_or_else(|| original_style_source.to_string());
     let source_name = filename.clone();
-    let file_id = options.source_map_file_id.unwrap_or(FileId(0));
     let mut builder = SourceMapBuilder::new().file(filename);
     builder.add_source_content(source_name.clone(), source_content);
 
@@ -238,7 +251,7 @@ pub(crate) fn style_source_map(
             .get(generated_line)
             .copied()
             .unwrap_or_else(|| *original_line_starts.last().unwrap_or(&0));
-        let absolute = options.source_map_base_offset + local_start;
+        let absolute = source_map_base_offset.saturating_add(local_start);
         builder.add_mapping(
             generated_line + 1,
             0,

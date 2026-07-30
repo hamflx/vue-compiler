@@ -68,6 +68,40 @@
             .expect("second mapping");
         assert_eq!(second.line, 2);
         assert_eq!(second.column, 0);
+
+        let fallback = compile_style(
+            source,
+            StyleCompileOptions {
+                filename: Some("fallback.css".into()),
+                source_map: true,
+                ..StyleCompileOptions::default()
+            },
+        )
+        .map
+        .expect("fallback style source map");
+        assert_eq!(fallback.sources, vec!["fallback.css"]);
+        assert_eq!(
+            fallback
+                .sources_content
+                .as_ref()
+                .and_then(|sources| sources[0].as_ref()),
+            Some(&source.to_string())
+        );
+    }
+
+    #[test]
+    fn style_diagnostic_spans_saturate_at_the_addressable_offset() {
+        let span = style_source_span(
+            &StyleCompileOptions {
+                source_map_file_id: Some(FileId(9)),
+                source_map_base_offset: usize::MAX,
+                ..StyleCompileOptions::default()
+            },
+            1,
+            2,
+        );
+
+        assert_eq!(span, Span::new(FileId(9), usize::MAX, usize::MAX));
     }
 
     #[test]

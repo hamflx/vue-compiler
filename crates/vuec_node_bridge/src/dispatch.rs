@@ -516,11 +516,14 @@ pub(crate) fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(vue27_script_value(&script))
         }
         "sfc.compileStyle" | "sfc.compileStyleAsync" => {
-            let source = string_field(&payload, "source");
+            let source = payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let options = sfc_style_options(payload.get("options"));
             let style = compile_style(
-                &source,
+                source,
                 StyleCompileOptions {
                     id: options.id.clone(),
                     scoped: options.scoped,
@@ -529,7 +532,7 @@ pub(crate) fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     css_var_name_style: options.css_var_name_style,
                     css_var_ignore_line_comments: options.css_var_ignore_line_comments,
                     filename: Some(filename),
-                    source_map_source: Some(source.clone()),
+                    source_map_source: None,
                     source_map_file_id: Some(vuec_source::FileId(0)),
                     source_map_base_offset: 0,
                     source_map: options.source_map,
@@ -556,7 +559,10 @@ pub(crate) fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(value)
         }
         "sfc.vue27.compileStyle" | "sfc.vue27.compileStyleAsync" => {
-            let source = string_field(&payload, "source");
+            let source = payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let mut options = sfc_style_options(payload.get("options"));
             options.scoped = payload
@@ -565,7 +571,7 @@ pub(crate) fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             let style = compile_style(
-                &source,
+                source,
                 StyleCompileOptions {
                     id: options.id.clone(),
                     scoped: options.scoped,
@@ -574,7 +580,7 @@ pub(crate) fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     css_var_name_style: CssVarNameStyle::Vue27Legacy,
                     css_var_ignore_line_comments: false,
                     filename: Some(filename),
-                    source_map_source: Some(source.clone()),
+                    source_map_source: None,
                     source_map_file_id: Some(vuec_source::FileId(0)),
                     source_map_base_offset: 0,
                     source_map: options.source_map,

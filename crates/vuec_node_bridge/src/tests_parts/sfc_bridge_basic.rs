@@ -59,6 +59,54 @@
     }
 
     #[test]
+    fn style_bridges_preserve_source_map_content_and_disable_maps_on_request() {
+        let source = ".foo { color: red; }\n.bar { color: blue; }";
+        for command in ["sfc.compileStyle", "sfc.vue27.compileStyle"] {
+            let compiled = dispatch(
+                command,
+                json!({
+                    "source": source,
+                    "filename": "mapped.css",
+                    "options": {
+                        "sourceMap": true
+                    }
+                }),
+            )
+            .expect("style source map");
+            assert_eq!(compiled["map"]["version"], json!(3), "{command}");
+            assert_eq!(
+                compiled["map"]["sources"],
+                json!(["mapped.css"]),
+                "{command}"
+            );
+            assert_eq!(
+                compiled["map"]["sourcesContent"][0],
+                json!(source),
+                "{command}"
+            );
+            assert!(
+                compiled["map"]["mappings"]
+                    .as_str()
+                    .is_some_and(|mappings| !mappings.is_empty()),
+                "{command}"
+            );
+
+            let disabled = dispatch(
+                command,
+                json!({
+                    "source": source,
+                    "filename": "mapped.css",
+                    "options": {
+                        "sourceMap": false
+                    }
+                }),
+            )
+            .expect("style without source map");
+            assert!(disabled["map"].is_null(), "{command}");
+        }
+    }
+
+    #[test]
     fn vue27_bridge_parse_collects_comment_separated_css_vars() {
         let parsed = dispatch(
             "sfc.vue27.parse",
