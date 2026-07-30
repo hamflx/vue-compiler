@@ -6,6 +6,13 @@ pub(crate) const STYLE_SCOPED_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAMES: usize = 262_144;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES: usize = 256 * 1024 * 1024;
+// Selector rewriting performs several full scans and can retain both formatted
+// and scope-injected copies. These weights bound cumulative work before either
+// kind of intermediate is allocated.
+pub(crate) const STYLE_SCOPED_SELECTOR_SCAN_FACTOR: usize = 8;
+pub(crate) const STYLE_SCOPED_SELECTOR_DEEP_COPY_FACTOR: usize = 8;
+pub(crate) const STYLE_SCOPED_SELECTOR_SCOPE_FACTOR: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScopedStyleLimits {
@@ -15,6 +22,7 @@ pub(crate) struct ScopedStyleLimits {
     pub(crate) max_recursive_scan_bytes: usize,
     pub(crate) max_keyframes: usize,
     pub(crate) max_keyframe_bytes: usize,
+    pub(crate) max_selector_work_bytes: usize,
 }
 
 impl Default for ScopedStyleLimits {
@@ -26,6 +34,7 @@ impl Default for ScopedStyleLimits {
             max_recursive_scan_bytes: STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES,
             max_keyframes: STYLE_SCOPED_MAX_KEYFRAMES,
             max_keyframe_bytes: STYLE_SCOPED_MAX_KEYFRAME_BYTES,
+            max_selector_work_bytes: STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES,
         }
     }
 }
@@ -84,6 +93,12 @@ impl ScopedStyleBudget {
 pub(crate) struct ScopedStyleTransform {
     pub(crate) code: String,
     pub(crate) diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScopedStyleItemFrame {
+    start: usize,
+    rewrites_selectors: bool,
 }
 
 /// Rewrites selectors in `source` to include `scope_id`.
@@ -147,7 +162,23 @@ pub(crate) fn validate_scoped_style_resources(
         return Err(scoped_recursive_scan_limit_error(limits));
     }
     let mut brace_opens = Vec::new();
+    let mut brace_is_structural = Vec::new();
     let mut paren_opens = Vec::new();
+    let mut item_frames = Vec::new();
+    item_frames.try_reserve(1).map_err(|_| {
+        StylePreprocessError::scoped_limit(
+            "scoped style item stack could not reserve capacity within the configured limit",
+        )
+    })?;
+    item_frames.push(ScopedStyleItemFrame {
+        start: 0,
+        rewrites_selectors: true,
+    });
+    let mut bracket_depth = 0usize;
+    let mut selector_work_bytes = source.len();
+    if selector_work_bytes > limits.max_selector_work_bytes {
+        return Err(scoped_selector_work_limit_error(limits));
+    }
     let mut state = CssScannerState::Normal;
     let mut index = 0usize;
     while index < source.len() {
@@ -164,13 +195,68 @@ pub(crate) fn validate_scoped_style_resources(
                 match ch {
                     '\'' => state = CssScannerState::SingleQuote,
                     '"' => state = CssScannerState::DoubleQuote,
+                    '\\' => {
+                        index += ch.len_utf8();
+                        if index < source.len() {
+                            index += source[index..].chars().next().map_or(0, char::len_utf8);
+                        }
+                        continue;
+                    }
                     '{' => {
-                        push_scoped_syntax_open(&mut brace_opens, paren_opens.len(), index, limits)?
+                        let structural = paren_opens.is_empty() && bracket_depth == 0;
+                        if structural {
+                            let item_frame =
+                                item_frames.last().copied().unwrap_or(ScopedStyleItemFrame {
+                                    start: 0,
+                                    rewrites_selectors: true,
+                                });
+                            let prelude = scoped_css_item_prelude(&source[item_frame.start..index]);
+                            let is_at_rule = prelude.starts_with('@');
+                            let is_block_declaration = css_prelude_is_block_declaration(prelude);
+                            if item_frame.rewrites_selectors && !is_at_rule && !is_block_declaration
+                            {
+                                claim_scoped_selector_work(
+                                    &mut selector_work_bytes,
+                                    prelude,
+                                    scope_id,
+                                    limits,
+                                )?;
+                            }
+                            let child_rewrites_selectors = if is_block_declaration {
+                                false
+                            } else if is_at_rule {
+                                !is_keyframes_at_rule(prelude)
+                            } else {
+                                item_frame.rewrites_selectors
+                            };
+                            item_frames.try_reserve(1).map_err(|_| {
+                                StylePreprocessError::scoped_limit(
+                                    "scoped style item stack could not reserve capacity within the configured limit",
+                                )
+                            })?;
+                            item_frames.push(ScopedStyleItemFrame {
+                                start: index + ch.len_utf8(),
+                                rewrites_selectors: child_rewrites_selectors,
+                            });
+                        }
+                        push_scoped_syntax_open(
+                            &mut brace_opens,
+                            paren_opens.len(),
+                            index,
+                            limits,
+                        )?;
+                        brace_is_structural.try_reserve(1).map_err(|_| {
+                            StylePreprocessError::scoped_limit(
+                                "scoped style syntax stack could not reserve capacity within the configured limit",
+                            )
+                        })?;
+                        brace_is_structural.push(structural);
                     }
                     '(' => {
                         push_scoped_syntax_open(&mut paren_opens, brace_opens.len(), index, limits)?
                     }
                     '}' => {
+                        let structural = brace_is_structural.pop().unwrap_or(false);
                         if let Some(open) = brace_opens.pop() {
                             claim_scoped_recursive_span(
                                 &mut recursive_scan_bytes,
@@ -178,6 +264,14 @@ pub(crate) fn validate_scoped_style_resources(
                                 index,
                                 limits,
                             )?;
+                        }
+                        if structural {
+                            item_frames.pop();
+                            if let Some(item_frame) = item_frames.last_mut() {
+                                item_frame.start = index + ch.len_utf8();
+                            }
+                            paren_opens.clear();
+                            bracket_depth = 0;
                         }
                     }
                     ')' => {
@@ -188,6 +282,13 @@ pub(crate) fn validate_scoped_style_resources(
                                 index,
                                 limits,
                             )?;
+                        }
+                    }
+                    '[' => bracket_depth = bracket_depth.saturating_add(1),
+                    ']' => bracket_depth = bracket_depth.saturating_sub(1),
+                    ';' if paren_opens.is_empty() && bracket_depth == 0 => {
+                        if let Some(item_frame) = item_frames.last_mut() {
+                            item_frame.start = index + ch.len_utf8();
                         }
                     }
                     _ => {}
@@ -281,6 +382,255 @@ fn scoped_recursive_scan_limit_error(limits: ScopedStyleLimits) -> StylePreproce
     StylePreprocessError::scoped_limit(format!(
         "scoped style recursive scan span exceeds the maximum total of {} bytes",
         limits.max_recursive_scan_bytes
+    ))
+}
+
+fn scoped_css_item_prelude(mut source: &str) -> &str {
+    loop {
+        source = source.trim_start();
+        let Some(comment) = source.strip_prefix("/*") else {
+            return source.trim_end();
+        };
+        let Some(close) = comment.find("*/") else {
+            return "";
+        };
+        source = &comment[close + 2..];
+    }
+}
+
+fn claim_scoped_selector_work(
+    selector_work_bytes: &mut usize,
+    prelude: &str,
+    scope_id: &str,
+    limits: ScopedStyleLimits,
+) -> Result<(), StylePreprocessError> {
+    if prelude.is_empty() {
+        return Ok(());
+    }
+    let (commas, colons) = scoped_selector_complexity(prelude)?;
+    let branches = commas.checked_add(1).ok_or_else(|| {
+        StylePreprocessError::scoped_limit("scoped style selector branch count overflowed")
+    })?;
+    let selector_nodes = branches.checked_add(colons).ok_or_else(|| {
+        StylePreprocessError::scoped_limit("scoped style selector node count overflowed")
+    })?;
+    let scan_bytes = prelude
+        .len()
+        .checked_mul(STYLE_SCOPED_SELECTOR_SCAN_FACTOR)
+        .ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style selector work size overflowed")
+        })?;
+    let scoped_node_bytes = scope_id
+        .len()
+        .checked_add(4)
+        .and_then(|bytes| bytes.checked_mul(selector_nodes))
+        .and_then(|bytes| bytes.checked_mul(STYLE_SCOPED_SELECTOR_SCOPE_FACTOR))
+        .ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style selector work size overflowed")
+        })?;
+    let deep_copy_bytes = scoped_deep_container_copy_bytes(prelude)?
+        .checked_mul(STYLE_SCOPED_SELECTOR_DEEP_COPY_FACTOR)
+        .ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style selector work size overflowed")
+        })?;
+    let work_bytes = scan_bytes
+        .checked_add(scoped_node_bytes)
+        .and_then(|bytes| bytes.checked_add(deep_copy_bytes))
+        .ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style selector work size overflowed")
+        })?;
+    *selector_work_bytes = selector_work_bytes.checked_add(work_bytes).ok_or_else(|| {
+        StylePreprocessError::scoped_limit("scoped style selector work size overflowed")
+    })?;
+    if *selector_work_bytes > limits.max_selector_work_bytes {
+        return Err(scoped_selector_work_limit_error(limits));
+    }
+    Ok(())
+}
+
+pub(crate) fn scoped_selector_complexity(
+    prelude: &str,
+) -> Result<(usize, usize), StylePreprocessError> {
+    let mut commas = 0usize;
+    let mut colons = 0usize;
+    visit_scoped_selector_punctuation(prelude, |_, punctuation, _| {
+        let count = if punctuation == ',' {
+            &mut commas
+        } else {
+            &mut colons
+        };
+        *count = count.checked_add(1).ok_or_else(|| {
+            let message = if punctuation == ',' {
+                "scoped style selector branch count overflowed"
+            } else {
+                "scoped style selector node count overflowed"
+            };
+            StylePreprocessError::scoped_limit(message)
+        })?;
+        Ok(())
+    })?;
+    Ok((commas, colons))
+}
+
+fn visit_scoped_selector_punctuation(
+    selector: &str,
+    mut visitor: impl FnMut(usize, char, usize) -> Result<(), StylePreprocessError>,
+) -> Result<(), StylePreprocessError> {
+    let mut state = SelectorScannerState::Normal;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut index = 0usize;
+    while index < selector.len() {
+        let Some(ch) = selector[index..].chars().next() else {
+            break;
+        };
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => state = SelectorScannerState::SingleQuote,
+                '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
+                    continue;
+                }
+                '(' => paren_depth = paren_depth.saturating_add(1),
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                '[' => bracket_depth = bracket_depth.saturating_add(1),
+                ']' => bracket_depth = bracket_depth.saturating_sub(1),
+                ',' | ':' if bracket_depth == 0 => visitor(index, ch, paren_depth)?,
+                _ => {}
+            },
+            SelectorScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    Ok(())
+}
+
+fn scoped_deep_container_copy_bytes(selector: &str) -> Result<usize, StylePreprocessError> {
+    let names = [":is", ":where", ":not", ":has"];
+    let Some(container) = find_top_level_pseudo_function(selector, &names) else {
+        return Ok(0);
+    };
+    let Some((open, close)) = container.parens else {
+        return Ok(0);
+    };
+    let inner = &selector[open + 1..close];
+    if !selector_has_deep(inner) {
+        return Ok(0);
+    }
+    let name = matched_selector_name(selector, container.start, &names).unwrap_or_default();
+    let suffix = &selector[close + 1..];
+    let has_trailing_nodes = !suffix.trim().is_empty();
+    let has_scope_anchor = selector_scope_anchor_before(selector, container.start);
+    let mut has_deep = false;
+    let mut has_normal = false;
+    let branches = visit_scoped_selector_branches(inner, |branch| {
+        if selector_has_deep(branch.trim()) {
+            has_deep = true;
+        } else {
+            has_normal = true;
+        }
+        Ok(())
+    })?;
+
+    if name == ":not" && has_deep && has_normal && !has_scope_anchor && has_trailing_nodes {
+        return Ok(0);
+    }
+
+    let mut copy_bytes = 0usize;
+    visit_scoped_selector_branches(inner, |branch| {
+        copy_bytes = copy_bytes
+            .checked_add(scoped_deep_container_copy_bytes(branch.trim())?)
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit(
+                    "scoped style deep selector copy size overflowed",
+                )
+            })?;
+        Ok(())
+    })?;
+
+    let can_split = matches!(name, ":is" | ":where" | ":has");
+    if can_split && has_deep && has_normal && !has_scope_anchor && has_trailing_nodes {
+        let repeated_bytes = container
+            .start
+            .checked_add(name.len())
+            .and_then(|bytes| bytes.checked_add(2))
+            .and_then(|bytes| bytes.checked_add(suffix.len()))
+            .and_then(|bytes| bytes.checked_add(2))
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit(
+                    "scoped style deep selector copy size overflowed",
+                )
+            })?;
+        let extra_branches = branches.saturating_sub(1);
+        copy_bytes = copy_bytes
+            .checked_add(repeated_bytes.checked_mul(extra_branches).ok_or_else(|| {
+                StylePreprocessError::scoped_limit(
+                    "scoped style deep selector copy size overflowed",
+                )
+            })?)
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit(
+                    "scoped style deep selector copy size overflowed",
+                )
+            })?;
+    }
+    Ok(copy_bytes)
+}
+
+fn visit_scoped_selector_branches(
+    selector: &str,
+    mut visitor: impl FnMut(&str) -> Result<(), StylePreprocessError>,
+) -> Result<usize, StylePreprocessError> {
+    let mut branches = 0usize;
+    let mut start = 0usize;
+    visit_scoped_selector_punctuation(selector, |index, punctuation, paren_depth| {
+        if punctuation == ',' && paren_depth == 0 {
+            visitor(&selector[start..index])?;
+            branches = branches.checked_add(1).ok_or_else(|| {
+                StylePreprocessError::scoped_limit("scoped style selector branch count overflowed")
+            })?;
+            start = index + punctuation.len_utf8();
+        }
+        Ok(())
+    })?;
+    visitor(&selector[start..])?;
+    branches.checked_add(1).ok_or_else(|| {
+        StylePreprocessError::scoped_limit("scoped style selector branch count overflowed")
+    })
+}
+
+fn scoped_selector_work_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
+    StylePreprocessError::scoped_limit(format!(
+        "scoped style selector rewriting exceeds the maximum work budget of {} bytes",
+        limits.max_selector_work_bytes
     ))
 }
 

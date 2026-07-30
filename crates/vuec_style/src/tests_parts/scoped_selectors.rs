@@ -957,6 +957,7 @@
             max_recursive_scan_bytes: 15,
             max_keyframes: 0,
             max_keyframe_bytes: 0,
+            max_selector_work_bytes: 161,
         };
         assert_eq!(
             rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
@@ -980,11 +981,194 @@
                 max_recursive_scan_bytes: 14,
                 ..exact
             },
+            ScopedStyleLimits {
+                max_selector_work_bytes: 160,
+                ..exact
+            },
         ] {
             let error = rewrite_scoped_selectors_with_limits(source, scope_id, limits)
                 .expect_err("one-short resource limit must fail");
             assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
         }
+    }
+
+    #[test]
+    fn scoped_selector_work_limit_has_an_exact_boundary() {
+        let source = ".a,.b{}";
+        let scope_id = "x";
+        let exact = ScopedStyleLimits {
+            max_source_bytes: 7,
+            max_scope_id_bytes: 1,
+            max_syntax_depth: 1,
+            max_recursive_scan_bytes: 9,
+            max_keyframes: 0,
+            max_keyframe_bytes: 0,
+            max_selector_work_bytes: 87,
+        };
+        assert_eq!(
+            rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
+            ".a[x],.b[x]{}"
+        );
+
+        let error = rewrite_scoped_selectors_with_limits(
+            source,
+            scope_id,
+            ScopedStyleLimits {
+                max_selector_work_bytes: 86,
+                ..exact
+            },
+        )
+        .expect_err("one-short selector work budget must fail");
+        assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert!(error.message.contains("selector rewriting"));
+    }
+
+    #[test]
+    fn scoped_selector_work_ignores_non_selector_punctuation() {
+        let selector = r#".a/* ,: */[data-value=\",::\"],.escaped\,name"#;
+        let source = format!("@media (a,b) {{ {selector} {{}} }}");
+        assert_eq!(scoped_selector_complexity(selector).unwrap(), (1, 0));
+        let selector_bytes = selector.len() * STYLE_SCOPED_SELECTOR_SCAN_FACTOR
+            + ("x".len() + 4) * 2 * STYLE_SCOPED_SELECTOR_SCOPE_FACTOR;
+        let exact = source.len() + selector_bytes;
+
+        assert!(validate_scoped_style_resources(
+            &source,
+            "x",
+            ScopedStyleLimits {
+                max_selector_work_bytes: exact,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
+        assert!(validate_scoped_style_resources(
+            &source,
+            "x",
+            ScopedStyleLimits {
+                max_selector_work_bytes: exact - 1,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scoped_selector_work_tracks_actual_css_item_contexts() {
+        for source in [
+            "@keyframes spin { from,to { opacity: 0; } }",
+            "/* lead ,: */ @media (a,b) {}",
+            "@media all { --theme: { value: ,::; }; }",
+        ] {
+            assert!(validate_scoped_style_resources(
+                source,
+                "x",
+                ScopedStyleLimits {
+                    max_selector_work_bytes: source.len(),
+                    ..ScopedStyleLimits::default()
+                },
+            )
+            .is_ok());
+        }
+
+        let source = ".host { --theme: { value: ,::; }; }";
+        let root_selector_work = ".host".len() * STYLE_SCOPED_SELECTOR_SCAN_FACTOR
+            + ("x".len() + 4) * STYLE_SCOPED_SELECTOR_SCOPE_FACTOR;
+        assert!(validate_scoped_style_resources(
+            source,
+            "x",
+            ScopedStyleLimits {
+                max_selector_work_bytes: source.len() + root_selector_work,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn scoped_selector_work_resets_malformed_sibling_syntax() {
+        for source in [
+            "@bad { value: fn( }\n.a {}",
+            "@bad { value: [ }\n.a {}",
+        ] {
+            let error = validate_scoped_style_resources(
+                source,
+                "x",
+                ScopedStyleLimits {
+                    max_selector_work_bytes: source.len(),
+                    ..ScopedStyleLimits::default()
+                },
+            )
+            .expect_err("a malformed sibling must not hide the following selector");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+            assert!(error.message.contains("selector rewriting"));
+        }
+    }
+
+    #[test]
+    fn ordinary_scoped_selector_lists_are_charged_linearly() {
+        let selector = vec![".a"; 8_192].join(",");
+        let source = format!("{selector}{{}}");
+        let scope_id = "data-v-x";
+        let exact = source.len()
+            + selector.len() * STYLE_SCOPED_SELECTOR_SCAN_FACTOR
+            + (scope_id.len() + 4) * 8_192 * STYLE_SCOPED_SELECTOR_SCOPE_FACTOR;
+
+        assert!(validate_scoped_style_resources(
+            &source,
+            scope_id,
+            ScopedStyleLimits {
+                max_selector_work_bytes: exact,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
+        assert!(validate_scoped_style_resources(
+            &source,
+            scope_id,
+            ScopedStyleLimits {
+                max_selector_work_bytes: exact - 1,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_err());
+        assert!(!rewrite_scoped_selectors(&source, scope_id).is_empty());
+    }
+
+    #[test]
+    fn scoped_selector_work_failure_is_atomic() {
+        let prefix = ":hover".repeat(8_192);
+        let branches = (0..4_096)
+            .map(|index| if index % 2 == 0 { ".a" } else { ":deep(.b)" })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("{prefix}:is({branches}):hover {{ color: red; }}");
+
+        assert!(rewrite_scoped_selectors(&source, "data-v-x").is_empty());
+        let result = compile_style(
+            &source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 23,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("selector rewriting"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 23, 24))
+        );
     }
 
     #[test]
@@ -1174,6 +1358,7 @@
                 max_recursive_scan_bytes: 0,
                 max_keyframes: 0,
                 max_keyframe_bytes: 0,
+                max_selector_work_bytes: 0,
             },
         );
         assert!(unscoped.errors.is_empty());
