@@ -153,6 +153,63 @@
     }
 
     #[test]
+    fn css_modules_value_placeholders_replace_complete_tokens_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dep = dir.path().join("tokens.css");
+        std::fs::write(&dep, ":export { token: red; }").expect("write dep");
+        let entry = dir.path().join("entry.css");
+
+        let result = compile_style(
+            r#"@value token from "./tokens.css";
+.button { color: token; --literal: __vuec_value_0suffix; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(entry.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty());
+        assert!(result.code.contains("color: red"));
+        assert!(result.code.contains("--literal: __vuec_value_0suffix"));
+    }
+
+    #[test]
+    fn css_modules_value_placeholder_replacement_scales_linearly() {
+        let options = StyleCompileOptions::default();
+        let mut load_state =
+            CssModulesImportState::new(CssModulesImportLimits::default());
+        let mut context = CssModulesContext::new(
+            &options,
+            "test.css".into(),
+            String::new(),
+            CssModulesScopeBehaviour::Local,
+            false,
+            &mut load_state,
+        );
+        let mut source = String::new();
+        let mut expected = String::new();
+        for index in 0..4096 {
+            if index > 0 {
+                source.push(' ');
+                expected.push(' ');
+            }
+            let placeholder = format!("__vuec_value_{index}");
+            let replacement = format!("value_{index}");
+            source.push_str(&placeholder);
+            expected.push_str(&replacement);
+            context
+                .value_placeholders
+                .insert(placeholder, replacement);
+        }
+        source.push_str(" __vuec_value_1suffix");
+        expected.push_str(" __vuec_value_1suffix");
+
+        assert_eq!(context.replace_value_placeholders(source), expected);
+    }
+
+    #[test]
     fn compiles_css_modules_missing_value_import_composes_like_official() {
         let dir = tempfile::tempdir().expect("temp dir");
         let dep = dir.path().join("tokens.css");

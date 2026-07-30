@@ -560,11 +560,7 @@ impl<'a> CssModulesContext<'a> {
         if self.value_placeholders.is_empty() {
             return source;
         }
-        let mut output = source;
-        for (placeholder, value) in &self.value_placeholders {
-            output = output.replace(placeholder, value);
-        }
-        output
+        replace_css_module_value_symbols(&source, &self.value_placeholders)
     }
 
     pub(crate) fn load_imported_module(
