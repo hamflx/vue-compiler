@@ -6,6 +6,8 @@ pub(crate) const STYLE_SCOPED_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAMES: usize = 262_144;
 pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_RENDER_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_WARNINGS: usize = 65_536;
 pub(crate) const STYLE_SCOPED_MAX_WARNING_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES: usize = 256 * 1024 * 1024;
@@ -24,6 +26,8 @@ pub(crate) struct ScopedStyleLimits {
     pub(crate) max_recursive_scan_bytes: usize,
     pub(crate) max_keyframes: usize,
     pub(crate) max_keyframe_bytes: usize,
+    pub(crate) max_keyframe_output_bytes: usize,
+    pub(crate) max_keyframe_render_bytes: usize,
     pub(crate) max_warnings: usize,
     pub(crate) max_warning_bytes: usize,
     pub(crate) max_selector_work_bytes: usize,
@@ -38,6 +42,8 @@ impl Default for ScopedStyleLimits {
             max_recursive_scan_bytes: STYLE_SCOPED_MAX_RECURSIVE_SCAN_BYTES,
             max_keyframes: STYLE_SCOPED_MAX_KEYFRAMES,
             max_keyframe_bytes: STYLE_SCOPED_MAX_KEYFRAME_BYTES,
+            max_keyframe_output_bytes: STYLE_SCOPED_MAX_KEYFRAME_OUTPUT_BYTES,
+            max_keyframe_render_bytes: STYLE_SCOPED_MAX_KEYFRAME_RENDER_BYTES,
             max_warnings: STYLE_SCOPED_MAX_WARNINGS,
             max_warning_bytes: STYLE_SCOPED_MAX_WARNING_BYTES,
             max_selector_work_bytes: STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES,
@@ -50,6 +56,8 @@ pub(crate) struct ScopedStyleBudget {
     pub(crate) limits: ScopedStyleLimits,
     pub(crate) keyframes: usize,
     pub(crate) keyframe_bytes: usize,
+    pub(crate) keyframe_output_bytes: usize,
+    pub(crate) keyframe_render_bytes: usize,
     pub(crate) warnings: usize,
     pub(crate) warning_bytes: usize,
 }
@@ -60,6 +68,8 @@ impl ScopedStyleBudget {
             limits,
             keyframes: 0,
             keyframe_bytes: 0,
+            keyframe_output_bytes: 0,
+            keyframe_render_bytes: 0,
             warnings: 0,
             warning_bytes: 0,
         }
@@ -122,6 +132,65 @@ impl ScopedStyleBudget {
         self.warning_bytes = warning_bytes;
         Ok(())
     }
+
+    pub(crate) fn begin_keyframe_rewrite(
+        &mut self,
+        source_bytes: usize,
+    ) -> Result<(), StylePreprocessError> {
+        if source_bytes > self.limits.max_keyframe_output_bytes {
+            return Err(keyframe_output_limit_error(self.limits));
+        }
+        if source_bytes > self.limits.max_keyframe_render_bytes {
+            return Err(keyframe_render_limit_error(self.limits));
+        }
+        self.keyframe_output_bytes = source_bytes;
+        self.keyframe_render_bytes = source_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn claim_keyframe_rewrite(
+        &mut self,
+        generated_bytes: usize,
+        copies: usize,
+    ) -> Result<(), StylePreprocessError> {
+        let output_bytes = self
+            .keyframe_output_bytes
+            .checked_add(generated_bytes)
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit("scoped style keyframe output size overflowed")
+            })?;
+        if output_bytes > self.limits.max_keyframe_output_bytes {
+            return Err(keyframe_output_limit_error(self.limits));
+        }
+        let render_bytes = generated_bytes
+            .checked_mul(copies)
+            .and_then(|bytes| self.keyframe_render_bytes.checked_add(bytes))
+            .ok_or_else(|| {
+                StylePreprocessError::scoped_limit(
+                    "scoped style keyframe render work size overflowed",
+                )
+            })?;
+        if render_bytes > self.limits.max_keyframe_render_bytes {
+            return Err(keyframe_render_limit_error(self.limits));
+        }
+        self.keyframe_output_bytes = output_bytes;
+        self.keyframe_render_bytes = render_bytes;
+        Ok(())
+    }
+}
+
+fn keyframe_output_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
+    StylePreprocessError::scoped_limit(format!(
+        "scoped style keyframe output exceeds the maximum of {} bytes",
+        limits.max_keyframe_output_bytes
+    ))
+}
+
+fn keyframe_render_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
+    StylePreprocessError::scoped_limit(format!(
+        "scoped style keyframe rendering exceeds the maximum work budget of {} bytes",
+        limits.max_keyframe_render_bytes
+    ))
 }
 
 pub(crate) struct ScopedStyleTransform {
@@ -164,6 +233,7 @@ pub(crate) fn transform_scoped_style_with_limits(
     let short_id = scope_id.strip_prefix("data-v-").unwrap_or(scope_id);
     let mut budget = ScopedStyleBudget::new(limits);
     let keyframes = collect_scoped_keyframes(source, short_id, &mut budget)?;
+    validate_scoped_keyframe_rewrite_work(source, &keyframes, &mut budget)?;
     let diagnostics = if warn_deprecated {
         scoped_selector_deprecation_warnings(source, &mut budget)?
     } else {

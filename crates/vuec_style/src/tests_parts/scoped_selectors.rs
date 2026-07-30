@@ -1048,6 +1048,8 @@
             max_recursive_scan_bytes: 15,
             max_keyframes: 0,
             max_keyframe_bytes: 0,
+            max_keyframe_output_bytes: 0,
+            max_keyframe_render_bytes: 0,
             max_warnings: 0,
             max_warning_bytes: 0,
             max_selector_work_bytes: 161,
@@ -1096,6 +1098,8 @@
             max_recursive_scan_bytes: 9,
             max_keyframes: 0,
             max_keyframe_bytes: 0,
+            max_keyframe_output_bytes: 0,
+            max_keyframe_render_bytes: 0,
             max_warnings: 0,
             max_warning_bytes: 0,
             max_selector_work_bytes: 87,
@@ -1373,6 +1377,18 @@
         .unwrap();
         assert_eq!(keyframes.len(), 1);
         assert_eq!(keyframes.get("fade").unwrap(), "fade-test");
+
+        let source = "@keyframes fade-test {} .x { animation-name: fade; }";
+        assert!(rewrite_scoped_selectors_with_limits(
+            source,
+            "data-v-test",
+            ScopedStyleLimits {
+                max_keyframe_output_bytes: 0,
+                max_keyframe_render_bytes: 0,
+                ..ScopedStyleLimits::default()
+            },
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1407,6 +1423,162 @@
             assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
             assert_eq!((budget.keyframes, budget.keyframe_bytes), (1, 4));
         }
+    }
+
+    #[test]
+    fn scoped_keyframe_rewrite_limits_have_exact_boundaries() {
+        let source = "@keyframes a {} .x { animation-name: a; animation: 1s a; }";
+        let renamed_bytes = "a-x".len();
+        let output_bytes = source.len() + renamed_bytes * 3;
+        let reference_copies = SCOPED_KEYFRAME_REFERENCE_COPIES
+            + SCOPED_KEYFRAME_ANCESTOR_COPIES;
+        let render_bytes = source.len()
+            + renamed_bytes * SCOPED_KEYFRAME_DEFINITION_COPIES
+            + renamed_bytes * reference_copies * 2;
+        let exact_limits = ScopedStyleLimits {
+            max_keyframe_output_bytes: output_bytes,
+            max_keyframe_render_bytes: render_bytes,
+            ..ScopedStyleLimits::default()
+        };
+        let mut exact_budget = ScopedStyleBudget::new(exact_limits);
+        let keyframes = collect_scoped_keyframes(source, "x", &mut exact_budget).unwrap();
+        validate_scoped_keyframe_rewrite_work(source, &keyframes, &mut exact_budget).unwrap();
+        assert_eq!(
+            (
+                exact_budget.keyframe_output_bytes,
+                exact_budget.keyframe_render_bytes,
+            ),
+            (output_bytes, render_bytes)
+        );
+
+        for limits in [
+            ScopedStyleLimits {
+                max_keyframe_output_bytes: output_bytes - 1,
+                ..exact_limits
+            },
+            ScopedStyleLimits {
+                max_keyframe_render_bytes: render_bytes - 1,
+                ..exact_limits
+            },
+        ] {
+            let mut budget = ScopedStyleBudget::new(limits);
+            let keyframes = collect_scoped_keyframes(source, "x", &mut budget).unwrap();
+            let error = validate_scoped_keyframe_rewrite_work(source, &keyframes, &mut budget)
+                .expect_err("one-short keyframe rewrite limit must fail");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+        }
+
+        assert_eq!(
+            rewrite_scoped_selectors_with_limits(source, "data-v-x", exact_limits).unwrap(),
+            "@keyframes a-x {} .x[data-v-x] { animation-name: a-x; animation: 1s a-x; }"
+        );
+    }
+
+    #[test]
+    fn scoped_keyframe_rewrite_counts_duplicate_and_vendor_definitions() {
+        let source =
+            "@keyframes a {} @-webkit-keyframes a {} @keyframes a-x {} animation-name: a;";
+        let renamed_bytes = "a-x".len();
+        let mut budget = ScopedStyleBudget::new(ScopedStyleLimits::default());
+        let keyframes = collect_scoped_keyframes(source, "x", &mut budget).unwrap();
+        validate_scoped_keyframe_rewrite_work(source, &keyframes, &mut budget).unwrap();
+
+        assert_eq!(keyframes.len(), 1);
+        assert_eq!(
+            budget.keyframe_output_bytes,
+            source.len() + renamed_bytes * 2
+        );
+        assert_eq!(
+            budget.keyframe_render_bytes,
+            source.len() + renamed_bytes * SCOPED_KEYFRAME_DEFINITION_COPIES * 2
+        );
+    }
+
+    #[test]
+    fn scoped_keyframe_animation_values_stream_without_join_buffers() {
+        let mut budget = ScopedStyleBudget::new(ScopedStyleLimits::default());
+        let keyframes = collect_scoped_keyframes("@keyframes a {}", "x", &mut budget).unwrap();
+        assert_eq!(
+            rewrite_animation_name_value(" a, none ,a ", &keyframes),
+            "a-x,none,a-x"
+        );
+        assert_eq!(
+            rewrite_animation_value("1s  ease a, none 2s, a 3s linear", &keyframes),
+            "1s ease a-x, none 2s,a-x 3s linear"
+        );
+    }
+
+    #[test]
+    fn scoped_keyframe_render_work_counts_ancestor_copies() {
+        let depth = 16usize;
+        let mut source = "@keyframes a {} ".to_string();
+        source.push_str(&"@media x {".repeat(depth));
+        source.push_str(".x { animation-name: a; }");
+        source.push_str(&"}".repeat(depth));
+        let renamed_bytes = "a-x".len();
+        let reference_depth = depth + 1;
+        let reference_copies = SCOPED_KEYFRAME_REFERENCE_COPIES
+            + reference_depth * SCOPED_KEYFRAME_ANCESTOR_COPIES;
+        let exact_render = source.len()
+            + renamed_bytes * SCOPED_KEYFRAME_DEFINITION_COPIES
+            + renamed_bytes * reference_copies;
+        let limits = ScopedStyleLimits {
+            max_keyframe_render_bytes: exact_render - 1,
+            ..ScopedStyleLimits::default()
+        };
+        let mut budget = ScopedStyleBudget::new(limits);
+        let keyframes = collect_scoped_keyframes(&source, "x", &mut budget).unwrap();
+        let error = validate_scoped_keyframe_rewrite_work(&source, &keyframes, &mut budget)
+            .expect_err("ancestor copies must consume render work");
+        assert!(error.message.contains("keyframe rendering"));
+    }
+
+    #[test]
+    fn scoped_keyframe_output_limit_rejects_repeated_definitions_by_default() {
+        let source = "@keyframes a{}".repeat(2_048);
+        let scope_id = "x".repeat(STYLE_SCOPED_MAX_SCOPE_ID_BYTES);
+        assert!(source.len() < STYLE_SCOPED_MAX_SOURCE_BYTES);
+        assert!(rewrite_scoped_selectors(&source, &scope_id).is_empty());
+
+        let references = vec!["a"; 2_048].join(",");
+        let source = format!("@keyframes a{{}}.x{{animation-name:{references}}}");
+        assert!(source.len() < STYLE_SCOPED_MAX_SOURCE_BYTES);
+        assert!(rewrite_scoped_selectors(&source, &scope_id).is_empty());
+    }
+
+    #[test]
+    fn scoped_keyframe_rewrite_limit_failure_is_atomic() {
+        let source = "@keyframes a {} .x { animation-name: a; }";
+        let output_bytes = source.len() + "a-x".len() * 2;
+        let result = compile_style_with_scoped_limits(
+            source,
+            StyleCompileOptions {
+                id: Some("data-v-x".into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 31,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+            ScopedStyleLimits {
+                max_keyframe_output_bytes: output_bytes - 1,
+                ..ScopedStyleLimits::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("keyframe output"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 31, 32))
+        );
     }
 
     #[test]
@@ -1453,6 +1625,8 @@
                 max_recursive_scan_bytes: 0,
                 max_keyframes: 0,
                 max_keyframe_bytes: 0,
+                max_keyframe_output_bytes: 0,
+                max_keyframe_render_bytes: 0,
                 max_warnings: 0,
                 max_warning_bytes: 0,
                 max_selector_work_bytes: 0,

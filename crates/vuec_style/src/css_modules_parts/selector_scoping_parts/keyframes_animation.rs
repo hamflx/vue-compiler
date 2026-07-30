@@ -6,6 +6,170 @@ pub(crate) enum CssScannerState {
     BlockComment,
 }
 
+pub(crate) const SCOPED_KEYFRAME_DEFINITION_COPIES: usize = 2;
+pub(crate) const SCOPED_KEYFRAME_REFERENCE_COPIES: usize = 4;
+// Nested scoped blocks can copy generated names into a block builder, through
+// output normalization, and again into the parent builder.
+pub(crate) const SCOPED_KEYFRAME_ANCESTOR_COPIES: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopedKeyframeRewriteContext {
+    Rules,
+    Declarations,
+    Keyframes,
+}
+
+pub(crate) fn validate_scoped_keyframe_rewrite_work(
+    source: &str,
+    keyframes: &BTreeMap<String, String>,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
+    if keyframes.is_empty() {
+        return Ok(());
+    }
+    budget.begin_keyframe_rewrite(source.len())?;
+    claim_scoped_keyframe_rewrite_work_in(
+        source,
+        keyframes,
+        budget,
+        ScopedKeyframeRewriteContext::Rules,
+        0,
+    )
+}
+
+fn claim_scoped_keyframe_rewrite_work_in(
+    source: &str,
+    keyframes: &BTreeMap<String, String>,
+    budget: &mut ScopedStyleBudget,
+    context: ScopedKeyframeRewriteContext,
+    depth: usize,
+) -> Result<(), StylePreprocessError> {
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        cursor = skip_css_whitespace(source, cursor);
+        if cursor >= source.len() {
+            break;
+        }
+        if source[cursor..].starts_with("/*") {
+            let Some(end_offset) = source[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+            if context == ScopedKeyframeRewriteContext::Declarations {
+                claim_scoped_animation_segment(&source[cursor..], keyframes, budget, depth)?;
+            }
+            break;
+        };
+        let prelude = source[cursor..delimiter].trim();
+        if delimiter_ch == ';' {
+            if context == ScopedKeyframeRewriteContext::Declarations {
+                claim_scoped_animation_segment(prelude, keyframes, budget, depth)?;
+            }
+            cursor = delimiter + 1;
+            continue;
+        }
+        let Some(close) = find_matching_brace(source, delimiter) else {
+            break;
+        };
+        if css_prelude_is_block_declaration(prelude) {
+            cursor = css_block_declaration_end(source, close);
+            continue;
+        }
+
+        let next_context = if let Some((name, params)) = parse_at_rule(prelude) {
+            if is_keyframes_name(name) {
+                if let Some(renamed) = lookup_keyframe_name(params, keyframes) {
+                    claim_scoped_keyframe_generated_name(
+                        renamed.len(),
+                        depth,
+                        SCOPED_KEYFRAME_DEFINITION_COPIES,
+                        budget,
+                    )?;
+                }
+                ScopedKeyframeRewriteContext::Keyframes
+            } else if context == ScopedKeyframeRewriteContext::Declarations {
+                ScopedKeyframeRewriteContext::Declarations
+            } else {
+                ScopedKeyframeRewriteContext::Rules
+            }
+        } else if context == ScopedKeyframeRewriteContext::Keyframes {
+            ScopedKeyframeRewriteContext::Keyframes
+        } else {
+            ScopedKeyframeRewriteContext::Declarations
+        };
+        let child_depth = depth.checked_add(1).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style keyframe render depth overflowed")
+        })?;
+        claim_scoped_keyframe_rewrite_work_in(
+            &source[delimiter + 1..close],
+            keyframes,
+            budget,
+            next_context,
+            child_depth,
+        )?;
+        cursor = close + 1;
+    }
+    Ok(())
+}
+
+fn claim_scoped_animation_segment(
+    segment: &str,
+    keyframes: &BTreeMap<String, String>,
+    budget: &mut ScopedStyleBudget,
+    depth: usize,
+) -> Result<(), StylePreprocessError> {
+    let Some(colon) = find_top_level_colon(segment) else {
+        return Ok(());
+    };
+    let prop = segment[..colon].trim();
+    let value = segment[colon + 1..].trim();
+    if is_animation_name_property(prop) {
+        for part in value.split(',') {
+            if let Some(renamed) = lookup_keyframe_name(part.trim(), keyframes) {
+                claim_scoped_keyframe_generated_name(
+                    renamed.len(),
+                    depth,
+                    SCOPED_KEYFRAME_REFERENCE_COPIES,
+                    budget,
+                )?;
+            }
+        }
+    } else if is_animation_property(prop) {
+        for part in value.split(',') {
+            if let Some(renamed) = part
+                .split_whitespace()
+                .find_map(|value| lookup_keyframe_name(value, keyframes))
+            {
+                claim_scoped_keyframe_generated_name(
+                    renamed.len(),
+                    depth,
+                    SCOPED_KEYFRAME_REFERENCE_COPIES,
+                    budget,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn claim_scoped_keyframe_generated_name(
+    bytes: usize,
+    depth: usize,
+    base_copies: usize,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
+    let copies = depth
+        .checked_mul(SCOPED_KEYFRAME_ANCESTOR_COPIES)
+        .and_then(|copies| copies.checked_add(base_copies))
+        .ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style keyframe render work size overflowed")
+        })?;
+    budget.claim_keyframe_rewrite(bytes, copies)
+}
+
 pub(crate) fn collect_scoped_keyframes(
     source: &str,
     short_id: &str,
@@ -161,14 +325,14 @@ pub(crate) fn rewrite_animation_declarations(
 
     let mut output = String::new();
     let mut segment_start = 0usize;
-    for semicolon in top_level_semicolons(source) {
+    visit_top_level_semicolons(source, |semicolon| {
         output.push_str(&rewrite_declaration_segment(
             &source[segment_start..semicolon],
             keyframes,
         ));
         output.push(';');
         segment_start = semicolon + 1;
-    }
+    });
     output.push_str(&rewrite_declaration_segment(
         &source[segment_start..],
         keyframes,
@@ -178,6 +342,11 @@ pub(crate) fn rewrite_animation_declarations(
 
 pub(crate) fn top_level_semicolons(source: &str) -> Vec<usize> {
     let mut semicolons = Vec::new();
+    visit_top_level_semicolons(source, |semicolon| semicolons.push(semicolon));
+    semicolons
+}
+
+pub(crate) fn visit_top_level_semicolons(source: &str, mut visitor: impl FnMut(usize)) {
     let mut state = CssScannerState::Normal;
     let mut paren_depth = 0usize;
     let mut index = 0usize;
@@ -197,7 +366,7 @@ pub(crate) fn top_level_semicolons(source: &str) -> Vec<usize> {
                     '"' => state = CssScannerState::DoubleQuote,
                     '(' => paren_depth += 1,
                     ')' if paren_depth > 0 => paren_depth -= 1,
-                    ';' if paren_depth == 0 => semicolons.push(index),
+                    ';' if paren_depth == 0 => visitor(index),
                     _ => {}
                 }
             }
@@ -235,7 +404,6 @@ pub(crate) fn top_level_semicolons(source: &str) -> Vec<usize> {
         }
         index += ch.len_utf8();
     }
-    semicolons
 }
 
 pub(crate) fn rewrite_declaration_segment(
@@ -329,52 +497,65 @@ pub(crate) fn find_top_level_colon(source: &str) -> Option<usize> {
 }
 
 pub(crate) fn is_animation_name_property(prop: &str) -> bool {
-    let prop = prop.trim().to_ascii_lowercase();
-    prop == "animation-name" || (prop.starts_with('-') && prop.ends_with("-animation-name"))
+    let prop = prop.trim();
+    prop.eq_ignore_ascii_case("animation-name")
+        || (prop.starts_with('-') && has_ascii_case_insensitive_suffix(prop, "-animation-name"))
 }
 
 pub(crate) fn is_animation_property(prop: &str) -> bool {
-    let prop = prop.trim().to_ascii_lowercase();
-    prop == "animation" || (prop.starts_with('-') && prop.ends_with("-animation"))
+    let prop = prop.trim();
+    prop.eq_ignore_ascii_case("animation")
+        || (prop.starts_with('-') && has_ascii_case_insensitive_suffix(prop, "-animation"))
+}
+
+fn has_ascii_case_insensitive_suffix(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
 pub(crate) fn rewrite_animation_name_value(
     value: &str,
     keyframes: &BTreeMap<String, String>,
 ) -> String {
-    value
-        .split(',')
-        .map(|part| {
-            let trimmed = part.trim();
-            lookup_keyframe_name(trimmed, keyframes)
-                .cloned()
-                .unwrap_or_else(|| trimmed.to_string())
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut output = String::new();
+    for (index, part) in value.split(',').enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let trimmed = part.trim();
+        output.push_str(lookup_keyframe_name(trimmed, keyframes).map_or(trimmed, String::as_str));
+    }
+    output
 }
 
-pub(crate) fn rewrite_animation_value(
-    value: &str,
-    keyframes: &BTreeMap<String, String>,
-) -> String {
-    value
-        .split(',')
-        .map(|part| {
-            let trimmed = part.trim();
-            let mut values = trimmed.split_whitespace().collect::<Vec<_>>();
-            let Some((index, rewritten)) = values
-                .iter()
-                .enumerate()
-                .find_map(|(index, value)| {
-                    lookup_keyframe_name(value, keyframes).map(|rewritten| (index, rewritten))
-                })
-            else {
-                return part.to_string();
-            };
-            values[index] = rewritten.as_str();
-            values.join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+pub(crate) fn rewrite_animation_value(value: &str, keyframes: &BTreeMap<String, String>) -> String {
+    let mut output = String::new();
+    for (part_index, part) in value.split(',').enumerate() {
+        if part_index > 0 {
+            output.push(',');
+        }
+        let trimmed = part.trim();
+        let replacement = trimmed
+            .split_whitespace()
+            .enumerate()
+            .find_map(|(index, value)| {
+                lookup_keyframe_name(value, keyframes).map(|rewritten| (index, rewritten.as_str()))
+            });
+        let Some((replacement_index, replacement)) = replacement else {
+            output.push_str(part);
+            continue;
+        };
+        for (index, value) in trimmed.split_whitespace().enumerate() {
+            if index > 0 {
+                output.push(' ');
+            }
+            if index == replacement_index {
+                output.push_str(replacement);
+            } else {
+                output.push_str(value);
+            }
+        }
+    }
+    output
 }
