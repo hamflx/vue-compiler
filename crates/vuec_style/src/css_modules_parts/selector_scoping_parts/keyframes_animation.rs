@@ -6,8 +6,8 @@ pub(crate) enum CssScannerState {
     BlockComment,
 }
 
-pub(crate) fn collect_scoped_keyframes(source: &str, short_id: &str) -> Vec<(String, String)> {
-    let mut keyframes = Vec::new();
+pub(crate) fn collect_scoped_keyframes(source: &str, short_id: &str) -> BTreeMap<String, String> {
+    let mut keyframes = BTreeMap::new();
     collect_scoped_keyframes_in(source, short_id, &mut keyframes);
     keyframes
 }
@@ -15,7 +15,7 @@ pub(crate) fn collect_scoped_keyframes(source: &str, short_id: &str) -> Vec<(Str
 pub(crate) fn collect_scoped_keyframes_in(
     source: &str,
     short_id: &str,
-    keyframes: &mut Vec<(String, String)>,
+    keyframes: &mut BTreeMap<String, String>,
 ) {
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -42,10 +42,10 @@ pub(crate) fn collect_scoped_keyframes_in(
         };
         let prelude = source[cursor..delimiter].trim();
         if let Some((name, params)) = parse_at_rule(prelude) {
-            if is_keyframes_name(name) && !params.ends_with(&format!("-{short_id}")) {
-                let renamed = format!("{params}-{short_id}");
-                if !keyframes.iter().any(|(raw, _)| raw == params) {
-                    keyframes.push((params.to_string(), renamed));
+            if is_keyframes_name(name) && !scoped_keyframe_name_has_suffix(params, short_id) {
+                if !keyframes.contains_key(params) {
+                    let renamed = format!("{params}-{short_id}");
+                    keyframes.insert(params.to_string(), renamed);
                 }
             } else {
                 collect_scoped_keyframes_in(&source[delimiter + 1..close], short_id, keyframes);
@@ -57,7 +57,15 @@ pub(crate) fn collect_scoped_keyframes_in(
     }
 }
 
-pub(crate) fn rewrite_at_rule_prelude(prelude: &str, keyframes: &[(String, String)]) -> String {
+pub(crate) fn scoped_keyframe_name_has_suffix(name: &str, short_id: &str) -> bool {
+    name.strip_suffix(short_id)
+        .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+pub(crate) fn rewrite_at_rule_prelude(
+    prelude: &str,
+    keyframes: &BTreeMap<String, String>,
+) -> String {
     let Some((name, params)) = parse_at_rule(prelude) else {
         return prelude.to_string();
     };
@@ -92,16 +100,14 @@ pub(crate) fn is_keyframes_name(name: &str) -> bool {
 
 pub(crate) fn lookup_keyframe_name<'a>(
     name: &str,
-    keyframes: &'a [(String, String)],
+    keyframes: &'a BTreeMap<String, String>,
 ) -> Option<&'a String> {
-    keyframes
-        .iter()
-        .find_map(|(raw, rewritten)| (raw == name).then_some(rewritten))
+    keyframes.get(name)
 }
 
 pub(crate) fn rewrite_animation_declarations(
     source: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
 ) -> String {
     if keyframes.is_empty() {
         return source.to_string();
@@ -186,7 +192,10 @@ pub(crate) fn top_level_semicolons(source: &str) -> Vec<usize> {
     semicolons
 }
 
-pub(crate) fn rewrite_declaration_segment(segment: &str, keyframes: &[(String, String)]) -> String {
+pub(crate) fn rewrite_declaration_segment(
+    segment: &str,
+    keyframes: &BTreeMap<String, String>,
+) -> String {
     let Some(colon) = find_top_level_colon(segment) else {
         return segment.to_string();
     };
@@ -283,7 +292,10 @@ pub(crate) fn is_animation_property(prop: &str) -> bool {
     prop == "animation" || (prop.starts_with('-') && prop.ends_with("-animation"))
 }
 
-pub(crate) fn rewrite_animation_name_value(value: &str, keyframes: &[(String, String)]) -> String {
+pub(crate) fn rewrite_animation_name_value(
+    value: &str,
+    keyframes: &BTreeMap<String, String>,
+) -> String {
     value
         .split(',')
         .map(|part| {
@@ -296,22 +308,25 @@ pub(crate) fn rewrite_animation_name_value(value: &str, keyframes: &[(String, St
         .join(",")
 }
 
-pub(crate) fn rewrite_animation_value(value: &str, keyframes: &[(String, String)]) -> String {
+pub(crate) fn rewrite_animation_value(
+    value: &str,
+    keyframes: &BTreeMap<String, String>,
+) -> String {
     value
         .split(',')
         .map(|part| {
             let trimmed = part.trim();
             let mut values = trimmed.split_whitespace().collect::<Vec<_>>();
-            let Some(index) = values
+            let Some((index, rewritten)) = values
                 .iter()
-                .position(|value| lookup_keyframe_name(value, keyframes).is_some())
+                .enumerate()
+                .find_map(|(index, value)| {
+                    lookup_keyframe_name(value, keyframes).map(|rewritten| (index, rewritten))
+                })
             else {
                 return part.to_string();
             };
-            let rewritten = lookup_keyframe_name(values[index], keyframes)
-                .expect("checked above")
-                .as_str();
-            values[index] = rewritten;
+            values[index] = rewritten.as_str();
             values.join(" ")
         })
         .collect::<Vec<_>>()

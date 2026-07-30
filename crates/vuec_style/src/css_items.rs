@@ -15,7 +15,7 @@ pub(crate) fn css_block_body_has_trailing_whitespace(body: &str) -> bool {
 pub(crate) fn rewrite_css_items(
     source: &str,
     scope_id: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
     context: CssBlockContext,
 ) -> String {
     let mut output = String::new();
@@ -249,7 +249,7 @@ pub(crate) fn collect_scoped_selector_deprecation_warnings(
 pub(crate) fn rewrite_deep_passthrough_body(
     body: &str,
     scope_id: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
 ) -> String {
     let rewritten = rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep);
     normalize_deep_passthrough_parent_anchor_blocks(&rewritten)
@@ -258,7 +258,7 @@ pub(crate) fn rewrite_deep_passthrough_body(
 pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
     body: &str,
     scope_id: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
 ) -> String {
     let mut declarations = String::new();
     let mut nested_blocks = Vec::new();
@@ -572,7 +572,7 @@ pub(crate) fn css_block_has_direct_nested_rule(body: &str) -> bool {
 pub(crate) fn rewrite_nested_scoped_rule_body(
     body: &str,
     scope_id: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
     wrap_declarations: bool,
 ) -> String {
     let mut declarations = String::new();
@@ -743,7 +743,7 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
 pub(crate) fn flush_scoped_nested_declarations(
     output: &mut String,
     declarations: &mut String,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
     separate_before_next_block: bool,
 ) {
     if declarations.is_empty() {
@@ -759,14 +759,14 @@ pub(crate) fn flush_scoped_nested_declarations(
 
 pub(crate) fn rewrite_scoped_declaration_body(
     body: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
 ) -> String {
     rewrite_animation_declarations(body, keyframes)
 }
 
 pub(crate) fn format_scoped_nested_declarations(
     declarations: &str,
-    keyframes: &[(String, String)],
+    keyframes: &BTreeMap<String, String>,
     trim_last_semicolon: bool,
 ) -> Option<String> {
     let mut declarations = rewrite_scoped_declaration_body(declarations, keyframes);

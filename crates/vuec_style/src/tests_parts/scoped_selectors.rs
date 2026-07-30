@@ -1052,3 +1052,40 @@
             Some(Span::new(FileId(0), 17, 18))
         );
     }
+
+    #[test]
+    fn scoped_keyframes_use_indexed_definition_and_reference_lookups() {
+        let mut source = String::new();
+        for index in 0..4_096 {
+            source.push_str(&format!("@keyframes k{index} {{}}"));
+        }
+        source.push_str(".a { animation: k0 1s; animation-name: k4095; }");
+
+        let keyframes = collect_scoped_keyframes(&source, "test");
+        assert_eq!(keyframes.len(), 4_096);
+        assert_eq!(lookup_keyframe_name("k0", &keyframes).unwrap(), "k0-test");
+        assert_eq!(
+            lookup_keyframe_name("k4095", &keyframes).unwrap(),
+            "k4095-test"
+        );
+
+        let output = rewrite_scoped_selectors(&source, "data-v-test");
+        assert!(output.contains("@keyframes k0-test {}"));
+        assert!(output.contains("@keyframes k4095-test {}"));
+        assert!(output.contains("animation: k0-test 1s;"));
+        assert!(output.contains("animation-name: k4095-test;"));
+    }
+
+    #[test]
+    fn scoped_keyframe_suffix_detection_preserves_existing_names() {
+        assert!(scoped_keyframe_name_has_suffix("fade-test", "test"));
+        assert!(scoped_keyframe_name_has_suffix("fade-", ""));
+        assert!(!scoped_keyframe_name_has_suffix("fadecontest", "test"));
+
+        let keyframes = collect_scoped_keyframes(
+            "@keyframes fade-test {} @keyframes fade {} @-webkit-keyframes fade {}",
+            "test",
+        );
+        assert_eq!(keyframes.len(), 1);
+        assert_eq!(keyframes.get("fade").unwrap(), "fade-test");
+    }
