@@ -53,7 +53,7 @@ pub struct StylePreprocessOptions {
     /// options are evaluated by the JavaScript API boundary before reaching Rust.
     #[serde(default, rename = "additionalData", alias = "additional_data")]
     pub additional_data: Option<String>,
-    /// Optional load paths used by Sass imports.
+    /// Optional load paths used to resolve preprocessor imports.
     #[serde(
         default,
         rename = "loadPaths",

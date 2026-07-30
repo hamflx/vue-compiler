@@ -9,6 +9,10 @@ pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_DEPTH: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILES: usize = 512;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_LOAD_PATHS: usize = 256;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_TOTAL_LOAD_PATH_BYTES: usize = 1024 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_PATH_BYTES: usize = 32 * 1024;
+pub(crate) const STYLE_PREPROCESS_MAX_IMPORT_PATH_PROBES: usize = 65_536;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_DEPTH: usize = 64;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_STEPS: usize = 262_144;
 pub(crate) const STYLE_PREPROCESS_MAX_VARIABLE_VALUE_BYTES: usize = 1024 * 1024;
@@ -265,7 +269,7 @@ pub(crate) fn preprocess_less(
     source: &str,
     options: &StyleCompileOptions,
 ) -> Result<PreprocessResult, StylePreprocessError> {
-    let mut context = StyleImportContext::new(options);
+    let mut context = StyleImportContext::new(options)?;
     let base_dir = options
         .filename
         .as_deref()
@@ -389,6 +393,10 @@ pub(crate) struct StyleImportLimits {
     pub(crate) max_files: usize,
     pub(crate) max_file_bytes: usize,
     pub(crate) max_total_bytes: usize,
+    pub(crate) max_load_paths: usize,
+    pub(crate) max_total_load_path_bytes: usize,
+    pub(crate) max_path_bytes: usize,
+    pub(crate) max_path_probes: usize,
 }
 
 impl Default for StyleImportLimits {
@@ -398,6 +406,10 @@ impl Default for StyleImportLimits {
             max_files: STYLE_PREPROCESS_MAX_IMPORT_FILES,
             max_file_bytes: STYLE_PREPROCESS_MAX_IMPORT_FILE_BYTES,
             max_total_bytes: STYLE_PREPROCESS_MAX_IMPORT_BYTES,
+            max_load_paths: STYLE_PREPROCESS_MAX_IMPORT_LOAD_PATHS,
+            max_total_load_path_bytes: STYLE_PREPROCESS_MAX_IMPORT_TOTAL_LOAD_PATH_BYTES,
+            max_path_bytes: STYLE_PREPROCESS_MAX_IMPORT_PATH_BYTES,
+            max_path_probes: STYLE_PREPROCESS_MAX_IMPORT_PATH_PROBES,
         }
     }
 }
@@ -409,24 +421,73 @@ pub(crate) struct StyleImportContext {
     pub(crate) active_paths: Vec<PathBuf>,
     pub(crate) imported_files: usize,
     pub(crate) imported_bytes: usize,
+    pub(crate) path_probes: usize,
     pub(crate) limits: StyleImportLimits,
 }
 
 impl StyleImportContext {
-    pub(crate) fn new(options: &StyleCompileOptions) -> Self {
-        Self {
-            load_paths: options
-                .preprocess_options
-                .load_paths
-                .iter()
-                .map(PathBuf::from)
-                .collect(),
+    pub(crate) fn new(options: &StyleCompileOptions) -> Result<Self, StylePreprocessError> {
+        Self::with_limits(options, StyleImportLimits::default())
+    }
+
+    pub(crate) fn with_limits(
+        options: &StyleCompileOptions,
+        limits: StyleImportLimits,
+    ) -> Result<Self, StylePreprocessError> {
+        let configured_paths = &options.preprocess_options.load_paths;
+        if configured_paths.len() > limits.max_load_paths {
+            return Err(StylePreprocessError::import_limit(
+                format!(
+                    "style preprocessor load paths exceed the maximum count of {}",
+                    limits.max_load_paths
+                ),
+                None,
+            ));
+        }
+        let mut load_path_bytes = 0usize;
+        for path in configured_paths {
+            let path_bytes = Path::new(path).as_os_str().as_encoded_bytes().len();
+            validate_style_import_path_bytes(
+                path_bytes,
+                limits.max_path_bytes,
+                format_args!("style preprocessor load path"),
+                None,
+            )?;
+            load_path_bytes = load_path_bytes.checked_add(path_bytes).ok_or_else(|| {
+                StylePreprocessError::import_limit(
+                    "style preprocessor load path size overflowed",
+                    None,
+                )
+            })?;
+            if load_path_bytes > limits.max_total_load_path_bytes {
+                return Err(StylePreprocessError::import_limit(
+                    format!(
+                        "style preprocessor load paths exceed the maximum total of {} bytes",
+                        limits.max_total_load_path_bytes
+                    ),
+                    None,
+                ));
+            }
+        }
+        let mut load_paths = Vec::new();
+        load_paths
+            .try_reserve_exact(configured_paths.len())
+            .map_err(|_| {
+                StylePreprocessError::import_limit(
+                    "style preprocessor could not reserve load path capacity",
+                    None,
+                )
+            })?;
+        load_paths.extend(configured_paths.iter().map(PathBuf::from));
+        Ok(Self {
+            load_paths,
             dependencies: BTreeSet::new(),
             active_paths: Vec::new(),
             imported_files: 0,
             imported_bytes: 0,
-            limits: StyleImportLimits::default(),
-        }
+            path_probes: 0,
+            limits,
+        })
     }
 
     pub(crate) fn dependencies(self) -> Vec<String> {
@@ -439,6 +500,24 @@ impl StyleImportContext {
 
     pub(crate) fn is_active(&self, path: &Path) -> bool {
         self.active_paths.iter().any(|active| active == path)
+    }
+
+    fn claim_path_probe(
+        &mut self,
+        preprocessor: &str,
+        span: Option<(usize, usize)>,
+    ) -> Result<(), StylePreprocessError> {
+        if self.path_probes >= self.limits.max_path_probes {
+            return Err(StylePreprocessError::import_limit(
+                format!(
+                    "{preprocessor} import resolution exceeds the maximum of {} path probes",
+                    self.limits.max_path_probes
+                ),
+                span,
+            ));
+        }
+        self.path_probes += 1;
+        Ok(())
     }
 }
 
@@ -505,7 +584,7 @@ fn inline_less_imports_into(
 
         let leading_whitespace_len = prelude.len() - prelude.trim_start().len();
         output.push_str(&prelude[..leading_whitespace_len]);
-        let Some(resolved) = resolve_less_import(&import, base_dir, context) else {
+        let Some(resolved) = resolve_less_import(&import, base_dir, context, import_span)? else {
             return Err(StylePreprocessError::import_resolve(
                 format!("Less import could not be resolved: {import}"),
                 import_span,
@@ -670,29 +749,114 @@ pub(crate) fn less_at_keyword_boundary(source: &str, index: usize) -> bool {
         .is_none_or(|ch| ch.is_whitespace() || ch == '(' || ch == '"' || ch == '\'')
 }
 
+fn resolve_style_import(
+    import: &str,
+    base_dir: Option<&Path>,
+    context: &mut StyleImportContext,
+    span: Option<(usize, usize)>,
+    preprocessor: &str,
+    candidates: fn(&Path) -> Vec<PathBuf>,
+) -> Result<Option<PathBuf>, StylePreprocessError> {
+    let import_path = Path::new(import);
+    validate_style_import_path_bytes(
+        import_path.as_os_str().as_encoded_bytes().len(),
+        context.limits.max_path_bytes,
+        format_args!("{preprocessor} import path"),
+        span,
+    )?;
+    if import_path.is_absolute() {
+        validate_style_import_path(import_path, context, preprocessor, span)?;
+        return resolve_style_import_from_base(
+            import_path.to_path_buf(),
+            context,
+            span,
+            preprocessor,
+            candidates,
+        );
+    }
+
+    if let Some(base_dir) = base_dir {
+        validate_style_import_path(base_dir, context, preprocessor, span)?;
+        let base = base_dir.join(import_path);
+        validate_style_import_path(&base, context, preprocessor, span)?;
+        if let Some(resolved) =
+            resolve_style_import_from_base(base, context, span, preprocessor, candidates)?
+        {
+            return Ok(Some(resolved));
+        }
+    }
+    for index in 0..context.load_paths.len() {
+        let base = context.load_paths[index].join(import_path);
+        validate_style_import_path(&base, context, preprocessor, span)?;
+        if let Some(resolved) =
+            resolve_style_import_from_base(base, context, span, preprocessor, candidates)?
+        {
+            return Ok(Some(resolved));
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_style_import_from_base(
+    base: PathBuf,
+    context: &mut StyleImportContext,
+    span: Option<(usize, usize)>,
+    preprocessor: &str,
+    candidates: fn(&Path) -> Vec<PathBuf>,
+) -> Result<Option<PathBuf>, StylePreprocessError> {
+    for candidate in candidates(&base) {
+        validate_style_import_path(&candidate, context, preprocessor, span)?;
+        context.claim_path_probe(preprocessor, span)?;
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_style_import_path(
+    path: &Path,
+    context: &StyleImportContext,
+    preprocessor: &str,
+    span: Option<(usize, usize)>,
+) -> Result<(), StylePreprocessError> {
+    validate_style_import_path_bytes(
+        path.as_os_str().as_encoded_bytes().len(),
+        context.limits.max_path_bytes,
+        format_args!("{preprocessor} import resolution path"),
+        span,
+    )
+}
+
+fn validate_style_import_path_bytes(
+    bytes: usize,
+    max_bytes: usize,
+    description: fmt::Arguments<'_>,
+    span: Option<(usize, usize)>,
+) -> Result<(), StylePreprocessError> {
+    if bytes > max_bytes {
+        return Err(StylePreprocessError::import_limit(
+            format!("{description} exceeds the maximum of {max_bytes} bytes"),
+            span,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_less_import(
     import: &str,
     base_dir: Option<&Path>,
-    context: &StyleImportContext,
-) -> Option<PathBuf> {
-    let import_path = Path::new(import);
-    let mut bases = Vec::new();
-    if import_path.is_absolute() {
-        bases.push(PathBuf::from(import_path));
-    } else {
-        if let Some(base_dir) = base_dir {
-            bases.push(base_dir.join(import_path));
-        }
-        bases.extend(context.load_paths.iter().map(|base| base.join(import_path)));
-    }
-    for base in bases {
-        for candidate in less_import_candidates(&base) {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    context: &mut StyleImportContext,
+    span: Option<(usize, usize)>,
+) -> Result<Option<PathBuf>, StylePreprocessError> {
+    resolve_style_import(
+        import,
+        base_dir,
+        context,
+        span,
+        "Less",
+        less_import_candidates,
+    )
 }
 
 pub(crate) fn less_import_candidates(base: &Path) -> Vec<PathBuf> {
@@ -1649,7 +1813,7 @@ pub(crate) fn preprocess_stylus(
     source: &str,
     options: &StyleCompileOptions,
 ) -> Result<PreprocessResult, StylePreprocessError> {
-    let mut context = StyleImportContext::new(options);
+    let mut context = StyleImportContext::new(options)?;
     let base_dir = options
         .filename
         .as_deref()
@@ -1883,7 +2047,7 @@ fn inline_stylus_imports_into(
             line_start += line.len();
             continue;
         }
-        let Some(resolved) = resolve_stylus_import(&import, base_dir, context) else {
+        let Some(resolved) = resolve_stylus_import(&import, base_dir, context, import_span)? else {
             return Err(StylePreprocessError::import_resolve(
                 format!("Stylus import could not be resolved: {import}"),
                 import_span,
@@ -1928,26 +2092,17 @@ pub(crate) fn parse_stylus_import_statement(line: &str) -> Option<String> {
 pub(crate) fn resolve_stylus_import(
     import: &str,
     base_dir: Option<&Path>,
-    context: &StyleImportContext,
-) -> Option<PathBuf> {
-    let import_path = Path::new(import);
-    let mut bases = Vec::new();
-    if import_path.is_absolute() {
-        bases.push(PathBuf::from(import_path));
-    } else {
-        if let Some(base_dir) = base_dir {
-            bases.push(base_dir.join(import_path));
-        }
-        bases.extend(context.load_paths.iter().map(|base| base.join(import_path)));
-    }
-    for base in bases {
-        for candidate in stylus_import_candidates(&base) {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    context: &mut StyleImportContext,
+    span: Option<(usize, usize)>,
+) -> Result<Option<PathBuf>, StylePreprocessError> {
+    resolve_style_import(
+        import,
+        base_dir,
+        context,
+        span,
+        "Stylus",
+        stylus_import_candidates,
+    )
 }
 
 pub(crate) fn stylus_import_candidates(base: &Path) -> Vec<PathBuf> {

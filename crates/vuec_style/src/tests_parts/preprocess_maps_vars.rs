@@ -1108,14 +1108,152 @@ breakpoint = 700px
     }
 
     #[test]
+    fn lightweight_preprocessors_bound_load_paths_before_copying() {
+        fn options(load_paths: &[&str]) -> StyleCompileOptions {
+            StyleCompileOptions {
+                preprocess_options: StylePreprocessOptions {
+                    load_paths: load_paths.iter().map(|path| (*path).to_string()).collect(),
+                    ..StylePreprocessOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            }
+        }
+
+        let exact_limits = StyleImportLimits {
+            max_load_paths: 2,
+            max_total_load_path_bytes: 4,
+            max_path_bytes: 2,
+            ..StyleImportLimits::default()
+        };
+        let exact = StyleImportContext::with_limits(&options(&["aa", "bb"]), exact_limits)
+            .expect("exact load path budgets");
+        assert_eq!(exact.load_paths.len(), 2);
+
+        let count_error = StyleImportContext::with_limits(
+            &options(&["a", "b", "c"]),
+            exact_limits,
+        )
+        .expect_err("load paths beyond count budget must fail");
+        assert_eq!(count_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+
+        let path_error = StyleImportContext::with_limits(&options(&["abc"]), exact_limits)
+            .expect_err("load path beyond per-path byte budget must fail");
+        assert_eq!(path_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+
+        let total_error = StyleImportContext::with_limits(
+            &options(&["aa", "b"]),
+            StyleImportLimits {
+                max_total_load_path_bytes: 2,
+                ..exact_limits
+            },
+        )
+        .expect_err("load paths beyond total byte budget must fail");
+        assert_eq!(total_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+
+        let excessive_paths = vec![".".to_string(); STYLE_PREPROCESS_MAX_IMPORT_LOAD_PATHS + 1];
+        for language in ["less", "styl"] {
+            let result = compile_style(
+                ".root { color: red; }",
+                StyleCompileOptions {
+                    preprocess_lang: Some(language.into()),
+                    preprocess_options: StylePreprocessOptions {
+                        load_paths: excessive_paths.clone(),
+                        ..StylePreprocessOptions::default()
+                    },
+                    ..StyleCompileOptions::default()
+                },
+            );
+            assert_eq!(result.errors.len(), 1, "{language}");
+            assert_eq!(result.diagnostics.len(), 1, "{language}");
+            assert_eq!(
+                result.diagnostics[0].code,
+                "VUEC_STYLE_IMPORT_LIMIT",
+                "{language}"
+            );
+        }
+    }
+
+    #[test]
+    fn lightweight_preprocessors_bound_import_resolution_paths_and_probes() {
+        fn context(max_path_probes: usize, max_path_bytes: usize) -> StyleImportContext {
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default())
+                .expect("default import context");
+            context.limits.max_path_probes = max_path_probes;
+            context.limits.max_path_bytes = max_path_bytes;
+            context
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path_bytes = dir.path().as_os_str().as_encoded_bytes().len() + 64;
+
+        let mut exact_less = context(2, path_bytes);
+        assert_eq!(
+            resolve_less_import("missing", Some(dir.path()), &mut exact_less, None)
+                .expect("exact Less path probe budget"),
+            None
+        );
+        assert_eq!(exact_less.path_probes, 2);
+        let less_error =
+            resolve_less_import("another", Some(dir.path()), &mut exact_less, Some((2, 5)))
+                .expect_err("Less path probe beyond cumulative budget must fail");
+        assert_eq!(less_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(less_error.span, Some((2, 5)));
+        assert_eq!(exact_less.path_probes, 2);
+
+        let mut exact_stylus = context(3, path_bytes);
+        assert_eq!(
+            resolve_stylus_import("missing", Some(dir.path()), &mut exact_stylus, None)
+                .expect("exact Stylus path probe budget"),
+            None
+        );
+        assert_eq!(exact_stylus.path_probes, 3);
+
+        std::fs::write(dir.path().join("tokens.less"), "").expect("write tokens.less");
+        let mut first_hit = context(1, path_bytes);
+        assert_eq!(
+            resolve_less_import("tokens", Some(dir.path()), &mut first_hit, None)
+                .expect("first candidate hit"),
+            Some(dir.path().join("tokens.less"))
+        );
+        assert_eq!(first_hit.path_probes, 1);
+
+        let mut long_path = context(1, 3);
+        let path_error = resolve_less_import("abcd", None, &mut long_path, Some((0, 4)))
+            .expect_err("long import path must fail before probing");
+        assert_eq!(path_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(path_error.span, Some((0, 4)));
+        assert_eq!(long_path.path_probes, 0);
+
+        std::fs::write(
+            dir.path().join("nested.less"),
+            "@import \"./missing.less\";",
+        )
+        .expect("write nested.less");
+        let mut nested = context(1, path_bytes);
+        let nested_error = inline_less_imports(
+            "@import \"./nested.less\";",
+            Some(dir.path()),
+            &mut nested,
+            true,
+        )
+        .expect_err("nested import beyond path probe budget must fail");
+        assert_eq!(nested_error.code, "VUEC_STYLE_IMPORT_LIMIT");
+        assert_eq!(nested.path_probes, 1);
+        assert_eq!(nested.imported_files, 1);
+        assert!(nested.active_paths.is_empty());
+    }
+
+    #[test]
     fn lightweight_preprocessors_bound_import_depth_and_restore_active_paths() {
         fn context_with_depth(max_depth: usize) -> StyleImportContext {
-            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default())
+                .expect("default import context");
             context.limits = StyleImportLimits {
                 max_depth,
                 max_files: 8,
                 max_file_bytes: 1_024,
                 max_total_bytes: 8_192,
+                ..StyleImportLimits::default()
             };
             context
         }
@@ -1208,12 +1346,14 @@ breakpoint = 700px
     #[test]
     fn lightweight_preprocessors_bound_import_count_without_charging_cycles() {
         fn context_with_file_limit(max_files: usize) -> StyleImportContext {
-            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default())
+                .expect("default import context");
             context.limits = StyleImportLimits {
                 max_depth: 4,
                 max_files,
                 max_file_bytes: 1_024,
                 max_total_bytes: 1_024,
+                ..StyleImportLimits::default()
             };
             context
         }
@@ -1286,12 +1426,14 @@ breakpoint = 700px
             max_file_bytes: usize,
             max_total_bytes: usize,
         ) -> StyleImportContext {
-            let mut context = StyleImportContext::new(&StyleCompileOptions::default());
+            let mut context = StyleImportContext::new(&StyleCompileOptions::default())
+                .expect("default import context");
             context.limits = StyleImportLimits {
                 max_depth: 4,
                 max_files: 4,
                 max_file_bytes,
                 max_total_bytes,
+                ..StyleImportLimits::default()
             };
             context
         }
