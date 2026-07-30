@@ -22,6 +22,7 @@ pub(crate) const CSS_MODULES_MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_VALUE_COMPARISONS: usize = 1_048_576;
 pub(crate) const CSS_MODULES_MAX_SYNTAX_DEPTH: usize = 128;
 pub(crate) const CSS_MODULES_MAX_REWRITE_WORK_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const CSS_MODULES_MAX_STRUCTURAL_SCAN_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_PATTERN_BYTES: usize = 32 * 1024;
 pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_BYTES: usize = 1024 * 1024;
 pub(crate) const CSS_MODULES_MAX_SCOPED_NAME_HASH_INPUT_BYTES: usize = 1024 * 1024;
@@ -49,6 +50,7 @@ pub(crate) struct CssModulesImportLimits {
     pub(crate) max_value_comparisons: usize,
     pub(crate) max_syntax_depth: usize,
     pub(crate) max_rewrite_work_bytes: usize,
+    pub(crate) max_structural_scan_bytes: usize,
     pub(crate) max_scoped_name_pattern_bytes: usize,
     pub(crate) max_scoped_name_bytes: usize,
     pub(crate) max_scoped_name_hash_input_bytes: usize,
@@ -78,6 +80,7 @@ impl Default for CssModulesImportLimits {
             max_value_comparisons: CSS_MODULES_MAX_VALUE_COMPARISONS,
             max_syntax_depth: CSS_MODULES_MAX_SYNTAX_DEPTH,
             max_rewrite_work_bytes: CSS_MODULES_MAX_REWRITE_WORK_BYTES,
+            max_structural_scan_bytes: CSS_MODULES_MAX_STRUCTURAL_SCAN_BYTES,
             max_scoped_name_pattern_bytes: CSS_MODULES_MAX_SCOPED_NAME_PATTERN_BYTES,
             max_scoped_name_bytes: CSS_MODULES_MAX_SCOPED_NAME_BYTES,
             max_scoped_name_hash_input_bytes: CSS_MODULES_MAX_SCOPED_NAME_HASH_INPUT_BYTES,
@@ -108,6 +111,7 @@ pub(crate) struct CssModulesImportState {
     pub(crate) value_comparisons: usize,
     pub(crate) active_syntax_depth: usize,
     pub(crate) rewrite_work_bytes: usize,
+    pub(crate) structural_scan_bytes: usize,
     pub(crate) default_name_work_bytes: usize,
     pub(crate) error: Option<CssModulesImportError>,
 }
@@ -130,6 +134,7 @@ impl CssModulesImportState {
             value_comparisons: 0,
             active_syntax_depth: 0,
             rewrite_work_bytes: 0,
+            structural_scan_bytes: 0,
             default_name_work_bytes: 0,
             error: None,
         }
@@ -538,6 +543,114 @@ impl CssModulesImportState {
         true
     }
 
+    pub(crate) fn validate_module_structure(&mut self, source: &str) -> bool {
+        if !self.claim_structural_scan_bytes(source.len()) {
+            return false;
+        }
+        let mut opens = Vec::new();
+        let mut state = CssScannerState::Normal;
+        let mut index = 0usize;
+        while index < source.len() {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            match state {
+                CssScannerState::Normal => {
+                    if source[index..].starts_with("/*") {
+                        state = CssScannerState::BlockComment;
+                        index += 2;
+                        continue;
+                    }
+                    match ch {
+                        '\'' => state = CssScannerState::SingleQuote,
+                        '"' => state = CssScannerState::DoubleQuote,
+                        '{' => {
+                            if opens.len() >= self.limits.max_syntax_depth {
+                                self.fail(format!(
+                                    "CSS Modules syntax exceeds the maximum depth of {}",
+                                    self.limits.max_syntax_depth
+                                ));
+                                return false;
+                            }
+                            if opens.try_reserve(1).is_err() {
+                                self.fail("CSS Modules syntax stack could not reserve capacity within the configured limit");
+                                return false;
+                            }
+                            opens.push(index);
+                        }
+                        '}' => {
+                            if let Some(open) = opens.pop() {
+                                let Some(span_bytes) = index
+                                    .checked_sub(open)
+                                    .and_then(|bytes| bytes.checked_add(1))
+                                else {
+                                    self.fail("CSS Modules structural scan size overflowed");
+                                    return false;
+                                };
+                                if !self.claim_structural_scan_bytes(span_bytes) {
+                                    return false;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                CssScannerState::SingleQuote => {
+                    if ch == '\\' {
+                        index += ch.len_utf8();
+                        if index < source.len() {
+                            index += source[index..].chars().next().map_or(0, char::len_utf8);
+                        }
+                        continue;
+                    }
+                    if ch == '\'' {
+                        state = CssScannerState::Normal;
+                    }
+                }
+                CssScannerState::DoubleQuote => {
+                    if ch == '\\' {
+                        index += ch.len_utf8();
+                        if index < source.len() {
+                            index += source[index..].chars().next().map_or(0, char::len_utf8);
+                        }
+                        continue;
+                    }
+                    if ch == '"' {
+                        state = CssScannerState::Normal;
+                    }
+                }
+                CssScannerState::BlockComment => {
+                    if source[index..].starts_with("*/") {
+                        state = CssScannerState::Normal;
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+            index += ch.len_utf8();
+        }
+        true
+    }
+
+    pub(crate) fn claim_structural_scan_bytes(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(structural_scan_bytes) = self.structural_scan_bytes.checked_add(bytes) else {
+            self.fail("CSS Modules structural scan size overflowed");
+            return false;
+        };
+        if structural_scan_bytes > self.limits.max_structural_scan_bytes {
+            self.fail(format!(
+                "CSS Modules structural scans exceed the maximum total of {} bytes",
+                self.limits.max_structural_scan_bytes
+            ));
+            return false;
+        }
+        self.structural_scan_bytes = structural_scan_bytes;
+        true
+    }
+
     pub(crate) fn claim_default_name_work_bytes(&mut self, bytes: usize) -> bool {
         if self.error.is_some() {
             return false;
@@ -665,6 +778,9 @@ pub(crate) fn compile_css_modules_file(
     );
     let source = prepare_css_module_values(source, &mut context);
     if context.load_state.error.is_some() {
+        return aborted_css_modules_file_result();
+    }
+    if !context.load_state.validate_module_structure(&source) {
         return aborted_css_modules_file_result();
     }
     let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root, false);

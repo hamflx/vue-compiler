@@ -1042,6 +1042,7 @@
             max_value_comparisons: 4096,
             max_syntax_depth: 16,
             max_rewrite_work_bytes: 16 * 1024,
+            max_structural_scan_bytes: 16 * 1024,
             max_scoped_name_pattern_bytes: 4096,
             max_scoped_name_bytes: 4096,
             max_scoped_name_hash_input_bytes: 4096,
@@ -1332,6 +1333,101 @@
         );
         assert_eq!(zero.diagnostics.len(), 1);
         assert_eq!(zero.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+    }
+
+    #[test]
+    fn css_modules_structural_scan_has_exact_and_shared_boundaries() {
+        let source = "a{b{}}";
+        let exact_limits = CssModulesImportLimits {
+            max_syntax_depth: 2,
+            max_structural_scan_bytes: 13,
+            ..css_modules_test_import_limits()
+        };
+        let mut exact = CssModulesImportState::new(exact_limits);
+        assert!(exact.validate_module_structure(source));
+        assert_eq!(exact.structural_scan_bytes, 13);
+
+        let mut one_short = CssModulesImportState::new(CssModulesImportLimits {
+            max_structural_scan_bytes: 12,
+            ..exact_limits
+        });
+        assert!(!one_short.validate_module_structure(source));
+        assert_eq!(one_short.structural_scan_bytes, 8);
+        assert!(one_short.error.is_some());
+
+        let mut depth_short = CssModulesImportState::new(CssModulesImportLimits {
+            max_syntax_depth: 1,
+            ..exact_limits
+        });
+        assert!(!depth_short.validate_module_structure(source));
+        assert_eq!(depth_short.structural_scan_bytes, source.len());
+        assert!(depth_short
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("maximum depth of 1")));
+
+        let mut shared = CssModulesImportState::new(CssModulesImportLimits {
+            max_syntax_depth: 1,
+            max_structural_scan_bytes: 10,
+            ..css_modules_test_import_limits()
+        });
+        assert!(shared.validate_module_structure("a{}"));
+        assert!(shared.validate_module_structure("b{}"));
+        assert_eq!(shared.structural_scan_bytes, 10);
+
+        let mut shared_short = CssModulesImportState::new(CssModulesImportLimits {
+            max_syntax_depth: 1,
+            max_structural_scan_bytes: 9,
+            ..css_modules_test_import_limits()
+        });
+        assert!(shared_short.validate_module_structure("a{}"));
+        assert!(!shared_short.validate_module_structure("b{}"));
+        assert_eq!(shared_short.structural_scan_bytes, 8);
+
+        let mut overflow = CssModulesImportState::new(CssModulesImportLimits {
+            max_structural_scan_bytes: usize::MAX,
+            ..css_modules_test_import_limits()
+        });
+        overflow.structural_scan_bytes = usize::MAX;
+        assert!(!overflow.claim_structural_scan_bytes(1));
+        assert!(overflow
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("overflowed")));
+    }
+
+    #[test]
+    fn css_modules_structural_scan_rejects_deep_large_spans_before_recursion() {
+        let depth = 4_096;
+        let source = format!("{}{}", ".a{".repeat(depth), "}".repeat(depth));
+        let options = StyleCompileOptions {
+            id: Some("test".into()),
+            filename: Some("structural.css".into()),
+            modules: true,
+            ..StyleCompileOptions::default()
+        };
+        let result = compile_css_modules_with_limits(
+            &source,
+            &source,
+            &options,
+            CssModulesImportLimits {
+                max_syntax_depth: depth,
+                max_structural_scan_bytes: source.len() * 4,
+                max_value_output_bytes: source.len() * 2,
+                max_output_bytes: source.len() * 2,
+                max_total_output_bytes: source.len() * 4,
+                max_generated_bytes: source.len() * 4,
+                ..css_modules_test_import_limits()
+            },
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_LIMIT");
+        assert!(result.diagnostics[0]
+            .message
+            .contains("structural scans"));
+        assert!(result.code.is_empty());
+        assert!(result.raw_modules.is_empty());
+        assert!(result.modules.is_empty());
     }
 
     #[test]
