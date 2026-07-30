@@ -365,10 +365,16 @@ pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
 }
 
 pub(crate) fn normalize_deep_passthrough_parent_anchor_blocks(source: &str) -> String {
+    normalize_deep_passthrough_parent_anchor_blocks_inner(source).0
+}
+
+fn normalize_deep_passthrough_parent_anchor_blocks_inner(source: &str) -> (String, usize) {
     let mut output = String::new();
     let mut state = CssScannerState::Normal;
     let mut depth = 0usize;
     let mut index = 0usize;
+    let mut cached_delimiter = None;
+    let mut delimiter_scans = 0usize;
     while index < source.len() {
         if matches!(state, CssScannerState::Normal) && source[index..].starts_with("/*") {
             let Some(end_offset) = source[index + 2..].find("*/") else {
@@ -388,10 +394,25 @@ pub(crate) fn normalize_deep_passthrough_parent_anchor_blocks(source: &str) -> S
                 '"' => state = CssScannerState::DoubleQuote,
                 '{' => depth += 1,
                 '}' => depth = depth.saturating_sub(1),
-                '&' if depth == 0 && css_top_level_selector_block_starts_at(source, index) => {
-                    trim_trailing_horizontal_whitespace(&mut output);
-                    if !output.is_empty() && !output.ends_with('\n') {
-                        output.push('\n');
+                '(' | ')' | '[' | ']' => cached_delimiter = None,
+                '&' if depth == 0 => {
+                    let delimiter = match cached_delimiter {
+                        Some(Some((delimiter, delimiter_ch))) if delimiter >= index => {
+                            Some((delimiter, delimiter_ch))
+                        }
+                        Some(None) => None,
+                        _ => {
+                            delimiter_scans += 1;
+                            let delimiter = find_next_css_delimiter(source, index);
+                            cached_delimiter = Some(delimiter);
+                            delimiter
+                        }
+                    };
+                    if matches!(delimiter, Some((_, '{'))) {
+                        trim_trailing_horizontal_whitespace(&mut output);
+                        if !output.is_empty() && !output.ends_with('\n') {
+                            output.push('\n');
+                        }
                     }
                 }
                 _ => {}
@@ -430,12 +451,16 @@ pub(crate) fn normalize_deep_passthrough_parent_anchor_blocks(source: &str) -> S
         }
         output.push(ch);
         index += ch.len_utf8();
+        if matches!(cached_delimiter, Some(Some((delimiter, _))) if delimiter < index) {
+            cached_delimiter = None;
+        }
     }
-    output
+    (output, delimiter_scans)
 }
 
-pub(crate) fn css_top_level_selector_block_starts_at(source: &str, index: usize) -> bool {
-    matches!(find_next_css_delimiter(source, index), Some((_, '{')))
+#[cfg(test)]
+pub(crate) fn deep_passthrough_parent_anchor_delimiter_scans(source: &str) -> usize {
+    normalize_deep_passthrough_parent_anchor_blocks_inner(source).1
 }
 
 pub(crate) fn trim_trailing_horizontal_whitespace(output: &mut String) {

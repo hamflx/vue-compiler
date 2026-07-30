@@ -1180,3 +1180,42 @@
         assert!(unscoped.diagnostics.is_empty());
         assert_eq!(unscoped.code, ".a {}");
     }
+
+    #[test]
+    fn deep_passthrough_reuses_delimiter_scans_for_overlapping_parent_anchors() {
+        let source = format!("{}{{ color: red; }}", "& ".repeat(8_192));
+        assert_eq!(
+            deep_passthrough_parent_anchor_delimiter_scans(&source),
+            1
+        );
+
+        let normalized = normalize_deep_passthrough_parent_anchor_blocks(&source);
+        assert_eq!(normalized.matches('&').count(), 8_192);
+        assert!(normalized.ends_with("{ color: red; }"));
+
+        let no_delimiter = "& ".repeat(8_192);
+        assert_eq!(
+            deep_passthrough_parent_anchor_delimiter_scans(&no_delimiter),
+            1
+        );
+        assert_eq!(
+            normalize_deep_passthrough_parent_anchor_blocks(&no_delimiter),
+            no_delimiter
+        );
+
+        let separate_items = r#""&&" /* && */ & &; & & {}"#;
+        assert_eq!(
+            deep_passthrough_parent_anchor_delimiter_scans(separate_items),
+            2
+        );
+
+        let nested_delimiter_state = "& :is(&; x) {} & [&; x] {}";
+        assert_eq!(
+            normalize_deep_passthrough_parent_anchor_blocks(nested_delimiter_state),
+            "& :is(&; x) {}\n& [&; x] {}"
+        );
+        assert_eq!(
+            deep_passthrough_parent_anchor_delimiter_scans(nested_delimiter_state),
+            4
+        );
+    }
