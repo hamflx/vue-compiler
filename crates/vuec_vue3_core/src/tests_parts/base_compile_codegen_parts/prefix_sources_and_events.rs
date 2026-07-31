@@ -1033,6 +1033,51 @@
         let rewritten = rewrite_js_like_expression(&expression, &options);
         assert_eq!(rewritten.matches("_ctx.value").count(), IDENTIFIERS);
         assert_eq!(rewritten.matches(" + ").count(), IDENTIFIERS - 1);
+
+        let mut inline = options;
+        inline.inline = true;
+        inline
+            .binding_metadata
+            .insert("value".into(), "setup-let".into());
+        let spans = process_expression_identifier_spans(&expression, &inline, &[]);
+        assert_eq!(spans.len(), IDENTIFIERS);
+        assert!(spans.iter().all(|span| span.content == "_unref(value)"));
+        let rewritten = rewrite_js_like_expression(&expression, &inline);
+        assert_eq!(rewritten.matches("_unref(value)").count(), IDENTIFIERS);
+    }
+
+    #[test]
+    fn js_like_rewrite_indexes_destructure_assignment_roles() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        for (name, kind) in [
+            ("maybe", "setup-maybe-ref"),
+            ("key", "setup-let"),
+            ("target", "setup-let"),
+            ("rest", "setup-ref"),
+        ] {
+            options.binding_metadata.insert(name.into(), kind.into());
+        }
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "({ nested: { maybe = fallback }, [key]: target, ...rest } = source)",
+                &options,
+            ),
+            "({ nested: { maybe: maybe.value = _ctx.fallback }, [_unref(key)]: target, ...rest.value } = _ctx.source)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("[maybe = fallback, ...rest] = source", &options),
+            "[maybe.value = _ctx.fallback, ...rest.value] = _ctx.source",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("{ ...items, values: [...others] }", &options),
+            "{ ..._ctx.items, values: [..._ctx.others] }",
+        );
     }
 
     #[test]

@@ -321,6 +321,19 @@ pub(crate) fn process_expression_is_destructure_assignment(raw: &str, start: usi
     next_non_ws(raw, close + close_ch.len_utf8()) == Some('=')
 }
 
+pub(crate) fn process_expression_may_have_destructure_assignment(raw: &str) -> bool {
+    raw.as_bytes().contains(&b'=')
+        && raw
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(byte, b'{' | b'['))
+}
+
+pub(crate) fn process_expression_is_static_member(raw: &str, start: usize) -> bool {
+    let prefix = raw[..start].trim_end();
+    prefix.ends_with('.') && !prefix.ends_with("...")
+}
+
 pub(crate) fn process_expression_destructure_open_before(raw: &str, start: usize) -> Option<usize> {
     let mut quote = None::<char>;
     let mut escaped = false;

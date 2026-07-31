@@ -430,6 +430,15 @@
             json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
         );
         assert_eq!(projection_code(&unicode), "{ 用户: _ctx.用户 }");
+
+        let spread = process_expression_test_projection(
+            "{ ...items, values: [...others] }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&spread),
+            "{ ..._ctx.items, values: [..._ctx.others] }",
+        );
     }
 
     #[test]
@@ -697,6 +706,8 @@
                 "count": "setup-ref",
                 "maybe": "setup-maybe-ref",
                 "lett": "setup-let",
+                "key": "setup-let",
+                "rest": "setup-ref",
                 "val": "setup-const"
             }
         });
@@ -728,12 +739,21 @@
 
         let destructure = process_expression_test_statement_projection(
             "({ count } = val); [maybe] = val; ({ lett } = val)",
-            context,
+            context.clone(),
         );
         let code = projection_code(&destructure);
         assert!(code.contains("({ count: count.value } = val)"), "{code}");
         assert!(code.contains("[maybe.value] = val"), "{code}");
         assert!(code.contains("({ lett: lett } = val)"), "{code}");
+
+        let nested = process_expression_test_statement_projection(
+            "({ nested: { maybe = fallback }, [key]: lett, ...rest } = val)",
+            context,
+        );
+        assert_eq!(
+            projection_code(&nested),
+            "({ nested: { maybe: maybe.value = _ctx.fallback }, [_unref(key)]: lett, ...rest.value } = val)",
+        );
     }
 
     #[test]

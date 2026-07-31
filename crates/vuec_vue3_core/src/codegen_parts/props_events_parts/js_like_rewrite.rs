@@ -38,15 +38,19 @@ pub(crate) fn rewrite_js_like_expression_into(
 struct JsLikeExpressionBindingIndex {
     arrows: ProcessExpressionArrowBindingIndex,
     locals: ProcessExpressionFunctionBindingIndex,
+    may_have_destructure_assignment: bool,
 }
 
 impl JsLikeExpressionBindingIndex {
     fn new(expression: &str, options: &Vue3CompilerOptions) -> Self {
         Self {
             arrows: process_expression_arrow_bindings(expression),
-            locals: process_expression_function_bindings(
+            locals: process_expression_identifier_bindings(
                 expression,
                 expression_source_type(options),
+            ),
+            may_have_destructure_assignment: process_expression_may_have_destructure_assignment(
+                expression,
             ),
         }
     }
@@ -121,6 +125,29 @@ impl<'a> JsLikeExpressionBindingCursor<'a> {
     fn non_reference(self, start: usize, end: usize) -> bool {
         self.index
             .non_reference(self.source_offset + start, self.source_offset + end)
+    }
+
+    fn destructure_assignment(self, expression: &str, start: usize, end: usize) -> bool {
+        if self.parsed() {
+            return process_expression_function_destructure_assignment_spans(&self.index.locals)
+                .contains(&(
+                    self.source_offset + start,
+                    self.source_offset + end,
+                ));
+        }
+        self.index.may_have_destructure_assignment
+            && process_expression_is_destructure_assignment(expression, start)
+    }
+
+    fn object_shorthand(self, expression: &str, start: usize, end: usize) -> bool {
+        if self.parsed() {
+            return process_expression_function_object_shorthand_spans(&self.index.locals)
+                .contains(&(
+                    self.source_offset + start,
+                    self.source_offset + end,
+                ));
+        }
+        process_expression_object_shorthand(expression, start, end)
     }
 }
 
@@ -297,12 +324,14 @@ fn rewrite_js_like_expression_into_with_ranges(
             }
             if let Some((replacement, consumed_end)) = rewrite_js_like_destructure_identifier(
                 ident,
-                expression,
-                start,
                 end,
                 options,
                 &scopes,
                 arrow_param || function_binding || function_non_reference,
+                options.inline
+                    && options.binding_metadata.contains_key(ident)
+                    && bindings.destructure_assignment(expression, start, end),
+                bindings.object_shorthand(expression, start, end),
             ) {
                 output.push_str(&replacement);
                 index = js_like_char_index_at_or_after(&chars, index, consumed_end);
@@ -363,7 +392,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 previous = TokenKind::Identifier;
                 continue;
             }
-            let skip_property = matches!(prev, TokenKind::Dot)
+            let skip_property = process_expression_is_static_member(expression, start)
                 || (next == Some(':') && last_keyword.as_deref() != Some("case"))
                 || function_non_reference;
             if skip_property
@@ -819,17 +848,17 @@ pub(crate) fn rewrite_js_like_update(
 
 pub(crate) fn rewrite_js_like_destructure_identifier(
     ident: &str,
-    expression: &str,
-    start: usize,
     end: usize,
     options: &Vue3CompilerOptions,
     scopes: &[Scope],
     arrow_param: bool,
+    destructure_assignment: bool,
+    object_shorthand: bool,
 ) -> Option<(String, usize)> {
     if !options.inline
         || is_local(scopes, ident)
         || arrow_param
-        || !process_expression_is_destructure_assignment(expression, start)
+        || !destructure_assignment
     {
         return None;
     }
@@ -839,7 +868,7 @@ pub(crate) fn rewrite_js_like_destructure_identifier(
         "setup-let" => ident.to_string(),
         _ => return None,
     };
-    if process_expression_object_shorthand(expression, start, end) {
+    if object_shorthand {
         Some((format!("{ident}: {rewritten}"), end))
     } else {
         Some((rewritten, end))

@@ -744,6 +744,7 @@ pub(crate) struct ProcessExpressionUpdate {
 struct ProcessExpressionIdentifierBindingIndex {
     arrows: ProcessExpressionArrowBindingIndex,
     locals: ProcessExpressionFunctionBindingIndex,
+    may_have_destructure_assignment: bool,
 }
 
 impl ProcessExpressionIdentifierBindingIndex {
@@ -751,6 +752,9 @@ impl ProcessExpressionIdentifierBindingIndex {
         Self {
             arrows: process_expression_arrow_bindings(raw),
             locals: process_expression_identifier_bindings(raw, expression_source_type(options)),
+            may_have_destructure_assignment: process_expression_may_have_destructure_assignment(
+                raw,
+            ),
         }
     }
 }
@@ -838,6 +842,18 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
             self.source_offset + end,
         ))
     }
+
+    fn destructure_assignment(self, raw: &str, start: usize, end: usize) -> bool {
+        if self.parsed() {
+            return process_expression_function_destructure_assignment_spans(&self.index.locals)
+                .contains(&(
+                    self.source_offset + start,
+                    self.source_offset + end,
+                ));
+        }
+        self.index.may_have_destructure_assignment
+            && process_expression_is_destructure_assignment(raw, start)
+    }
 }
 
 pub(crate) fn process_expression_identifier_spans(
@@ -878,7 +894,7 @@ fn process_expression_identifier_spans_with_bindings(
         }
         let local = locals.iter().any(|local| local == ident);
         let property_key = next == Some(':') && prev != Some('?');
-        let static_member = prev == Some('.');
+        let static_member = process_expression_is_static_member(raw, start);
         if bindings.non_reference(start, end) {
             continue;
         }
@@ -891,7 +907,9 @@ fn process_expression_identifier_spans_with_bindings(
         let is_global = is_global_or_literal(ident);
         let assignment_rhs = process_expression_assignment_rhs(raw, start, end);
         let update_argument = process_expression_update_argument(raw, start, end);
-        let destructure_assignment = process_expression_is_destructure_assignment(raw, start);
+        let destructure_assignment = options.inline
+            && options.binding_metadata.contains_key(ident)
+            && bindings.destructure_assignment(raw, start, end);
         let content = if static_member || local || function_param || arrow_local || is_global {
             if !static_member
                 && !local

@@ -13,6 +13,7 @@ struct ProcessExpressionNonReferenceRange {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
+    destructure_assignment_spans: BTreeSet<(usize, usize)>,
     identifier_spans: BTreeSet<(usize, usize)>,
     object_shorthand_spans: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
@@ -89,6 +90,82 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
     fn add_object_shorthand_span(&mut self, span: oxc_span::Span) {
         if let Some(span) = self.relative_identifier_span(span) {
             self.bindings.object_shorthand_spans.insert(span);
+        }
+    }
+
+    fn add_destructure_assignment_identifier(
+        &mut self,
+        identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    ) {
+        if let Some(span) = self.relative_identifier_span(identifier.span) {
+            self.bindings.destructure_assignment_spans.insert(span);
+        }
+    }
+
+    fn add_destructure_array_assignment_target(
+        &mut self,
+        array: &oxc_ast::ast::ArrayAssignmentTarget<'_>,
+    ) {
+        for element in array.elements.iter().flatten() {
+            self.add_destructure_assignment_maybe_default(element);
+        }
+        if let Some(rest) = &array.rest {
+            self.add_destructure_assignment_target(&rest.target);
+        }
+    }
+
+    fn add_destructure_object_assignment_target(
+        &mut self,
+        object: &oxc_ast::ast::ObjectAssignmentTarget<'_>,
+    ) {
+        for property in &object.properties {
+            match property {
+                oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                    property,
+                ) => self.add_destructure_assignment_identifier(&property.binding),
+                oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
+                    property,
+                ) => self.add_destructure_assignment_maybe_default(&property.binding),
+            }
+        }
+        if let Some(rest) = &object.rest {
+            self.add_destructure_assignment_target(&rest.target);
+        }
+    }
+
+    fn add_destructure_assignment_target(&mut self, target: &oxc_ast::ast::AssignmentTarget<'_>) {
+        match target {
+            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                self.add_destructure_assignment_identifier(identifier);
+            }
+            oxc_ast::ast::AssignmentTarget::ArrayAssignmentTarget(array) => {
+                self.add_destructure_array_assignment_target(array);
+            }
+            oxc_ast::ast::AssignmentTarget::ObjectAssignmentTarget(object) => {
+                self.add_destructure_object_assignment_target(object);
+            }
+            _ => {}
+        }
+    }
+
+    fn add_destructure_assignment_maybe_default(
+        &mut self,
+        target: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>,
+    ) {
+        match target {
+            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(target) => {
+                self.add_destructure_assignment_target(&target.binding);
+            }
+            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(identifier) => {
+                self.add_destructure_assignment_identifier(identifier);
+            }
+            oxc_ast::ast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(array) => {
+                self.add_destructure_array_assignment_target(array);
+            }
+            oxc_ast::ast::AssignmentTargetMaybeDefault::ObjectAssignmentTarget(object) => {
+                self.add_destructure_object_assignment_target(object);
+            }
+            _ => {}
         }
     }
 
@@ -466,6 +543,15 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
             oxc_ast::AstKind::VariableDeclaration(declaration) => {
                 self.enter_variable_declaration(declaration);
             }
+            oxc_ast::AstKind::AssignmentExpression(assignment)
+                if matches!(
+                    assignment.left,
+                    oxc_ast::ast::AssignmentTarget::ArrayAssignmentTarget(_)
+                        | oxc_ast::ast::AssignmentTarget::ObjectAssignmentTarget(_)
+                ) =>
+            {
+                self.add_destructure_assignment_target(&assignment.left);
+            }
             oxc_ast::AstKind::TSAsExpression(expression) => {
                 self.add_non_reference_between(
                     oxc_span::GetSpan::span(&expression.expression).end,
@@ -663,10 +749,15 @@ pub(crate) fn process_expression_identifier_bindings(
 ) -> ProcessExpressionFunctionBindingIndex {
     let needs_lexical_disambiguation = raw.as_bytes().contains(&b'`')
         || raw.as_bytes().contains(&b'/')
-        || !raw.is_ascii();
+        || !raw.is_ascii()
+        || process_expression_may_have_destructure_assignment(raw);
     let collect_identifiers = needs_lexical_disambiguation
         && raw.len() <= PROCESS_EXPRESSION_MAX_FORCED_IDENTIFIER_AST_BYTES;
-    process_expression_function_bindings_with_mode(raw, source_type, collect_identifiers)
+    if collect_identifiers {
+        process_expression_function_bindings_with_mode(raw, source_type, true)
+    } else {
+        process_expression_function_bindings(raw, source_type)
+    }
 }
 
 fn process_expression_function_bindings_with_mode(
@@ -899,4 +990,10 @@ pub(crate) fn process_expression_function_object_shorthand_spans(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> &BTreeSet<(usize, usize)> {
     &bindings.object_shorthand_spans
+}
+
+pub(crate) fn process_expression_function_destructure_assignment_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.destructure_assignment_spans
 }
