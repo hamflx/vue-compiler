@@ -1,6 +1,8 @@
 pub(crate) fn vue27_template_usage_check_string(template: &str, is_ts: bool) -> String {
     let mut code = String::new();
-    for token in HtmlTokenizer::new(template).tokenize() {
+    let mut tokenizer = HtmlTokenizer::new(template);
+    loop {
+        let token = tokenizer.next_token();
         match token.kind {
             HtmlTokenKind::StartTag {
                 name, attributes, ..
@@ -19,6 +21,7 @@ pub(crate) fn vue27_template_usage_check_string(template: &str, is_ts: bool) -> 
             HtmlTokenKind::Text(text) => {
                 collect_vue27_template_text_usage(&mut code, &text, is_ts);
             }
+            HtmlTokenKind::Eof => break,
             _ => {}
         }
     }

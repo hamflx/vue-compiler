@@ -54,6 +54,26 @@
         assert!(!vue3.contains("Foo"));
     }
 
+    #[test]
+    fn template_v_model_identifiers_stream_all_start_tags() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Component.vue",
+            r#"<template>
+                <input v-model="first">
+                <input v-model.trim="second">
+                <input v-model="nested.value">
+                <input v-model="undefined">
+                <input v-model>
+            </template>"#,
+        );
+
+        assert_eq!(
+            vue3_template_v_model_identifiers(&descriptor),
+            BTreeSet::from(["first".to_string(), "second".to_string()])
+        );
+    }
+
     fn generated_original_position(
         script: &SfcScriptBlock,
         generated_needle: &str,

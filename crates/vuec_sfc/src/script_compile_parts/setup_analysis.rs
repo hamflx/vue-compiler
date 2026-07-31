@@ -461,9 +461,12 @@ pub(crate) fn vue3_template_v_model_identifiers(descriptor: &SfcDescriptor) -> B
         return BTreeSet::new();
     }
     let mut identifiers = BTreeSet::new();
-    for token in HtmlTokenizer::new(&template.content).tokenize() {
-        let HtmlTokenKind::StartTag { attributes, .. } = token.kind else {
-            continue;
+    let mut tokenizer = HtmlTokenizer::new(&template.content);
+    loop {
+        let attributes = match tokenizer.next_token().kind {
+            HtmlTokenKind::StartTag { attributes, .. } => attributes,
+            HtmlTokenKind::Eof => break,
+            _ => continue,
         };
         for attribute in attributes {
             let name = attribute.name.as_str();
