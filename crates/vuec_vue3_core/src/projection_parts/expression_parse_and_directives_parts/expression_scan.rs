@@ -392,13 +392,6 @@ pub(crate) fn previous_non_ws_index(source: &str, offset: usize) -> Option<(usiz
         .find(|(_, ch)| !ch.is_whitespace())
 }
 
-pub(crate) fn next_non_ws_index(source: &str, offset: usize) -> Option<(usize, char)> {
-    source[offset..]
-        .char_indices()
-        .find(|(_, ch)| !ch.is_whitespace())
-        .map(|(relative, ch)| (offset + relative, ch))
-}
-
 pub(crate) fn previous_char(source: &str, offset: usize) -> Option<(usize, char)> {
     source[..offset].char_indices().next_back()
 }

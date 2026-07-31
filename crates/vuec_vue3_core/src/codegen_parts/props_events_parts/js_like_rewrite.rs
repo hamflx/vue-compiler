@@ -46,7 +46,6 @@ fn rewrite_js_like_expression_into_with_ranges(
     }];
     let mut previous = TokenKind::Other;
     let mut pending_decl: Option<DeclKind> = None;
-    let mut pending_function_params = false;
     let mut last_keyword: Option<String> = None;
     let mut paren_depth = 0usize;
     let mut for_pending = false;
@@ -57,6 +56,8 @@ fn rewrite_js_like_expression_into_with_ranges(
     let mut pending_catch_locals = Vec::<String>::new();
     let chars = expression.char_indices().collect::<Vec<_>>();
     let arrow_bindings = process_expression_arrow_bindings(expression);
+    let function_bindings =
+        process_expression_function_bindings(expression, expression_source_type(options));
     let mut index = 0usize;
     while index < chars.len() {
         let byte = chars[index].0;
@@ -152,6 +153,12 @@ fn rewrite_js_like_expression_into_with_ranges(
             let operator = if ch == '+' { "++" } else { "--" };
             let ident_start = skip_ws_forward(expression, byte + operator.len());
             if let Some((ident, ident_end)) = read_identifier_at(expression, ident_start) {
+                let function_binding = process_expression_is_function_binding(
+                    &function_bindings,
+                    ident,
+                    ident_start,
+                    ident_end,
+                );
                 if let Some((replacement, consumed_end)) = rewrite_js_like_update(
                     ident,
                     expression,
@@ -163,7 +170,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                         &arrow_bindings,
                         ident_start,
                         ident_end,
-                    ),
+                    ) || function_binding,
                 ) {
                     output.push_str(&replacement);
                     index = js_like_char_index_at_or_after(&chars, index, consumed_end);
@@ -184,6 +191,12 @@ fn rewrite_js_like_expression_into_with_ranges(
             let ident = &expression[start..end];
             let arrow_param = process_expression_is_arrow_param(&arrow_bindings, start, end);
             let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
+            let function_binding = process_expression_is_function_binding(
+                &function_bindings,
+                ident,
+                start,
+                end,
+            );
             let next = next_non_ws(expression, end);
             let prev = previous;
             if !process_expression_update_argument(expression, start, end)
@@ -196,7 +209,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                     end,
                     options,
                     &scopes,
-                    arrow_param,
+                    arrow_param || function_binding,
                 ) {
                     output.push_str(&replacement);
                     index = js_like_char_index_at_or_after(&chars, index, consumed_end);
@@ -211,7 +224,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 end,
                 options,
                 &scopes,
-                arrow_param,
+                arrow_param || function_binding,
             ) {
                 output.push_str(&replacement);
                 index = js_like_char_index_at_or_after(&chars, index, consumed_end);
@@ -225,7 +238,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 end,
                 options,
                 &scopes,
-                arrow_param,
+                arrow_param || function_binding,
                 regular_expression_ranges,
             ) {
                 output.push_str(&replacement);
@@ -238,7 +251,6 @@ fn rewrite_js_like_expression_into_with_ranges(
                 match ident {
                     "var" => pending_decl = Some(DeclKind::Var),
                     "let" | "const" => pending_decl = Some(DeclKind::Block),
-                    "function" => pending_function_params = true,
                     "for" => for_pending = true,
                     "in" | "of" => pending_decl = None,
                     "catch" => catch_pending = true,
@@ -277,14 +289,18 @@ fn rewrite_js_like_expression_into_with_ranges(
             }
             let skip_property = matches!(prev, TokenKind::Dot)
                 || (next == Some(':') && last_keyword.as_deref() != Some("case"))
-                || (pending_function_params
-                    && matches!(prev, TokenKind::OpenParen | TokenKind::Comma));
+                || process_expression_is_function_non_reference_key(
+                    &function_bindings,
+                    start,
+                    end,
+                );
             if skip_property
                 || is_global_or_literal(ident)
                 || is_generated_asset_import_ident(ident)
                 || is_local(&scopes, ident)
                 || arrow_param
                 || arrow_local
+                || function_binding
                 || pending_for_block_locals.iter().any(|local| local == ident)
             {
                 output.push_str(ident);
@@ -339,7 +355,6 @@ fn rewrite_js_like_expression_into_with_ranges(
                     for_header_depth = None;
                 }
                 paren_depth = paren_depth.saturating_sub(1);
-                pending_function_params = false;
                 previous = TokenKind::Other;
             }
             ',' => previous = TokenKind::Comma,

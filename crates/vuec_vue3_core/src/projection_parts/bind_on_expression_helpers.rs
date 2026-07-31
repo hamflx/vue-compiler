@@ -734,6 +734,8 @@ pub(crate) fn process_expression_identifier_spans(
     let mut escaped = false;
     let mut chars = raw.char_indices().peekable();
     let arrow_bindings = process_expression_arrow_bindings(raw);
+    let function_bindings =
+        process_expression_function_bindings(raw, expression_source_type(options));
     while let Some((start, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
@@ -772,15 +774,18 @@ pub(crate) fn process_expression_identifier_spans(
         let local = locals.iter().any(|local| local == ident);
         let property_key = next == Some(':') && prev != Some('?');
         let static_member = prev == Some('.');
-        let function_name = process_expression_function_name(raw, start);
-        let method_name = process_expression_method_name(raw, start, end);
-        if method_name {
+        if process_expression_is_function_non_reference_key(&function_bindings, start, end) {
             continue;
         }
         let arrow_param = process_expression_is_arrow_param(&arrow_bindings, start, end);
         let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
-        let function_param =
-            arrow_param || function_name || process_expression_is_function_param(raw, start);
+        let function_param = arrow_param
+            || process_expression_is_function_binding(
+                &function_bindings,
+                ident,
+                start,
+                end,
+            );
         if property_key && !function_param {
             continue;
         }
@@ -919,36 +924,6 @@ pub(crate) fn process_expression_param_identifier_spans(
         }
     }
     spans
-}
-
-pub(crate) fn process_expression_function_name(raw: &str, start: usize) -> bool {
-    let prefix = raw[..start].trim_end();
-    prefix.ends_with("function") || prefix.ends_with("function*")
-}
-
-pub(crate) fn process_expression_method_name(raw: &str, start: usize, end: usize) -> bool {
-    if !previous_non_ws(raw, start).is_some_and(|prev| matches!(prev, '{' | ',')) {
-        return false;
-    }
-    let Some(open) = next_non_ws_index(raw, end).filter(|(_, ch)| *ch == '(') else {
-        return false;
-    };
-    let Some(close) = find_matching_forward(raw, open.0, '(', ')') else {
-        return false;
-    };
-    next_non_ws_index(raw, close + 1).is_some_and(|(_, ch)| ch == '{')
-}
-
-pub(crate) fn process_expression_is_function_param(raw: &str, start: usize) -> bool {
-    let prefix = raw[..start].trim_end();
-    let Some(open) = prefix.rfind('(') else {
-        return false;
-    };
-    if prefix[open + 1..].contains(')') {
-        return false;
-    }
-    let before_open = prefix[..open].trim_end();
-    before_open.ends_with("function") || before_open.ends_with("function*")
 }
 
 pub(crate) fn process_expression_is_arrow_param(

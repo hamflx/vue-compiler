@@ -420,6 +420,39 @@
     }
 
     #[test]
+    fn process_expression_projection_scopes_function_declarations() {
+        let projection = process_expression_test_statement_projection(
+            "function named(value = seed) { return named(value) + outside }; named(input); value",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            "function named(value = _ctx.seed) { return named(value) + _ctx.outside }; named(_ctx.input); _ctx.value",
+        );
+    }
+
+    #[test]
+    fn process_expression_projection_recovers_function_bindings_with_external_syntax() {
+        let projection = process_expression_test_projection(
+            "function named(value) { return value |> transform }",
+            json!({
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "expressionPlugins": ["pipelineOperator"]
+            }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            "function named(value) { return value |> _ctx.transform }",
+        );
+    }
+
+    #[test]
     fn process_expression_projection_rewrites_setup_let_assignment_rhs() {
         let projection = process_expression_test_projection(
             "(async () => { x = await bar })()",

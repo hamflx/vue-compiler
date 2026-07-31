@@ -605,6 +605,136 @@
     }
 
     #[test]
+    fn js_like_rewrite_indexes_function_and_method_bindings() {
+        let expression = r#"[function named(first = fallback(call(arg)), { value: alias }, ...rest) {
+ return named(first) + alias + rest.length + outside
+}, { method(value = seed) { return value + outside }, *generator(item) { yield item + outside } }, class { method(value) { return value + outside } }]"#;
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(expression, &options),
+            r#"[function named(first = _ctx.fallback(_ctx.call(_ctx.arg)), { value: alias }, ...rest) {
+ return named(first) + alias + rest.length + _ctx.outside
+}, { method(value = _ctx.seed) { return value + _ctx.outside }, *generator(item) { yield item + _ctx.outside } }, class { method(value) { return value + _ctx.outside } }]"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "({ [method](value) { return value }, method(value) { return value } })",
+                &options,
+            ),
+            "({ [_ctx.method](value) { return value }, method(value) { return value } })",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "({ get value() { return outside }, set value(input) { outside = input } }); class { #method(value) { return value + outside } static method(value) { return value + outside } }",
+                &options,
+            ),
+            "({ get value() { return _ctx.outside }, set value(input) { _ctx.outside = input } }); class { #method(value) { return value + _ctx.outside } static method(value) { return value + _ctx.outside } }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "class { @dec(get) get /* get */ value() { return outside } }",
+                &options,
+            ),
+            "class { @_ctx.dec(_ctx.get) get /* get */ value() { return _ctx.outside } }",
+        );
+    }
+
+    #[test]
+    fn function_binding_index_preserves_nested_same_name_boundaries() {
+        let expression = "(function value(value) { return (function value(value) { return value })(value) + value })(source) + value";
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(expression, &options),
+            "(function value(value) { return (function value(value) { return value })(value) + value })(_ctx.source) + _ctx.value",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(function(value) { return arguments[0] + value + outside })(input) + arguments",
+                &options,
+            ),
+            "(function(value) { return arguments[0] + value + _ctx.outside })(_ctx.input) + _ctx.arguments",
+        );
+    }
+
+    #[test]
+    fn function_declarations_respect_parameter_and_block_boundaries() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function outer(value = inner) { function inner() {}; return inner(value) }; outer(input)",
+                &options,
+            ),
+            "function outer(value = _ctx.inner) { function inner() {}; return inner(value) }; outer(_ctx.input)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "'use strict'; { function scoped() {} scoped() } scoped()",
+                &options,
+            ),
+            "'use strict'; { function scoped() {} scoped() } _ctx.scoped()",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "switch (scoped) { case 0: function scoped() {} scoped() } scoped()",
+                &options,
+            ),
+            "switch (_ctx.scoped) { case 0: function scoped() {} scoped() } _ctx.scoped()",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(class { static { function scoped() {} scoped() } }); scoped()",
+                &options,
+            ),
+            "(class { static { function scoped() {} scoped() } }); _ctx.scoped()",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "class Box { field = outside; static value = outside; static {} } Box",
+                &options,
+            ),
+            "class Box { field = _ctx.outside; static value = _ctx.outside; static {} } Box",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("(class Box { field = Box }); Box", &options),
+            "(class Box { field = Box }); _ctx.Box",
+        );
+    }
+
+    #[test]
+    fn expression_rewrite_indexes_dense_flat_identifiers() {
+        const IDENTIFIERS: usize = 4_096;
+        let expression = vec!["value"; IDENTIFIERS].join(" + ");
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        let spans = process_expression_identifier_spans(&expression, &options, &[]);
+        assert_eq!(spans.len(), IDENTIFIERS);
+        assert!(spans.iter().all(|span| span.content == "_ctx.value"));
+
+        let rewritten = rewrite_js_like_expression(&expression, &options);
+        assert_eq!(rewritten.matches("_ctx.value").count(), IDENTIFIERS);
+        assert_eq!(rewritten.matches(" + ").count(), IDENTIFIERS - 1);
+    }
+
+    #[test]
     fn arrow_body_end_index_matches_scalar_scan_boundaries() {
         for expression in [
             "a => b => c => value",
