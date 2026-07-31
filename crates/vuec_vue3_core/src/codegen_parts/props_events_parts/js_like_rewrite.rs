@@ -557,11 +557,11 @@ pub(crate) fn js_like_regular_expression_ranges(
         return Vec::new();
     }
 
-    let store = JsAstStore::new();
     let source_type = expression_source_type(options);
-    if process_expression_ast_required_unavailable(expression, source_type) {
+    if !process_expression_ast_visit_allowed(expression) {
         return Vec::new();
     }
+    let store = JsAstStore::new();
     if let Ok(parsed) = store.parse_expression(expression, source_type) {
         let mut collector = JsLikeRegExpCollector::default();
         oxc_ast_visit::Visit::visit_expression(&mut collector, &parsed);

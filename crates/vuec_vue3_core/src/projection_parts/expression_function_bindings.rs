@@ -798,6 +798,10 @@ pub(crate) const PROCESS_EXPRESSION_AST_LIMIT_MESSAGE: &str =
 // Oxc's visitor is recursive for left-deep expressions. Inputs that require
 // exact AST roles fail closed above this bound; other inputs retain the lexer.
 
+pub(crate) fn process_expression_ast_visit_allowed(raw: &str) -> bool {
+    raw.len() <= PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
+}
+
 pub(crate) fn process_expression_requires_jsx_ast(
     raw: &str,
     source_type: oxc_span::SourceType,
@@ -810,10 +814,13 @@ pub(crate) fn process_expression_requires_lossless_ast(
     source_type: oxc_span::SourceType,
 ) -> bool {
     process_expression_requires_jsx_ast(raw, source_type)
-        || process_expression_may_have_identifier_escape(raw)
+        || process_expression_may_have_ast_sensitive_syntax(raw, source_type)
 }
 
-fn process_expression_may_have_identifier_escape(raw: &str) -> bool {
+fn process_expression_may_have_ast_sensitive_syntax(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+) -> bool {
     // Template and regexp contents stay conservative because distinguishing
     // their embedded expression boundaries requires the AST we are gating.
     let bytes = raw.as_bytes();
@@ -851,8 +858,38 @@ fn process_expression_may_have_identifier_escape(raw: &str) -> bool {
                     index += 1;
                 }
             }
+            b'/' => return true,
             b'\\' if bytes.get(index + 1) == Some(&b'u') => return true,
-            _ => index += 1,
+            b':' | b'<' if source_type.is_typescript() => return true,
+            _ if source_type.is_typescript() => {
+                let Some(current) = raw[index..].chars().next() else {
+                    break;
+                };
+                if !is_identifier_start(current) {
+                    index += current.len_utf8();
+                    continue;
+                }
+                let start = index;
+                index += current.len_utf8();
+                while index < raw.len() {
+                    let Some(current) = raw[index..].chars().next() else {
+                        break;
+                    };
+                    if !is_identifier_continue(current) {
+                        break;
+                    }
+                    index += current.len_utf8();
+                }
+                if matches!(&raw[start..index], "as" | "interface" | "satisfies" | "type") {
+                    return true;
+                }
+            }
+            _ => {
+                let Some(current) = raw[index..].chars().next() else {
+                    break;
+                };
+                index += current.len_utf8();
+            }
         }
     }
     false
@@ -863,7 +900,7 @@ pub(crate) fn process_expression_ast_required_unavailable(
     source_type: oxc_span::SourceType,
 ) -> bool {
     process_expression_requires_lossless_ast(raw, source_type)
-        && raw.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
+        && !process_expression_ast_visit_allowed(raw)
 }
 
 enum ProcessExpressionFunctionBindingParse {
@@ -888,7 +925,7 @@ pub(crate) fn process_expression_identifier_bindings(
         || !raw.is_ascii()
         || process_expression_may_have_destructure_assignment(raw);
     let collect_identifiers = needs_lexical_disambiguation
-        && raw.len() <= PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES;
+        && process_expression_ast_visit_allowed(raw);
     if collect_identifiers {
         process_expression_function_bindings_with_mode(raw, source_type, true)
     } else {
@@ -907,6 +944,9 @@ fn process_expression_function_bindings_with_mode(
             ast_required_unavailable: true,
             ..ProcessExpressionFunctionBindingIndex::default()
         };
+    }
+    if !process_expression_ast_visit_allowed(raw) {
+        return ProcessExpressionFunctionBindingIndex::default();
     }
     let needs_typescript_parse = source_type.is_typescript()
         && (raw.as_bytes().iter().any(|byte| matches!(byte, b':' | b'<'))

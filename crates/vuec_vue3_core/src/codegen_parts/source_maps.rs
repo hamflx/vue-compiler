@@ -627,7 +627,7 @@ pub(crate) fn expression_source_map_tokens(
     include_globals: bool,
     source_type: oxc_span::SourceType,
 ) -> Vec<(usize, String)> {
-    if process_expression_ast_required_unavailable(expression, source_type) {
+    if !process_expression_ast_visit_allowed(expression) {
         return Vec::new();
     }
     match parsed_expression_source_map_tokens(expression, include_globals, source_type) {
@@ -679,7 +679,7 @@ fn parsed_expression_source_map_tokens(
     include_globals: bool,
     source_type: oxc_span::SourceType,
 ) -> Option<Vec<(usize, String)>> {
-    if process_expression_ast_required_unavailable(expression, source_type) {
+    if !process_expression_ast_visit_allowed(expression) {
         return Some(Vec::new());
     }
     let store = JsAstStore::new();
@@ -739,7 +739,7 @@ fn lexical_expression_source_map_tokens(
         if index > 0
             && expression[..index]
                 .chars()
-                .last()
+                .next_back()
                 .is_some_and(is_identifier_continue)
         {
             continue;

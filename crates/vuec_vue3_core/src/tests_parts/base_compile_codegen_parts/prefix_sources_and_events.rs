@@ -590,6 +590,166 @@
     }
 
     #[test]
+    fn js_like_rewrite_bounds_every_recursive_expression_visitor() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            source_map: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let prefix = "const local = source;";
+        let suffix = "local + outside";
+        let padding = " ".repeat(
+            PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
+                .checked_sub(prefix.len() + suffix.len())
+                .expect("expression skeleton fits the AST limit"),
+        );
+        let exact = format!("{prefix}{padding}{suffix}");
+        assert_eq!(exact.len(), PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert!(process_expression_ast_visit_allowed(&exact));
+        assert!(process_expression_function_bindings_parsed(
+            &process_expression_identifier_bindings(&exact, oxc_span::SourceType::mjs())
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&exact, &options),
+            format!("const local = _ctx.source;{padding}local + _ctx.outside"),
+        );
+        assert!(!expression_source_map_tokens(
+            &exact,
+            true,
+            oxc_span::SourceType::mjs(),
+        )
+        .is_empty());
+
+        let over = format!("{exact} ");
+        assert!(!process_expression_ast_visit_allowed(&over));
+        assert!(!process_expression_ast_required_unavailable(
+            &over,
+            oxc_span::SourceType::mjs(),
+        ));
+        assert!(!process_expression_function_bindings_parsed(
+            &process_expression_identifier_bindings(&over, oxc_span::SourceType::mjs())
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&over, &options),
+            format!("const local = _ctx.source;{padding}local + _ctx.outside "),
+        );
+        assert!(expression_source_map_tokens(
+            &over,
+            true,
+            oxc_span::SourceType::mjs(),
+        )
+        .is_empty());
+
+        let deep = format!(
+            "{}outside{}",
+            "(".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+            ")".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+        );
+        assert_eq!(
+            rewrite_js_like_expression(&deep, &options),
+            deep.replace("outside", "_ctx.outside"),
+        );
+    }
+
+    #[test]
+    fn js_like_rewrite_fails_closed_for_oversized_ast_sensitive_syntax() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            source_map: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let regex = "/foo/.test(value)";
+        let exact_regex = format!(
+            "{}{regex}",
+            " ".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES - regex.len()),
+        );
+        assert_eq!(
+            rewrite_js_like_expression(&exact_regex, &options),
+            exact_regex.replace("value", "_ctx.value"),
+        );
+
+        let long_regex = format!("{} + {regex}", "outside + ".repeat(450));
+        assert!(long_regex.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert!(process_expression_ast_required_unavailable(
+            &long_regex,
+            oxc_span::SourceType::mjs(),
+        ));
+        assert_eq!(rewrite_js_like_expression(&long_regex, &options), long_regex);
+
+        let long_division = format!("{} / divisor", "outside + ".repeat(450));
+        assert!(process_expression_ast_required_unavailable(
+            &long_division,
+            oxc_span::SourceType::mjs(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_division, &options),
+            long_division,
+        );
+
+        let mut ts_options = options.clone();
+        ts_options.is_ts = true;
+        let long_typescript = format!(
+            "value as {}ExternalType",
+            " ".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+        );
+        assert!(process_expression_ast_required_unavailable(
+            &long_typescript,
+            oxc_span::SourceType::ts(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_typescript, &ts_options),
+            long_typescript,
+        );
+
+        let long_string = format!(
+            r#""{} / as < :" + outside"#,
+            "x".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+        );
+        assert!(!process_expression_ast_required_unavailable(
+            &long_string,
+            oxc_span::SourceType::ts(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_string, &ts_options),
+            format!(
+                r#""{} / as < :" + _ctx.outside"#,
+                "x".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+            ),
+        );
+        let long_comment = format!(
+            "/* {} / as < : */ outside",
+            "x".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+        );
+        assert!(!process_expression_ast_required_unavailable(
+            &long_comment,
+            oxc_span::SourceType::ts(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_comment, &ts_options),
+            format!(
+                "/* {} / as < : */ _ctx.outside",
+                "x".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES),
+            ),
+        );
+
+        let result = base_compile(
+            TemplateSource {
+                filename: "long-regexp.vue".into(),
+                source: format!("<div>{{{{ {long_regex} }}}}</div>"),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "46"
+                && diagnostic.message == PROCESS_EXPRESSION_AST_LIMIT_MESSAGE
+        }));
+    }
+
+    #[test]
     fn js_like_rewrite_supports_ecmascript_unicode_identifiers() {
         let options = Vue3CompilerOptions {
             prefix_identifiers: true,
