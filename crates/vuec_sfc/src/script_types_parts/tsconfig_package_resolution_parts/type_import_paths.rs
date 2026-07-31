@@ -51,10 +51,42 @@ fn resolve_vue3_type_reference_path_uncached(
     if reference.is_empty() {
         return None;
     }
+    let normalized_reference = if reference.contains('\\') {
+        if !type_resolver
+            .external_type_session
+            .claim_source_resolution_work(reference.len())
+        {
+            return None;
+        }
+        Some(reference.replace('\\', "/"))
+    } else {
+        None
+    };
+    let reference = normalized_reference.as_deref().unwrap_or(reference);
     let base = Path::new(filename)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let candidate = normalize_path_components(base.join(reference.replace('\\', "/")));
+    let reference_path = Path::new(reference);
+    let base_bytes = base.as_os_str().as_encoded_bytes().len();
+    let reference_bytes = reference_path.as_os_str().as_encoded_bytes().len();
+    let joined_bytes = if reference_path.is_absolute() {
+        reference_bytes
+    } else {
+        base_bytes
+            .saturating_add(usize::from(base_bytes > 0 && reference_bytes > 0))
+            .saturating_add(reference_bytes)
+    };
+    if !type_resolver
+        .external_type_session
+        .claim_source_resolution_work(joined_bytes)
+        || !type_resolver
+            .external_type_session
+            .claim_source_resolution_work(joined_bytes)
+    {
+        return None;
+    }
+    let candidate = base.join(reference_path);
+    let candidate = normalize_path_components(candidate);
     let max_path_bytes = type_resolver
         .external_type_session
         .limits()
@@ -75,14 +107,34 @@ fn resolve_vue3_type_reference_path_uncached(
             .source_resolution_path_is_file(&candidate)?
             .then_some(candidate);
     }
+    candidate.file_name()?;
     for extension in ["ts", "tsx", "d.ts"] {
-        let candidate = path_with_extension(&candidate, extension);
-        if candidate.as_os_str().as_encoded_bytes().len() > max_path_bytes {
+        let Some(path_bytes) = candidate
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .checked_add(1)
+            .and_then(|bytes| bytes.checked_add(extension.len()))
+        else {
+            type_resolver
+                .external_type_session
+                .record_resolution_failure();
+            return None;
+        };
+        if path_bytes > max_path_bytes {
             type_resolver
                 .external_type_session
                 .record_resolution_failure();
             return None;
         }
+        if !type_resolver
+            .external_type_session
+            .claim_source_resolution_work(path_bytes)
+        {
+            return None;
+        }
+        let candidate = path_with_extension(&candidate, extension);
+        debug_assert_eq!(candidate.as_os_str().as_encoded_bytes().len(), path_bytes);
         if type_resolver
             .external_type_session
             .source_resolution_path_is_file(&candidate)?
