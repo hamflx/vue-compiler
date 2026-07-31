@@ -1545,7 +1545,12 @@ fn resolve_vue3_type_reference_directive_uncached(
         let base = Path::new(containing_filename)
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        let candidate = normalize_path_components(base.join(normalized_type_name));
+        let candidate = vue3_materialize_type_reference_path(
+            base,
+            Some(Path::new(&normalized_type_name)),
+            true,
+            type_resolver,
+        )?;
         resolve_vue3_type_reference_package_candidate(
             &candidate,
             None,
@@ -1574,6 +1579,91 @@ fn vue3_type_reference_name_is_relative_or_rooted(type_name: &str) -> bool {
         || type_name == ".."
         || vue3_type_import_source_is_relative(type_name)
         || Path::new(type_name).has_root()
+}
+
+fn vue3_materialize_type_reference_path(
+    base: &Path,
+    child: Option<&Path>,
+    normalize: bool,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let base_bytes = base.as_os_str().as_encoded_bytes().len();
+    let path_bytes = child.map_or(base_bytes, |child| {
+        let child_bytes = child.as_os_str().as_encoded_bytes().len();
+        if child.has_root() {
+            child_bytes
+        } else {
+            base_bytes
+                .saturating_add(usize::from(base_bytes > 0 && child_bytes > 0))
+                .saturating_add(child_bytes)
+        }
+    });
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(path_bytes)
+        || !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver)
+        || (normalize && !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver))
+    {
+        return None;
+    }
+    let path = child.map_or_else(
+        || base.to_path_buf(),
+        |child| {
+            if child.has_root() {
+                child.to_path_buf()
+            } else {
+                base.join(child)
+            }
+        },
+    );
+    let path = if normalize {
+        normalize_path_components(path)
+    } else {
+        path
+    };
+    debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    Some(path)
+}
+
+fn vue3_materialize_at_types_package_name(
+    package_name: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let scoped = package_name.strip_prefix('@');
+    let package_bytes = scoped.map_or(package_name.len(), |scoped| scoped.len().saturating_add(1));
+    let path_bytes = "@types"
+        .len()
+        .saturating_add(1)
+        .saturating_add(package_bytes);
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(path_bytes)
+    {
+        return None;
+    }
+    if let Some(scoped) = scoped {
+        let mangled_bytes = scoped.len().saturating_add(1);
+        if !type_resolver
+            .external_type_session
+            .claim_tsconfig_materialization(
+                std::mem::size_of::<String>().saturating_add(mangled_bytes),
+            )
+        {
+            return None;
+        }
+    }
+    if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+        return None;
+    }
+    let mut path = PathBuf::with_capacity(path_bytes);
+    path.push("@types");
+    if let Some(scoped) = scoped {
+        path.push(scoped.replacen('/', "__", 1));
+    } else {
+        path.push(package_name);
+    }
+    debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    Some(path)
 }
 
 fn vue3_tsconfig_effective_type_roots(
@@ -1791,7 +1881,12 @@ fn resolve_vue3_bare_type_reference(
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(type_name)?;
     for node_modules in vue3_node_modules_search_paths(containing_filename, type_resolver) {
-        let package_dir = node_modules.join(package_name);
+        let package_dir = vue3_materialize_type_reference_path(
+            &node_modules,
+            Some(Path::new(package_name)),
+            false,
+            type_resolver,
+        )?;
         let resolved = resolve_vue3_type_reference_package_candidate(
             &package_dir,
             subpath,
@@ -1806,7 +1901,14 @@ fn resolve_vue3_bare_type_reference(
         if resolved.is_some() {
             return resolved;
         }
-        let types_package_dir = node_modules.join(vue3_at_types_package_name(package_name));
+        let types_package_name =
+            vue3_materialize_at_types_package_name(package_name, type_resolver)?;
+        let types_package_dir = vue3_materialize_type_reference_path(
+            &node_modules,
+            Some(&types_package_name),
+            false,
+            type_resolver,
+        )?;
         let resolved = resolve_vue3_type_reference_package_candidate(
             &types_package_dir,
             subpath,
@@ -1848,9 +1950,12 @@ fn resolve_vue3_type_reference_package_candidate(
                 &type_resolver.typescript_version,
             )
     });
-    let candidate = subpath
-        .map(|subpath| package_dir.join(subpath))
-        .unwrap_or_else(|| package_dir.to_path_buf());
+    let candidate = vue3_materialize_type_reference_path(
+        package_dir,
+        subpath.map(Path::new),
+        false,
+        type_resolver,
+    )?;
     // Enabled exports precede the legacy root sibling-file probe in node_modules.
     let exports_precede_direct = subpath.is_none()
         && allow_direct_file
@@ -1901,8 +2006,14 @@ fn resolve_vue3_type_reference_package_candidate(
                     return None;
                 }
                 if subpath.is_none() && uses_node_esm_specifier_rules {
+                    let index = vue3_materialize_type_reference_path(
+                        &candidate,
+                        Some(Path::new("index.js")),
+                        false,
+                        type_resolver,
+                    )?;
                     return resolve_vue3_metadata_type_reference_declaration_file(
-                        &candidate.join("index.js"),
+                        &index,
                         type_resolver,
                     );
                 }
@@ -1954,10 +2065,13 @@ fn resolve_vue3_type_reference_package_candidate(
     {
         return None;
     }
-    resolve_vue3_metadata_type_reference_declaration_file(
-        &candidate.join("index"),
+    let index = vue3_materialize_type_reference_path(
+        &candidate,
+        Some(Path::new("index")),
+        false,
         type_resolver,
-    )
+    )?;
+    resolve_vue3_metadata_type_reference_declaration_file(&index, type_resolver)
 }
 
 fn resolve_vue3_type_reference_direct_file_with_mode(
@@ -4747,6 +4861,128 @@ mod vue3_type_reference_directive_tests {
         }
     }
 
+    #[test]
+    fn secondary_type_reference_paths_are_claimed_before_materialization() {
+        let base = Path::new("project").join("src");
+        let child = Path::new("types").join("..").join("globals");
+        let unnormalized = base.join(&child);
+        let path_bytes = unnormalized.as_os_str().as_encoded_bytes().len();
+        let expected = normalize_path_components(unnormalized);
+        let path_weight = std::mem::size_of::<PathBuf>() + path_bytes;
+        let exact_weight = path_weight * 2;
+        let exact_limits = Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: path_bytes,
+            max_generated_path_bytes: path_bytes,
+            max_tsconfig_materialization_entries: 2,
+            max_tsconfig_materialization_weight: exact_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        };
+        let exact = resolver_with_limits(exact_limits);
+
+        assert_eq!(
+            vue3_materialize_type_reference_path(&base, Some(&child), true, &exact),
+            Some(expected)
+        );
+        let exact_stats = exact.external_type_session.stats();
+        assert_eq!(exact_stats.metadata_target_steps, path_bytes);
+        assert_eq!(exact_stats.tsconfig_materialization_entries, 2);
+        assert_eq!(exact_stats.tsconfig_materialization_weight, exact_weight);
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: path_bytes - 1,
+                ..exact_limits
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_generated_path_bytes: path_bytes - 1,
+                ..exact_limits
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_entries: 1,
+                ..exact_limits
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_weight: exact_weight - 1,
+                ..exact_limits
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            assert!(vue3_materialize_type_reference_path(
+                &base,
+                Some(&child),
+                true,
+                &resolver,
+            )
+            .is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+
+        let target_short = resolver_with_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: path_bytes - 1,
+            ..exact_limits
+        });
+        assert!(vue3_materialize_type_reference_path(
+            &base,
+            Some(&child),
+            true,
+            &target_short,
+        )
+        .is_none());
+        assert_eq!(
+            target_short
+                .external_type_session
+                .stats()
+                .tsconfig_materialization_entries,
+            0
+        );
+    }
+
+    #[test]
+    fn secondary_at_types_names_are_materialization_bounded() {
+        let package_name = "@scope/package";
+        let measuring = Vue3TypeResolverContext::default();
+        let expected = vue3_materialize_at_types_package_name(package_name, &measuring).unwrap();
+        assert_eq!(expected, Path::new("@types").join("scope__package"));
+        let measured = measuring.external_type_session.stats();
+        assert_eq!(measured.tsconfig_materialization_entries, 2);
+        assert!(measured.metadata_target_steps > 0);
+        assert!(measured.tsconfig_materialization_weight > 0);
+
+        let exact_limits = Vue3ExternalTypeLoadLimits {
+            max_metadata_target_steps: measured.metadata_target_steps,
+            max_generated_path_bytes: expected.as_os_str().as_encoded_bytes().len(),
+            max_tsconfig_materialization_entries: measured.tsconfig_materialization_entries,
+            max_tsconfig_materialization_weight: measured.tsconfig_materialization_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        };
+        let exact = resolver_with_limits(exact_limits);
+        assert_eq!(
+            vue3_materialize_at_types_package_name(package_name, &exact),
+            Some(expected)
+        );
+
+        for limits in [
+            Vue3ExternalTypeLoadLimits {
+                max_metadata_target_steps: measured.metadata_target_steps - 1,
+                ..exact_limits
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_entries:
+                    measured.tsconfig_materialization_entries - 1,
+                ..exact_limits
+            },
+            Vue3ExternalTypeLoadLimits {
+                max_tsconfig_materialization_weight:
+                    measured.tsconfig_materialization_weight - 1,
+                ..exact_limits
+            },
+        ] {
+            let resolver = resolver_with_limits(limits);
+            assert!(vue3_materialize_at_types_package_name(package_name, &resolver).is_none());
+            assert!(resolver.external_type_session.metadata_is_blocked());
+        }
+    }
+
     fn assert_node_type_reference_modes(
         project: &Path,
         containing: &Path,
@@ -4793,14 +5029,16 @@ mod vue3_type_reference_directive_tests {
         let type_name = "missing";
         let path_bytes = vue3_ancestor_search_candidate_weight(&type_root, type_name);
         let materialization_weight = std::mem::size_of::<PathBuf>() + path_bytes;
+        let total_target_steps = path_bytes * 2;
+        let total_materialization_weight = materialization_weight * 2;
         let type_roots = Vue3TsconfigTypeRoots {
             paths: std::sync::Arc::from(vec![type_root]),
             is_explicit: true,
         };
         let exact = resolver_with_limits(Vue3ExternalTypeLoadLimits {
-            max_metadata_target_steps: path_bytes,
-            max_tsconfig_materialization_entries: 1,
-            max_tsconfig_materialization_weight: materialization_weight,
+            max_metadata_target_steps: total_target_steps,
+            max_tsconfig_materialization_entries: 2,
+            max_tsconfig_materialization_weight: total_materialization_weight,
             max_tsconfig_discovery_entries: 1,
             ..Vue3ExternalTypeLoadLimits::default()
         });
@@ -4813,38 +5051,57 @@ mod vue3_type_reference_directive_tests {
         )
         .is_none());
         let exact_stats = exact.external_type_session.stats();
-        assert_eq!(exact_stats.metadata_target_steps, path_bytes);
+        assert_eq!(exact_stats.metadata_target_steps, total_target_steps);
         assert_eq!(exact_stats.tsconfig_discovery_entries, 1);
-        assert_eq!(exact_stats.tsconfig_materialization_entries, 1);
+        assert_eq!(exact_stats.tsconfig_materialization_entries, 2);
         assert_eq!(
             exact_stats.tsconfig_materialization_weight,
-            materialization_weight
+            total_materialization_weight
         );
         assert!(!exact.external_type_session.metadata_is_blocked());
 
-        for limits in [
-            Vue3ExternalTypeLoadLimits {
-                max_metadata_target_steps: path_bytes - 1,
-                max_tsconfig_materialization_entries: 1,
-                max_tsconfig_materialization_weight: materialization_weight,
-                max_tsconfig_discovery_entries: 1,
-                ..Vue3ExternalTypeLoadLimits::default()
-            },
-            Vue3ExternalTypeLoadLimits {
-                max_metadata_target_steps: path_bytes,
-                max_generated_path_bytes: path_bytes - 1,
-                max_tsconfig_materialization_entries: 1,
-                max_tsconfig_materialization_weight: materialization_weight,
-                max_tsconfig_discovery_entries: 1,
-                ..Vue3ExternalTypeLoadLimits::default()
-            },
-            Vue3ExternalTypeLoadLimits {
-                max_metadata_target_steps: path_bytes,
-                max_tsconfig_materialization_entries: 1,
-                max_tsconfig_materialization_weight: materialization_weight - 1,
-                max_tsconfig_discovery_entries: 1,
-                ..Vue3ExternalTypeLoadLimits::default()
-            },
+        for (limits, expected_materializations) in [
+            (
+                Vue3ExternalTypeLoadLimits {
+                    max_metadata_target_steps: total_target_steps - 1,
+                    max_tsconfig_materialization_entries: 2,
+                    max_tsconfig_materialization_weight: total_materialization_weight,
+                    max_tsconfig_discovery_entries: 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+                1,
+            ),
+            (
+                Vue3ExternalTypeLoadLimits {
+                    max_metadata_target_steps: total_target_steps,
+                    max_generated_path_bytes: path_bytes - 1,
+                    max_tsconfig_materialization_entries: 2,
+                    max_tsconfig_materialization_weight: total_materialization_weight,
+                    max_tsconfig_discovery_entries: 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+                0,
+            ),
+            (
+                Vue3ExternalTypeLoadLimits {
+                    max_metadata_target_steps: total_target_steps,
+                    max_tsconfig_materialization_entries: 1,
+                    max_tsconfig_materialization_weight: total_materialization_weight,
+                    max_tsconfig_discovery_entries: 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+                1,
+            ),
+            (
+                Vue3ExternalTypeLoadLimits {
+                    max_metadata_target_steps: total_target_steps,
+                    max_tsconfig_materialization_entries: 2,
+                    max_tsconfig_materialization_weight: total_materialization_weight - 1,
+                    max_tsconfig_discovery_entries: 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+                1,
+            ),
         ] {
             let resolver = resolver_with_limits(limits);
             assert!(resolve_vue3_tsconfig_named_type_global_type_file(
@@ -4856,7 +5113,10 @@ mod vue3_type_reference_directive_tests {
             .is_none());
             let stats = resolver.external_type_session.stats();
             assert_eq!(stats.metadata_resolution_path_probes, 0);
-            assert_eq!(stats.tsconfig_materialization_entries, 0);
+            assert_eq!(
+                stats.tsconfig_materialization_entries,
+                expected_materializations
+            );
             assert!(resolver.external_type_session.metadata_is_blocked());
         }
     }
