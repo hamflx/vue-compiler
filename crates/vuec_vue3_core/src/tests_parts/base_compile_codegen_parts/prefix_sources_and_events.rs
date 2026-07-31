@@ -494,6 +494,37 @@
     }
 
     #[test]
+    fn js_like_rewrite_cursor_lookup_handles_unicode_byte_boundaries() {
+        let chars = "aé🙂z".char_indices().collect::<Vec<_>>();
+
+        assert_eq!(js_like_char_index_at_or_after(&chars, 0, 0), 0);
+        assert_eq!(js_like_char_index_at_or_after(&chars, 0, 1), 1);
+        assert_eq!(js_like_char_index_at_or_after(&chars, 0, 2), 2);
+        assert_eq!(js_like_char_index_at_or_after(&chars, 1, 7), 3);
+        assert_eq!(js_like_char_index_at_or_after(&chars, 3, usize::MAX), 4);
+    }
+
+    #[test]
+    fn js_like_rewrite_advances_through_dense_update_ranges() {
+        const UPDATES: usize = 4_096;
+        let expression = vec!["count++"; UPDATES].join("; ");
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+
+        let rewritten = rewrite_js_like_expression(&expression, &options);
+
+        assert_eq!(rewritten.matches("count.value++").count(), UPDATES);
+        assert_eq!(rewritten.matches("; ").count(), UPDATES - 1);
+    }
+
+    #[test]
     fn base_compile_accepts_v_for_of_expression_with_v_memo() {
         let result = base_compile(
             TemplateSource {

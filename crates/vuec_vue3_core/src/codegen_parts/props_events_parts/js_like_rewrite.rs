@@ -167,10 +167,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                     ),
                 ) {
                     output.push_str(&replacement);
-                    index = chars
-                        .iter()
-                        .position(|(offset, _)| *offset >= consumed_end)
-                        .unwrap_or(chars.len());
+                    index = js_like_char_index_at_or_after(&chars, index, consumed_end);
                     previous = TokenKind::Other;
                     continue;
                 }
@@ -203,10 +200,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                     arrow_param,
                 ) {
                     output.push_str(&replacement);
-                    index = chars
-                        .iter()
-                        .position(|(offset, _)| *offset >= consumed_end)
-                        .unwrap_or(chars.len());
+                    index = js_like_char_index_at_or_after(&chars, index, consumed_end);
                     previous = TokenKind::Other;
                     continue;
                 }
@@ -221,10 +215,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 arrow_param,
             ) {
                 output.push_str(&replacement);
-                index = chars
-                    .iter()
-                    .position(|(offset, _)| *offset >= consumed_end)
-                    .unwrap_or(chars.len());
+                index = js_like_char_index_at_or_after(&chars, index, consumed_end);
                 previous = TokenKind::Other;
                 continue;
             }
@@ -239,10 +230,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 regular_expression_ranges,
             ) {
                 output.push_str(&replacement);
-                index = chars
-                    .iter()
-                    .position(|(offset, _)| *offset >= consumed_end)
-                    .unwrap_or(chars.len());
+                index = js_like_char_index_at_or_after(&chars, index, consumed_end);
                 previous = TokenKind::Other;
                 continue;
             }
@@ -371,6 +359,16 @@ fn rewrite_js_like_expression_into_with_ranges(
         }
         index += 1;
     }
+}
+
+pub(crate) fn js_like_char_index_at_or_after(
+    chars: &[(usize, char)],
+    current_index: usize,
+    byte_offset: usize,
+) -> usize {
+    current_index
+        + chars[current_index..]
+            .partition_point(|(offset, _)| *offset < byte_offset)
 }
 
 #[derive(Default)]
