@@ -25,3 +25,4 @@ vuec_source = { path = "../vuec_source", version = "0.1.0" }
 oxc_ast.workspace = true
 oxc_ast_visit.workspace = true
 oxc_span.workspace = true
+oxc_syntax.workspace = true

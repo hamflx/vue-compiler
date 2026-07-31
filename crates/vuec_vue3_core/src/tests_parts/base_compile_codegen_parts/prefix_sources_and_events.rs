@@ -472,6 +472,64 @@
     }
 
     #[test]
+    fn js_like_rewrite_supports_ecmascript_unicode_identifiers() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression("用户 + count", &options),
+            "_ctx.用户 + _ctx.count",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("(参数) => 参数 + 外部", &options),
+            "(参数) => 参数 + _ctx.外部",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("参数 => 参数 + 外部", &options),
+            "参数 => 参数 + _ctx.外部",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("const 局部 = 来源; 局部 + 外部", &options),
+            "const 局部 = _ctx.来源; 局部 + _ctx.外部",
+        );
+
+        let combining = "变量\u{0301}";
+        assert_eq!(
+            rewrite_js_like_expression(&format!("{combining} + 外部"), &options),
+            format!("_ctx.{combining} + _ctx.外部"),
+        );
+
+        let mut inline = options.clone();
+        inline.inline = true;
+        inline
+            .binding_metadata
+            .insert("引用".into(), "setup-ref".into());
+        assert_eq!(
+            rewrite_js_like_expression("引用 + 外部", &inline),
+            "引用.value + _ctx.外部",
+        );
+
+        let result = base_compile(
+            TemplateSource {
+                filename: "unicode.vue".into(),
+                source: "<div>{{ 用户 + count }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(
+            result.code.contains("_toDisplayString(_ctx.用户 + _ctx.count)"),
+            "{}",
+            result.code,
+        );
+    }
+
+    #[test]
     fn js_like_rewrite_ignores_regex_punctuation_when_rewriting_assignments() {
         let mut options = Vue3CompilerOptions {
             prefix_identifiers: true,

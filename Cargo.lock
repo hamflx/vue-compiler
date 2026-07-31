@@ -1858,6 +1858,7 @@ dependencies = [
  "oxc_ast",
  "oxc_ast_visit",
  "oxc_span",
+ "oxc_syntax",
  "serde",
  "serde_json",
  "vuec_ast",

@@ -25,11 +25,11 @@ pub(crate) fn next_non_ws(source: &str, offset: usize) -> Option<char> {
 }
 
 pub(crate) fn is_identifier_start(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+    oxc_syntax::identifier::is_identifier_start(ch)
 }
 
 pub(crate) fn is_identifier_continue(ch: char) -> bool {
-    is_identifier_start(ch) || ch.is_ascii_digit()
+    oxc_syntax::identifier::is_identifier_part(ch)
 }
 
 pub(crate) fn is_keyword(value: &str) -> bool {
