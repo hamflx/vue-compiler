@@ -139,8 +139,14 @@ pub(crate) fn process_expression_assignment_rhs<'a>(
     let operator = process_expression_assignment_operator(raw, operator_start)?;
     let rhs_start = skip_ws_forward(raw, operator_start + operator.len());
     let rhs_end = process_expression_assignment_rhs_end(raw, rhs_start);
-    let source = raw.get(rhs_start..rhs_end)?.trim();
-    (!source.is_empty()).then_some(ProcessExpressionAssignmentRhs { operator, source })
+    let raw_source = raw.get(rhs_start..rhs_end)?;
+    let source = raw_source.trim();
+    let source_start = rhs_start + raw_source.len().saturating_sub(raw_source.trim_start().len());
+    (!source.is_empty()).then_some(ProcessExpressionAssignmentRhs {
+        operator,
+        source,
+        source_start,
+    })
 }
 
 pub(crate) fn process_expression_assignment_can_start(raw: &str, start: usize) -> bool {

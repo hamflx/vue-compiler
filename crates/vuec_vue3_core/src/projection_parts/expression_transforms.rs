@@ -40,8 +40,9 @@ pub fn process_expression_projection(payload: &Value) -> Value {
             && !literal
             && (!is_global || options.binding_metadata.contains_key(raw))
         {
-            let content =
-                process_expression_rewrite_identifier(raw, &options, None, None, false, &[]);
+            let content = process_expression_rewrite_identifier(
+                raw, &options, None, None, false, &[], None,
+            );
             return json!({
                 "kind": "simple",
                 "content": content,

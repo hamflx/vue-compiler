@@ -555,6 +555,56 @@
         );
         assert_eq!(projection["children"][3]["content"], json!("bar"));
         assert_eq!(projection["helpers"], json!(["IS_REF"]));
+
+        let scoped = process_expression_test_statement_projection(
+            "function run(input) { target = input + hoisted + outside; var hoisted = source }",
+            json!({
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": { "target": "setup-let" }
+            }),
+        );
+        let target = scoped["children"]
+            .as_array()
+            .and_then(|children| {
+                children.iter().find(|child| {
+                    child
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.starts_with("_isRef(target)"))
+                })
+            })
+            .expect("setup-let replacement");
+        assert_eq!(
+            target["content"],
+            json!("_isRef(target) ? target.value = input + hoisted + _ctx.outside : target"),
+        );
+
+        let arrow = process_expression_test_projection(
+            "(input) => { target = input + outside }",
+            json!({
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": { "target": "setup-let" }
+            }),
+        );
+        let target = arrow["children"]
+            .as_array()
+            .and_then(|children| {
+                children.iter().find(|child| {
+                    child
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.starts_with("_isRef(target)"))
+                })
+            })
+            .expect("arrow setup-let replacement");
+        assert_eq!(
+            target["content"],
+            json!("_isRef(target) ? target.value = input + _ctx.outside : target"),
+        );
     }
 
     #[test]

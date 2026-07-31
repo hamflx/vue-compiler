@@ -487,7 +487,23 @@ pub(crate) fn process_expression_rewrite_source(
     options: &Vue3CompilerOptions,
     locals: &[String],
 ) -> String {
-    let mut identifiers = process_expression_identifier_spans(raw, options, locals);
+    let bindings = ProcessExpressionIdentifierBindingIndex::new(raw, options);
+    process_expression_rewrite_source_with_bindings(
+        raw,
+        options,
+        locals,
+        ProcessExpressionIdentifierBindingCursor::new(&bindings),
+    )
+}
+
+fn process_expression_rewrite_source_with_bindings(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    bindings: ProcessExpressionIdentifierBindingCursor<'_>,
+) -> String {
+    let mut identifiers =
+        process_expression_identifier_spans_with_bindings(raw, options, locals, bindings);
     identifiers.sort_by_key(|identifier| (identifier.start, identifier.end));
     let mut filtered = Vec::<ProcessExpressionIdentifier>::new();
     for identifier in identifiers {
@@ -716,6 +732,7 @@ pub(crate) struct ProcessExpressionArrowBindingIndex {
 pub(crate) struct ProcessExpressionAssignmentRhs<'a> {
     pub(crate) operator: &'a str,
     pub(crate) source: &'a str,
+    pub(crate) source_start: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,18 +741,100 @@ pub(crate) struct ProcessExpressionUpdate {
     pub(crate) prefix: bool,
 }
 
+struct ProcessExpressionIdentifierBindingIndex {
+    arrows: ProcessExpressionArrowBindingIndex,
+    locals: ProcessExpressionFunctionBindingIndex,
+}
+
+impl ProcessExpressionIdentifierBindingIndex {
+    fn new(raw: &str, options: &Vue3CompilerOptions) -> Self {
+        Self {
+            arrows: process_expression_arrow_bindings(raw),
+            locals: process_expression_function_bindings(raw, expression_source_type(options)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProcessExpressionIdentifierBindingCursor<'a> {
+    index: &'a ProcessExpressionIdentifierBindingIndex,
+    source_offset: usize,
+}
+
+impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
+    fn new(index: &'a ProcessExpressionIdentifierBindingIndex) -> Self {
+        Self {
+            index,
+            source_offset: 0,
+        }
+    }
+
+    fn at(self, offset: usize) -> Self {
+        Self {
+            index: self.index,
+            source_offset: self.source_offset + offset,
+        }
+    }
+
+    fn arrow_param(self, start: usize, end: usize) -> bool {
+        process_expression_is_arrow_param(
+            &self.index.arrows,
+            self.source_offset + start,
+            self.source_offset + end,
+        )
+    }
+
+    fn arrow_local(self, ident: &str, start: usize, end: usize) -> bool {
+        process_expression_is_arrow_local(
+            &self.index.arrows,
+            ident,
+            self.source_offset + start,
+            self.source_offset + end,
+        )
+    }
+
+    fn local(self, ident: &str, start: usize, end: usize) -> bool {
+        process_expression_is_function_binding(
+            &self.index.locals,
+            ident,
+            self.source_offset + start,
+            self.source_offset + end,
+        )
+    }
+
+    fn non_reference(self, start: usize, end: usize) -> bool {
+        process_expression_is_function_non_reference_key(
+            &self.index.locals,
+            self.source_offset + start,
+            self.source_offset + end,
+        )
+    }
+}
+
 pub(crate) fn process_expression_identifier_spans(
     raw: &str,
     options: &Vue3CompilerOptions,
     locals: &[String],
 ) -> Vec<ProcessExpressionIdentifier> {
+    let bindings = ProcessExpressionIdentifierBindingIndex::new(raw, options);
+    process_expression_identifier_spans_with_bindings(
+        raw,
+        options,
+        locals,
+        ProcessExpressionIdentifierBindingCursor::new(&bindings),
+    )
+}
+
+fn process_expression_identifier_spans_with_bindings(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    bindings: ProcessExpressionIdentifierBindingCursor<'_>,
+) -> Vec<ProcessExpressionIdentifier> {
     let mut spans = Vec::new();
     let mut quote = None::<char>;
     let mut escaped = false;
     let mut chars = raw.char_indices().peekable();
-    let arrow_bindings = process_expression_arrow_bindings(raw);
-    let function_bindings =
-        process_expression_function_bindings(raw, expression_source_type(options));
     while let Some((start, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
@@ -774,18 +873,12 @@ pub(crate) fn process_expression_identifier_spans(
         let local = locals.iter().any(|local| local == ident);
         let property_key = next == Some(':') && prev != Some('?');
         let static_member = prev == Some('.');
-        if process_expression_is_function_non_reference_key(&function_bindings, start, end) {
+        if bindings.non_reference(start, end) {
             continue;
         }
-        let arrow_param = process_expression_is_arrow_param(&arrow_bindings, start, end);
-        let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
-        let function_param = arrow_param
-            || process_expression_is_function_binding(
-                &function_bindings,
-                ident,
-                start,
-                end,
-            );
+        let arrow_param = bindings.arrow_param(start, end);
+        let arrow_local = bindings.arrow_local(ident, start, end);
+        let function_param = arrow_param || bindings.local(ident, start, end);
         if property_key && !function_param {
             continue;
         }
@@ -808,6 +901,7 @@ pub(crate) fn process_expression_identifier_spans(
                     update_argument,
                     destructure_assignment,
                     locals,
+                    Some(bindings),
                 )
             } else {
                 ident.to_string()
@@ -820,6 +914,7 @@ pub(crate) fn process_expression_identifier_spans(
                 update_argument,
                 destructure_assignment,
                 locals,
+                Some(bindings),
             )
         };
         let (replacement_start, replacement_end) = if let Some(update) =
@@ -904,7 +999,9 @@ pub(crate) fn process_expression_param_identifier_spans(
             let content = if is_global_or_literal(ident) {
                 ident.to_string()
             } else {
-                process_expression_rewrite_identifier(ident, options, None, None, false, &[])
+                process_expression_rewrite_identifier(
+                    ident, options, None, None, false, &[], None,
+                )
             };
             spans.push(ProcessExpressionIdentifier {
                 start,
@@ -984,13 +1081,14 @@ pub(crate) fn process_expression_object_shorthand(raw: &str, start: usize, end: 
         && next_non_ws(raw, end).is_some_and(|next| matches!(next, '}' | ','))
 }
 
-pub(crate) fn process_expression_rewrite_identifier(
+fn process_expression_rewrite_identifier(
     ident: &str,
     options: &Vue3CompilerOptions,
     assignment_rhs: Option<&ProcessExpressionAssignmentRhs<'_>>,
     update_argument: Option<ProcessExpressionUpdate>,
     destructure_assignment: bool,
     locals: &[String],
+    bindings: Option<ProcessExpressionIdentifierBindingCursor<'_>>,
 ) -> String {
     match options.binding_metadata.get(ident).map(String::as_str) {
         Some("setup-ref") if options.inline => {
@@ -1015,7 +1113,17 @@ pub(crate) fn process_expression_rewrite_identifier(
         }
         Some("setup-let") if options.inline => {
             if let Some(rhs) = assignment_rhs {
-                let rewritten_rhs = process_expression_rewrite_source(rhs.source, options, locals);
+                let rewritten_rhs = bindings.map_or_else(
+                    || process_expression_rewrite_source(rhs.source, options, locals),
+                    |bindings| {
+                        process_expression_rewrite_source_with_bindings(
+                            rhs.source,
+                            options,
+                            locals,
+                            bindings.at(rhs.source_start),
+                        )
+                    },
+                );
                 format!(
                     "_isRef({ident}) ? {ident}.value {} {} : {ident}",
                     rhs.operator,
