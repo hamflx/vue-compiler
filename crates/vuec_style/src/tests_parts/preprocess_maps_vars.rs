@@ -1,3 +1,52 @@
+    fn legacy_normalize_style_output(source: &str) -> String {
+        source
+            .replace("; }", ";\n}")
+            .replace("} }", "}\n}")
+            .replace("} .", "}\n.")
+            .replace("; .", ";\n.")
+            .lines()
+            .map(|line| if line.trim() == "}" { "}" } else { line })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn style_output_normalization_streams_with_legacy_semantics() {
+        let alphabet = [';', '}', '.', ' ', '\n', '\r', 'a'];
+        for width in 0..=6u32 {
+            let combinations = alphabet.len().pow(width);
+            for mut combination in 0..combinations {
+                let mut source = String::with_capacity(width as usize);
+                for _ in 0..width {
+                    source.push(alphabet[combination % alphabet.len()]);
+                    combination /= alphabet.len();
+                }
+                assert_eq!(
+                    normalize_style_output(&source),
+                    legacy_normalize_style_output(&source),
+                    "source: {source:?}"
+                );
+            }
+        }
+
+        for source in ["\u{2003}}\u{2003}", "a\r", "a\r\n", "} } .", "; } ."] {
+            assert_eq!(
+                normalize_style_output(source),
+                legacy_normalize_style_output(source),
+                "source: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn style_output_normalization_streams_dense_lines() {
+        let source = "\n".repeat(262_144);
+        let normalized = normalize_style_output(&source);
+
+        assert_eq!(normalized.len(), source.len() - 1);
+        assert!(normalized.bytes().all(|byte| byte == b'\n'));
+    }
+
     #[test]
     fn compiles_css_modules_relative_imports_before_locals_convention_projection() {
         let dir = tempfile::tempdir().expect("temp dir");

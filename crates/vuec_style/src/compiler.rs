@@ -328,15 +328,56 @@ pub(crate) fn line_starts(source: &str) -> Vec<usize> {
 }
 
 pub(crate) fn normalize_style_output(source: &str) -> String {
-    source
-        .replace("; }", ";\n}")
-        .replace("} }", "}\n}")
-        .replace("} .", "}\n.")
-        .replace("; .", ";\n.")
-        .lines()
-        .map(|line| if line.trim() == "}" { "}" } else { line })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut line_start = 0usize;
+    let mut has_line = false;
+    let mut next_brace_pair_search = 0usize;
+
+    for index in 0..bytes.len() {
+        let has_neighbors = index > 0 && index + 1 < bytes.len();
+        let replaces_brace_pair = bytes[index] == b' '
+            && has_neighbors
+            && bytes[index - 1] == b'}'
+            && bytes[index + 1] == b'}'
+            && index > next_brace_pair_search;
+        if replaces_brace_pair {
+            // `str::replace("} }", ...)` consumes non-overlapping matches.
+            next_brace_pair_search = index + 2;
+        }
+        let inserts_line_break = bytes[index] == b' '
+            && has_neighbors
+            && (replaces_brace_pair
+                || (bytes[index - 1] == b';' && matches!(bytes[index + 1], b'}' | b'.'))
+                || (bytes[index - 1] == b'}' && bytes[index + 1] == b'.'));
+        if bytes[index] != b'\n' && !inserts_line_break {
+            continue;
+        }
+
+        let mut line_end = index;
+        if bytes[index] == b'\n' && line_end > line_start && bytes[line_end - 1] == b'\r' {
+            line_end -= 1;
+        }
+        push_normalized_style_line(&mut output, &source[line_start..line_end], &mut has_line);
+        line_start = index + 1;
+    }
+    if line_start < source.len() {
+        push_normalized_style_line(&mut output, &source[line_start..], &mut has_line);
+    }
+    output
+}
+
+fn push_normalized_style_line(output: &mut String, line: &str, has_line: &mut bool) {
+    if *has_line {
+        output.push('\n');
+    } else {
+        *has_line = true;
+    }
+    if line.trim() == "}" {
+        output.push('}');
+    } else {
+        output.push_str(line);
+    }
 }
 
 pub(crate) fn normalize_public_closing_brace_whitespace(source: &str) -> String {
