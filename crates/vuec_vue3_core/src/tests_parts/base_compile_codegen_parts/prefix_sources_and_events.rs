@@ -565,6 +565,46 @@
     }
 
     #[test]
+    fn expression_scans_stream_multibyte_quoted_and_parameter_content() {
+        let expression = r#"(first = 'é\'hidden', { value: alias }) => first + alias"#;
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+        let arrow_offsets = process_expression_arrow_offsets(expression);
+        assert_eq!(arrow_offsets.len(), 1);
+        assert_eq!(
+            &expression[arrow_offsets[0]..arrow_offsets[0] + 2],
+            "=>"
+        );
+        let param_range = process_expression_arrow_param_range(expression, arrow_offsets[0])
+            .expect("arrow parameter range");
+
+        let binding_names = process_expression_param_binding_spans(expression, param_range)
+            .into_iter()
+            .map(|(start, end)| &expression[start..end])
+            .collect::<Vec<_>>();
+        assert_eq!(binding_names, ["first", "alias"]);
+
+        let param_names = process_expression_param_identifier_spans(
+            expression,
+            param_range,
+            &options,
+        )
+        .into_iter()
+        .map(|span| &expression[span.start..span.end])
+        .collect::<Vec<_>>();
+        assert_eq!(param_names, ["first", "alias"]);
+
+        let identifiers = process_expression_identifier_spans(expression, &options, &[]);
+        assert!(identifiers
+            .iter()
+            .all(|identifier| identifier.content != "_ctx.hidden"));
+        assert_eq!(rewrite_js_like_expression(expression, &options), expression);
+    }
+
+    #[test]
     fn base_compile_accepts_v_for_of_expression_with_v_memo() {
         let result = base_compile(
             TemplateSource {

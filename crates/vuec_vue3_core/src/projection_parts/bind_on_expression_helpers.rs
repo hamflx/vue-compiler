@@ -732,12 +732,9 @@ pub(crate) fn process_expression_identifier_spans(
     let mut spans = Vec::new();
     let mut quote = None::<char>;
     let mut escaped = false;
-    let chars = raw.char_indices().collect::<Vec<_>>();
-    let mut index = 0usize;
+    let mut chars = raw.char_indices().peekable();
     let arrow_bindings = process_expression_arrow_bindings(raw);
-    while index < chars.len() {
-        let start = chars[index].0;
-        let ch = chars[index].1;
+    while let Some((start, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;
@@ -746,23 +743,23 @@ pub(crate) fn process_expression_identifier_spans(
             } else if ch == active_quote {
                 quote = None;
             }
-            index += 1;
             continue;
         }
         if matches!(ch, '\'' | '"' | '`') {
             quote = Some(ch);
-            index += 1;
             continue;
         }
         if !is_identifier_start(ch) {
-            index += 1;
             continue;
         }
-        index += 1;
-        while index < chars.len() && is_identifier_continue(chars[index].1) {
-            index += 1;
+        let mut end = start + ch.len_utf8();
+        while let Some(&(offset, next)) = chars.peek() {
+            if !is_identifier_continue(next) {
+                break;
+            }
+            chars.next();
+            end = offset + next.len_utf8();
         }
-        let end = chars.get(index).map_or(raw.len(), |(offset, _)| *offset);
         let ident = &raw[start..end];
         let prev = previous_non_ws(raw, start);
         let next = next_non_ws(raw, end);
@@ -864,14 +861,11 @@ pub(crate) fn process_expression_param_identifier_spans(
     let mut spans = Vec::new();
     let mut quote = None::<char>;
     let mut escaped = false;
-    let chars = raw[range.0..range.1]
+    let mut chars = raw[range.0..range.1]
         .char_indices()
         .map(|(offset, ch)| (range.0 + offset, ch))
-        .collect::<Vec<_>>();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let start = chars[index].0;
-        let ch = chars[index].1;
+        .peekable();
+    while let Some((start, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;
@@ -880,23 +874,23 @@ pub(crate) fn process_expression_param_identifier_spans(
             } else if ch == active_quote {
                 quote = None;
             }
-            index += 1;
             continue;
         }
         if matches!(ch, '\'' | '"' | '`') {
             quote = Some(ch);
-            index += 1;
             continue;
         }
         if !is_identifier_start(ch) {
-            index += 1;
             continue;
         }
-        index += 1;
-        while index < chars.len() && is_identifier_continue(chars[index].1) {
-            index += 1;
+        let mut end = start + ch.len_utf8();
+        while let Some(&(offset, next)) = chars.peek() {
+            if !is_identifier_continue(next) {
+                break;
+            }
+            chars.next();
+            end = offset + next.len_utf8();
         }
-        let end = chars.get(index).map_or(range.1, |(offset, _)| *offset);
         let ident = &raw[start..end];
         if is_keyword(ident) || next_non_ws(raw, end) == Some(':') {
             continue;
@@ -1105,10 +1099,8 @@ pub(crate) fn process_expression_arrow_offsets(raw: &str) -> Vec<usize> {
     let mut offsets = Vec::new();
     let mut quote = None::<char>;
     let mut escaped = false;
-    let chars = raw.char_indices().collect::<Vec<_>>();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let (offset, ch) = chars[index];
+    let mut chars = raw.char_indices();
+    while let Some((offset, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;
@@ -1117,20 +1109,17 @@ pub(crate) fn process_expression_arrow_offsets(raw: &str) -> Vec<usize> {
             } else if ch == active_quote {
                 quote = None;
             }
-            index += 1;
             continue;
         }
         if matches!(ch, '\'' | '"' | '`') {
             quote = Some(ch);
-            index += 1;
             continue;
         }
         if ch == '=' && raw[offset..].starts_with("=>") {
             offsets.push(offset);
-            index += 2;
+            chars.next();
             continue;
         }
-        index += 1;
     }
     offsets
 }
@@ -1167,14 +1156,11 @@ pub(crate) fn process_expression_param_binding_spans(
     let mut spans = Vec::new();
     let mut quote = None::<char>;
     let mut escaped = false;
-    let chars = raw[range.0..range.1]
+    let mut chars = raw[range.0..range.1]
         .char_indices()
         .map(|(offset, ch)| (range.0 + offset, ch))
-        .collect::<Vec<_>>();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let start = chars[index].0;
-        let ch = chars[index].1;
+        .peekable();
+    while let Some((start, ch)) = chars.next() {
         if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;
@@ -1183,23 +1169,23 @@ pub(crate) fn process_expression_param_binding_spans(
             } else if ch == active_quote {
                 quote = None;
             }
-            index += 1;
             continue;
         }
         if matches!(ch, '\'' | '"' | '`') {
             quote = Some(ch);
-            index += 1;
             continue;
         }
         if !is_identifier_start(ch) {
-            index += 1;
             continue;
         }
-        index += 1;
-        while index < chars.len() && is_identifier_continue(chars[index].1) {
-            index += 1;
+        let mut end = start + ch.len_utf8();
+        while let Some(&(offset, next)) = chars.peek() {
+            if !is_identifier_continue(next) {
+                break;
+            }
+            chars.next();
+            end = offset + next.len_utf8();
         }
-        let end = chars.get(index).map_or(range.1, |(offset, _)| *offset);
         let ident = &raw[start..end];
         if is_keyword(ident)
             || process_expression_param_default_rhs(raw, range.0, start)
