@@ -9,13 +9,15 @@ pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
     scopes: BTreeMap<String, Vec<ProcessExpressionFunctionScope>>,
+    parsed: bool,
 }
 
 struct ProcessExpressionFunctionBindingCollector<'source> {
     source: &'source str,
     source_start: usize,
     source_end: usize,
-    declaration_scopes: Vec<(usize, usize)>,
+    lexical_scopes: Vec<(usize, usize)>,
+    var_scopes: Vec<(usize, usize)>,
     bindings: ProcessExpressionFunctionBindingIndex,
 }
 
@@ -25,7 +27,8 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
             source,
             source_start,
             source_end,
-            declaration_scopes: vec![(0, source_end - source_start)],
+            lexical_scopes: vec![(0, source_end - source_start)],
+            var_scopes: vec![(0, source_end - source_start)],
             bindings: ProcessExpressionFunctionBindingIndex::default(),
         }
     }
@@ -223,13 +226,35 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
             self.add_scope(identifier.name.as_str(), scope);
             if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
                 let outer_scope = self
-                    .declaration_scopes
+                    .lexical_scopes
                     .last()
                     .copied()
                     .unwrap_or((0, self.source_end - self.source_start));
                 self.add_scope(identifier.name.as_str(), outer_scope);
             }
         }
+        for param in &function.params.items {
+            self.add_pattern_bindings(&param.pattern, scope);
+        }
+        if let Some(rest) = &function.params.rest {
+            self.add_pattern_bindings(&rest.rest.argument, scope);
+        }
+    }
+
+    fn enter_arrow_function(
+        &mut self,
+        function: &oxc_ast::ast::ArrowFunctionExpression<'_>,
+    ) {
+        let Some(function_span) = self.relative_span(function.span) else {
+            return;
+        };
+        let scope_start = self
+            .relative_span(function.params.span)
+            .map_or(function_span.0, |span| span.0);
+        let scope_end = self
+            .relative_span(function.body.span)
+            .map_or(function_span.1, |span| span.1);
+        let scope = (scope_start, scope_end);
         for param in &function.params.items {
             self.add_pattern_bindings(&param.pattern, scope);
         }
@@ -252,11 +277,53 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
         self.add_scope(identifier.name.as_str(), (own_scope_start, class_scope.1));
         if class.r#type == oxc_ast::ast::ClassType::ClassDeclaration {
             let outer_scope = self
-                .declaration_scopes
+                .lexical_scopes
                 .last()
                 .copied()
                 .unwrap_or((0, self.source_end - self.source_start));
             self.add_scope(identifier.name.as_str(), outer_scope);
+        }
+    }
+
+    fn enter_variable_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::VariableDeclaration<'_>,
+    ) {
+        if matches!(
+            declaration.kind,
+            oxc_ast::ast::VariableDeclarationKind::Using
+                | oxc_ast::ast::VariableDeclarationKind::AwaitUsing
+        ) {
+            let before = declaration
+                .declarations
+                .first()
+                .map_or(declaration.span.end, |declarator| declarator.span.start);
+            self.add_non_reference_modifier_before(declaration.span, before, "using");
+        }
+        let scope = if declaration.kind == oxc_ast::ast::VariableDeclarationKind::Var {
+            self.var_scopes.last().copied()
+        } else {
+            self.lexical_scopes.last().copied()
+        };
+        let Some(scope) = scope else {
+            return;
+        };
+        for declarator in &declaration.declarations {
+            self.add_pattern_bindings(&declarator.id, scope);
+        }
+    }
+
+    fn enter_lexical_scope(&mut self, scope: Option<(usize, usize)>) -> bool {
+        let Some(scope) = scope else {
+            return false;
+        };
+        self.lexical_scopes.push(scope);
+        true
+    }
+
+    fn leave_lexical_scope(&mut self, entered: bool) {
+        if entered && self.lexical_scopes.len() > 1 {
+            self.lexical_scopes.pop();
         }
     }
 
@@ -282,6 +349,7 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
                 scope.max_scope_end = max_scope_end;
             }
         }
+        self.bindings.parsed = true;
         self.bindings
     }
 }
@@ -290,15 +358,34 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
     fn enter_node(&mut self, kind: oxc_ast::AstKind<'ast>) {
         match kind {
             oxc_ast::AstKind::Function(function) => self.enter_function(function),
+            oxc_ast::AstKind::ArrowFunctionExpression(function) => {
+                self.enter_arrow_function(function);
+            }
             oxc_ast::AstKind::Class(class) => self.enter_class(class),
             oxc_ast::AstKind::FunctionBody(body) => {
                 if let Some(scope) = self.relative_span(body.span) {
-                    self.declaration_scopes.push(scope);
+                    self.lexical_scopes.push(scope);
+                    self.var_scopes.push(scope);
                 }
             }
             oxc_ast::AstKind::BlockStatement(block) => {
-                if let Some(scope) = self.relative_span(block.span) {
-                    self.declaration_scopes.push(scope);
+                self.enter_lexical_scope(self.relative_span(block.span));
+            }
+            oxc_ast::AstKind::ForStatement(statement) => {
+                self.enter_lexical_scope(self.relative_span(statement.span));
+            }
+            oxc_ast::AstKind::ForInStatement(statement) => {
+                self.enter_lexical_scope(self.relative_span(statement.span));
+            }
+            oxc_ast::AstKind::ForOfStatement(statement) => {
+                self.enter_lexical_scope(self.relative_span(statement.span));
+            }
+            oxc_ast::AstKind::CatchClause(catch) => {
+                if let Some(scope) = self.relative_span(catch.span) {
+                    self.lexical_scopes.push(scope);
+                    if let Some(param) = &catch.param {
+                        self.add_pattern_bindings(&param.pattern, scope);
+                    }
                 }
             }
             oxc_ast::AstKind::SwitchStatement(switch) => {
@@ -306,7 +393,7 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
                 if let Some(scope) =
                     self.relative_braced_scope_after(switch.span, discriminant.end)
                 {
-                    self.declaration_scopes.push(scope);
+                    self.lexical_scopes.push(scope);
                 }
             }
             oxc_ast::AstKind::StaticBlock(block) => {
@@ -316,7 +403,16 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
                         (self.source_start + scope.0) as u32,
                         "static",
                     );
-                    self.declaration_scopes.push(scope);
+                    self.lexical_scopes.push(scope);
+                    self.var_scopes.push(scope);
+                }
+            }
+            oxc_ast::AstKind::VariableDeclaration(declaration) => {
+                self.enter_variable_declaration(declaration);
+            }
+            oxc_ast::AstKind::PrivateIdentifier(identifier) => {
+                if let Some(span) = self.relative_identifier_span(identifier.span) {
+                    self.bindings.non_reference_keys.insert(span);
                 }
             }
             oxc_ast::AstKind::PropertyDefinition(property) => {
@@ -372,22 +468,44 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
     }
 
     fn leave_node(&mut self, kind: oxc_ast::AstKind<'ast>) {
-        let entered_declaration_scope = match kind {
-            oxc_ast::AstKind::FunctionBody(body) => self.relative_span(body.span).is_some(),
+        if let oxc_ast::AstKind::FunctionBody(body) = kind {
+            if self.relative_span(body.span).is_some() {
+                if self.var_scopes.len() > 1 {
+                    self.var_scopes.pop();
+                }
+                self.leave_lexical_scope(true);
+            }
+            return;
+        }
+        let entered_lexical_scope = match kind {
             oxc_ast::AstKind::BlockStatement(block) => self.relative_span(block.span).is_some(),
+            oxc_ast::AstKind::ForStatement(statement) => {
+                self.relative_span(statement.span).is_some()
+            }
+            oxc_ast::AstKind::ForInStatement(statement) => {
+                self.relative_span(statement.span).is_some()
+            }
+            oxc_ast::AstKind::ForOfStatement(statement) => {
+                self.relative_span(statement.span).is_some()
+            }
+            oxc_ast::AstKind::CatchClause(catch) => self.relative_span(catch.span).is_some(),
             oxc_ast::AstKind::SwitchStatement(switch) => {
                 let discriminant = oxc_span::GetSpan::span(&switch.discriminant);
                 self.relative_braced_scope_after(switch.span, discriminant.end)
                     .is_some()
             }
-            oxc_ast::AstKind::StaticBlock(block) => self
-                .relative_braced_scope_after(block.span, block.span.start)
-                .is_some(),
+            oxc_ast::AstKind::StaticBlock(block) => {
+                let entered = self
+                    .relative_braced_scope_after(block.span, block.span.start)
+                    .is_some();
+                if entered && self.var_scopes.len() > 1 {
+                    self.var_scopes.pop();
+                }
+                entered
+            }
             _ => false,
         };
-        if entered_declaration_scope && self.declaration_scopes.len() > 1 {
-            self.declaration_scopes.pop();
-        }
+        self.leave_lexical_scope(entered_lexical_scope);
     }
 }
 
@@ -395,7 +513,11 @@ pub(crate) fn process_expression_function_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> ProcessExpressionFunctionBindingIndex {
-    if !raw.as_bytes().contains(&b'(') && !source_contains_identifier(raw, "class") {
+    let needs_binding_parse = raw.as_bytes().contains(&b'(')
+        || ["class", "const", "let", "using", "var"]
+            .iter()
+            .any(|keyword| source_contains_identifier(raw, keyword));
+    if !needs_binding_parse {
         return ProcessExpressionFunctionBindingIndex::default();
     }
 
@@ -476,4 +598,10 @@ pub(crate) fn process_expression_is_function_non_reference_key(
     end: usize,
 ) -> bool {
     bindings.non_reference_keys.contains(&(start, end))
+}
+
+pub(crate) fn process_expression_function_bindings_parsed(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> bool {
+    bindings.parsed
 }

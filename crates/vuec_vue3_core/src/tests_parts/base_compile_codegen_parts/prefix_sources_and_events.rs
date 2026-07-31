@@ -642,6 +642,13 @@
             ),
             "class { @_ctx.dec(_ctx.get) get /* get */ value() { return _ctx.outside } }",
         );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "class Box { #value = outside; read() { return this.#value + outside } write() { this.#value = outside } }",
+                &options,
+            ),
+            "class Box { #value = _ctx.outside; read() { return this.#value + _ctx.outside } write() { this.#value = _ctx.outside } }",
+        );
     }
 
     #[test]
@@ -697,10 +704,10 @@
         );
         assert_eq!(
             rewrite_js_like_expression(
-                "(class { static { function scoped() {} scoped() } }); scoped()",
+                "(class { static { function scoped() {} var local = outside; scoped(local) } }); scoped() + local",
                 &options,
             ),
-            "(class { static { function scoped() {} scoped() } }); _ctx.scoped()",
+            "(class { static { function scoped() {} var local = _ctx.outside; scoped(local) } }); _ctx.scoped() + _ctx.local",
         );
         assert_eq!(
             rewrite_js_like_expression(
@@ -712,6 +719,76 @@
         assert_eq!(
             rewrite_js_like_expression("(class Box { field = Box }); Box", &options),
             "(class Box { field = Box }); _ctx.Box",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function run() { use(hoisted); var hoisted = source; for (let item of items) { use(item) } return hoisted }; hoisted + item",
+                &options,
+            ),
+            "function run() { _ctx.use(hoisted); var hoisted = _ctx.source; for (let item of _ctx.items) { _ctx.use(item) } return hoisted }; _ctx.hoisted + _ctx.item",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "for (let item of items) use(item); item",
+                &options,
+            ),
+            "for (let item of _ctx.items) _ctx.use(item); _ctx.item",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"function run(input) { return `${input}:${hoisted}:${outside}`; var hoisted = source }"#,
+                &options,
+            ),
+            r#"function run(input) { return `${input}:${hoisted}:${_ctx.outside}`; var hoisted = _ctx.source }"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"`items: ${items.map(item => `${item}:${outside}`)}`"#,
+                &options,
+            ),
+            r#"`items: ${_ctx.items.map(item => `${item}:${_ctx.outside}`)}`"#,
+        );
+    }
+
+    #[test]
+    fn expression_rewrite_preserves_outer_bindings_in_assignment_rhs() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("target".into(), "setup-let".into());
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"function run(input) { target = `${input}:${hoisted}:${outside}`; var hoisted = source }"#,
+                &options,
+            ),
+            r#"function run(input) { _isRef(target) ? target.value = `${input}:${hoisted}:${_ctx.outside}` : target = `${input}:${hoisted}:${_ctx.outside}`; var hoisted = _ctx.source }"#,
+        );
+    }
+
+    #[test]
+    fn expression_rewrite_distinguishes_using_declarations_from_identifiers() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "using resource = source; resource; using + source",
+                &options,
+            ),
+            "using resource = _ctx.source; resource; _ctx.using + _ctx.source",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("await using resource = source; resource", &options),
+            "await using resource = _ctx.source; resource",
         );
     }
 
@@ -732,6 +809,54 @@
         let rewritten = rewrite_js_like_expression(&expression, &options);
         assert_eq!(rewritten.matches("_ctx.value").count(), IDENTIFIERS);
         assert_eq!(rewritten.matches(" + ").count(), IDENTIFIERS - 1);
+    }
+
+    #[test]
+    fn expression_rewrite_indexes_dense_sibling_lexical_scopes() {
+        const SCOPES: usize = 2_048;
+        let expression = format!(
+            "{}; value",
+            vec!["{ let value = source; use(value) }"; SCOPES].join("; ")
+        );
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        let rewritten = rewrite_js_like_expression(&expression, &options);
+        assert_eq!(rewritten.matches("let value").count(), SCOPES);
+        assert_eq!(rewritten.matches("_ctx.source").count(), SCOPES);
+        assert_eq!(rewritten.matches("_ctx.use(value)").count(), SCOPES);
+        assert_eq!(rewritten.matches("_ctx.value").count(), 1);
+        assert!(rewritten.ends_with("; _ctx.value"));
+    }
+
+    #[test]
+    fn expression_rewrite_indexes_dense_single_scope_declarations() {
+        const DECLARATIONS: usize = 2_048;
+        let declarations = (0..DECLARATIONS)
+            .map(|index| format!("local{index} = source"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let locals = (0..DECLARATIONS)
+            .map(|index| format!("local{index}"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let expression = format!(
+            "let {declarations}; {locals}; {}",
+            vec!["outside"; DECLARATIONS].join(" + ")
+        );
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        let rewritten = rewrite_js_like_expression(&expression, &options);
+        assert_eq!(rewritten.matches("_ctx.source").count(), DECLARATIONS);
+        assert_eq!(rewritten.matches("_ctx.outside").count(), DECLARATIONS);
+        assert!(!rewritten.contains("_ctx.local"));
     }
 
     #[test]

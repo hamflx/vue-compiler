@@ -453,6 +453,38 @@
     }
 
     #[test]
+    fn process_expression_projection_scopes_local_declarations() {
+        let projection = process_expression_test_statement_projection(
+            "function run(input) { use(hoisted); var hoisted = source; { let block = hoisted; use(block) } try { throw input } catch ({ message }) { use(message) } for (const item of items) { use(item) } return hoisted }; hoisted + block + message + item",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            "function run(input) { _ctx.use(hoisted); var hoisted = _ctx.source; { let block = hoisted; _ctx.use(block) } try { throw input } catch ({ message }) { _ctx.use(message) } for (const item of _ctx.items) { _ctx.use(item) } return hoisted }; _ctx.hoisted + _ctx.block + _ctx.message + _ctx.item",
+        );
+
+        let no_call = process_expression_test_statement_projection(
+            "let local = source; local",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&no_call),
+            "let local = _ctx.source; local",
+        );
+
+        let using = process_expression_test_statement_projection(
+            "using resource = source; resource; using + source",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&using),
+            "using resource = _ctx.source; resource; _ctx.using + _ctx.source",
+        );
+    }
+
+    #[test]
     fn process_expression_projection_rewrites_setup_let_assignment_rhs() {
         let projection = process_expression_test_projection(
             "(async () => { x = await bar })()",

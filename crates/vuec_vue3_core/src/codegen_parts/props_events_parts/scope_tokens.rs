@@ -4,12 +4,6 @@ pub(crate) struct Scope {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeclKind {
-    Var,
-    Block,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind {
     Identifier,
     Keyword,
