@@ -56,11 +56,11 @@ impl JsLikeExpressionBindingIndex {
     }
 
     fn arrow_param(&self, start: usize, end: usize) -> bool {
-        process_expression_is_arrow_param(&self.arrows, start, end)
+        !self.parsed() && process_expression_is_arrow_param(&self.arrows, start, end)
     }
 
     fn arrow_local(&self, ident: &str, start: usize, end: usize) -> bool {
-        process_expression_is_arrow_local(&self.arrows, ident, start, end)
+        !self.parsed() && process_expression_is_arrow_local(&self.arrows, ident, start, end)
     }
 
     fn local(&self, ident: &str, start: usize, end: usize) -> bool {

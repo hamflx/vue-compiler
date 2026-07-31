@@ -13,6 +13,8 @@ struct ProcessExpressionNonReferenceRange {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
+    identifier_spans: BTreeSet<(usize, usize)>,
+    object_shorthand_spans: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
     non_reference_ranges: Vec<ProcessExpressionNonReferenceRange>,
     scopes: BTreeMap<String, Vec<ProcessExpressionFunctionScope>>,
@@ -65,6 +67,28 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
     fn add_binding(&mut self, span: oxc_span::Span) {
         if let Some(span) = self.relative_identifier_span(span) {
             self.bindings.bindings.insert(span);
+        }
+    }
+
+    fn add_identifier_span(&mut self, span: oxc_span::Span, expected_name: &str) {
+        let Some((start, end)) = self.relative_identifier_span(span) else {
+            return;
+        };
+        let Some(identifier) = self
+            .source
+            .get(self.source_start + start..self.source_start + end)
+        else {
+            return;
+        };
+        if identifier != expected_name {
+            return;
+        }
+        self.bindings.identifier_spans.insert((start, end));
+    }
+
+    fn add_object_shorthand_span(&mut self, span: oxc_span::Span) {
+        if let Some(span) = self.relative_identifier_span(span) {
+            self.bindings.object_shorthand_spans.insert(span);
         }
     }
 
@@ -579,9 +603,47 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
     ) {
         self.add_non_reference_range(parameters.span);
     }
+
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'ast>) {
+        self.add_identifier_span(identifier.span, identifier.name.as_str());
+        oxc_ast_visit::walk::walk_binding_identifier(self, identifier);
+    }
+
+    fn visit_identifier_reference(
+        &mut self,
+        identifier: &oxc_ast::ast::IdentifierReference<'ast>,
+    ) {
+        self.add_identifier_span(identifier.span, identifier.name.as_str());
+        oxc_ast_visit::walk::walk_identifier_reference(self, identifier);
+    }
+
+    fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'ast>) {
+        if property.shorthand {
+            self.add_object_shorthand_span(oxc_span::GetSpan::span(&property.value));
+        }
+        oxc_ast_visit::walk::walk_object_property(self, property);
+    }
+
+    fn visit_assignment_target_property_identifier(
+        &mut self,
+        property: &oxc_ast::ast::AssignmentTargetPropertyIdentifier<'ast>,
+    ) {
+        self.add_object_shorthand_span(property.binding.span);
+        oxc_ast_visit::walk::walk_assignment_target_property_identifier(self, property);
+    }
+
+    fn visit_binding_property(&mut self, property: &oxc_ast::ast::BindingProperty<'ast>) {
+        if property.shorthand {
+            self.add_object_shorthand_span(oxc_span::GetSpan::span(&property.key));
+        }
+        oxc_ast_visit::walk::walk_binding_property(self, property);
+    }
 }
 
 pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
+// Oxc's visitor is recursive for left-deep expressions; large sources retain
+// the non-recursive lexical fallback instead of risking the thread stack.
+const PROCESS_EXPRESSION_MAX_FORCED_IDENTIFIER_AST_BYTES: usize = 4 * 1024;
 
 enum ProcessExpressionFunctionBindingParse {
     Parsed(ProcessExpressionFunctionBindingIndex),
@@ -592,12 +654,33 @@ pub(crate) fn process_expression_function_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> ProcessExpressionFunctionBindingIndex {
+    process_expression_function_bindings_with_mode(raw, source_type, false)
+}
+
+pub(crate) fn process_expression_identifier_bindings(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+) -> ProcessExpressionFunctionBindingIndex {
+    let needs_lexical_disambiguation = raw.as_bytes().contains(&b'`')
+        || raw.as_bytes().contains(&b'/')
+        || !raw.is_ascii();
+    let collect_identifiers = needs_lexical_disambiguation
+        && raw.len() <= PROCESS_EXPRESSION_MAX_FORCED_IDENTIFIER_AST_BYTES;
+    process_expression_function_bindings_with_mode(raw, source_type, collect_identifiers)
+}
+
+fn process_expression_function_bindings_with_mode(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+    collect_identifiers: bool,
+) -> ProcessExpressionFunctionBindingIndex {
     let needs_typescript_parse = source_type.is_typescript()
         && (raw.as_bytes().iter().any(|byte| matches!(byte, b':' | b'<'))
             || ["as", "interface", "satisfies", "type"]
                 .iter()
                 .any(|keyword| source_contains_identifier(raw, keyword)));
-    let needs_binding_parse = raw.as_bytes().contains(&b'(')
+    let needs_binding_parse = collect_identifiers
+        || raw.as_bytes().contains(&b'(')
         || ["class", "const", "let", "using", "var"]
             .iter()
             .any(|keyword| source_contains_identifier(raw, keyword))
@@ -804,4 +887,16 @@ pub(crate) fn process_expression_function_bindings_parsed(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> bool {
     bindings.parsed
+}
+
+pub(crate) fn process_expression_function_identifier_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.identifier_spans
+}
+
+pub(crate) fn process_expression_function_object_shorthand_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.object_shorthand_spans
 }

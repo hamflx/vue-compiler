@@ -750,7 +750,7 @@ impl ProcessExpressionIdentifierBindingIndex {
     fn new(raw: &str, options: &Vue3CompilerOptions) -> Self {
         Self {
             arrows: process_expression_arrow_bindings(raw),
-            locals: process_expression_function_bindings(raw, expression_source_type(options)),
+            locals: process_expression_identifier_bindings(raw, expression_source_type(options)),
         }
     }
 }
@@ -777,20 +777,22 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
     }
 
     fn arrow_param(self, start: usize, end: usize) -> bool {
-        process_expression_is_arrow_param(
-            &self.index.arrows,
-            self.source_offset + start,
-            self.source_offset + end,
-        )
+        !self.parsed()
+            && process_expression_is_arrow_param(
+                &self.index.arrows,
+                self.source_offset + start,
+                self.source_offset + end,
+            )
     }
 
     fn arrow_local(self, ident: &str, start: usize, end: usize) -> bool {
-        process_expression_is_arrow_local(
-            &self.index.arrows,
-            ident,
-            self.source_offset + start,
-            self.source_offset + end,
-        )
+        !self.parsed()
+            && process_expression_is_arrow_local(
+                &self.index.arrows,
+                ident,
+                self.source_offset + start,
+                self.source_offset + end,
+            )
     }
 
     fn local(self, ident: &str, start: usize, end: usize) -> bool {
@@ -808,6 +810,33 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
             self.source_offset + start,
             self.source_offset + end,
         )
+    }
+
+    fn parsed(self) -> bool {
+        process_expression_function_bindings_parsed(&self.index.locals)
+    }
+
+    fn identifier_spans(self, source_len: usize) -> Vec<(usize, usize)> {
+        let source_end = self.source_offset.saturating_add(source_len);
+        process_expression_function_identifier_spans(&self.index.locals)
+            .range((
+                std::ops::Bound::Included((self.source_offset, 0)),
+                std::ops::Bound::Excluded((source_end, 0)),
+            ))
+            .filter_map(|&(start, end)| {
+                (end <= source_end).then_some((
+                    start.saturating_sub(self.source_offset),
+                    end.saturating_sub(self.source_offset),
+                ))
+            })
+            .collect()
+    }
+
+    fn object_shorthand(self, start: usize, end: usize) -> bool {
+        process_expression_function_object_shorthand_spans(&self.index.locals).contains(&(
+            self.source_offset + start,
+            self.source_offset + end,
+        ))
     }
 }
 
@@ -832,35 +861,12 @@ fn process_expression_identifier_spans_with_bindings(
     bindings: ProcessExpressionIdentifierBindingCursor<'_>,
 ) -> Vec<ProcessExpressionIdentifier> {
     let mut spans = Vec::new();
-    let mut quote = None::<char>;
-    let mut escaped = false;
-    let mut chars = raw.char_indices().peekable();
-    while let Some((start, ch)) = chars.next() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        if !is_identifier_start(ch) {
-            continue;
-        }
-        let mut end = start + ch.len_utf8();
-        while let Some(&(offset, next)) = chars.peek() {
-            if !is_identifier_continue(next) {
-                break;
-            }
-            chars.next();
-            end = offset + next.len_utf8();
-        }
+    let identifier_spans = if bindings.parsed() {
+        bindings.identifier_spans(raw.len())
+    } else {
+        process_expression_lexical_identifier_spans(raw)
+    };
+    for (start, end) in identifier_spans {
         let ident = &raw[start..end];
         let prev = previous_non_ws(raw, start);
         let next = next_non_ws(raw, end);
@@ -924,7 +930,11 @@ fn process_expression_identifier_spans_with_bindings(
         } else {
             (start, end)
         };
-        let object_shorthand = process_expression_object_shorthand(raw, start, end);
+        let object_shorthand = if bindings.parsed() {
+            bindings.object_shorthand(start, end)
+        } else {
+            process_expression_object_shorthand(raw, start, end)
+        };
         let prefix = if property_key && content != ident
             || object_shorthand
                 && (content != ident
@@ -949,6 +959,42 @@ fn process_expression_identifier_spans_with_bindings(
                 || function_param
                 || arrow_local,
         });
+    }
+    spans
+}
+
+fn process_expression_lexical_identifier_spans(raw: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if !is_identifier_start(ch) {
+            continue;
+        }
+        let mut end = start + ch.len_utf8();
+        while let Some(&(offset, next)) = chars.peek() {
+            if !is_identifier_continue(next) {
+                break;
+            }
+            chars.next();
+            end = offset + next.len_utf8();
+        }
+        spans.push((start, end));
     }
     spans
 }

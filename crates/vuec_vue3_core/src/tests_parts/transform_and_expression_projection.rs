@@ -378,6 +378,61 @@
     }
 
     #[test]
+    fn process_expression_projection_rewrites_template_literal_expressions() {
+        let projection = process_expression_test_projection(
+            r#"`outer ${`inner ${value}` + /[}]/.test(other)}`"#,
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            r#"`outer ${`inner ${_ctx.value}` + /[}]/.test(_ctx.other)}`"#,
+        );
+    }
+
+    #[test]
+    fn process_expression_projection_preserves_regular_expressions_and_comments() {
+        let projection = process_expression_test_projection(
+            r#"/[a-z/]+/.test(value) /* outside */ + next"#,
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            r#"/[a-z/]+/.test(_ctx.value) /* outside */ + _ctx.next"#,
+        );
+    }
+
+    #[test]
+    fn process_expression_projection_uses_parsed_identifier_roles() {
+        let comment = process_expression_test_projection(
+            "/* (value) => */ value + outside",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&comment),
+            "/* (value) => */ _ctx.value + _ctx.outside",
+        );
+
+        let labels = process_expression_test_statement_projection(
+            "outer: while (ready) { if (skip) continue outer; break outer }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&labels),
+            "outer: while (_ctx.ready) { if (_ctx.skip) continue outer; break outer }",
+        );
+
+        let unicode = process_expression_test_projection(
+            "{ 用户 }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(projection_code(&unicode), "{ 用户: _ctx.用户 }");
+    }
+
+    #[test]
     fn process_expression_projection_preserves_slot_params_as_bindings() {
         let projection = process_expression_projection(&json!({
             "node": {
@@ -604,6 +659,31 @@
         assert_eq!(
             target["content"],
             json!("_isRef(target) ? target.value = input + _ctx.outside : target"),
+        );
+
+        let template = process_expression_test_statement_projection(
+            r#"function run(input) { target = `${input}:${outside}` }"#,
+            json!({
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": { "target": "setup-let" }
+            }),
+        );
+        let target = template["children"]
+            .as_array()
+            .and_then(|children| {
+                children.iter().find(|child| {
+                    child
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.starts_with("_isRef(target)"))
+                })
+            })
+            .expect("template setup-let replacement");
+        assert_eq!(
+            target["content"],
+            json!("_isRef(target) ? target.value = `${input}:${_ctx.outside}` : target"),
         );
     }
 

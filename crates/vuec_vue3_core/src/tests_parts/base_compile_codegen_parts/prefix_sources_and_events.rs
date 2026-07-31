@@ -433,6 +433,10 @@
             ),
             r#"/hidden/.test(_ctx.value) + `raw ${_ctx.other}`"#,
         );
+        assert_eq!(
+            rewrite_js_like_expression("/* (value) => */ value + outside", &options),
+            "/* (value) => */ _ctx.value + _ctx.outside",
+        );
 
         let result = base_compile(
             TemplateSource {
