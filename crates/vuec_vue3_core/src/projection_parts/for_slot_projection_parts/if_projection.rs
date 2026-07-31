@@ -292,6 +292,21 @@ pub(crate) fn vue3_options_from_transform_context(context: &Value) -> Vue3Compil
         is_ts: json_bool(context, "isTS"),
         ..Vue3CompilerOptions::default()
     };
+    options.expression_plugins = context
+        .get("expressionPlugins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|plugin| {
+            plugin.as_str().or_else(|| {
+                plugin
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(Value::as_str)
+            })
+        })
+        .map(str::to_string)
+        .collect();
     if let Some(metadata) = context.get("bindingMetadata").and_then(Value::as_object) {
         for (key, value) in metadata {
             if key == "__propsAliases" {

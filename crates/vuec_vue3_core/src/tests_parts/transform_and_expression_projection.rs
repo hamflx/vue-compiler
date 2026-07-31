@@ -483,6 +483,25 @@
     }
 
     #[test]
+    fn process_expression_projection_skips_typescript_type_positions() {
+        let projection = process_expression_test_projection(
+            "(value: External): Result<External> => factory<Generic>(value as Cast, outside satisfies Shape)",
+            json!({
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "expressionPlugins": ["typescript"]
+            }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            "(value: External): Result<External> => _ctx.factory<Generic>(value as Cast, _ctx.outside satisfies Shape)",
+        );
+    }
+
+    #[test]
     fn process_expression_projection_scopes_local_declarations() {
         let projection = process_expression_test_statement_projection(
             "function run(input) { use(hoisted); var hoisted = source; { let block = hoisted; use(block) } try { throw input } catch ({ message }) { use(message) } for (const item of items) { use(item) } return hoisted }; hoisted + block + message + item",

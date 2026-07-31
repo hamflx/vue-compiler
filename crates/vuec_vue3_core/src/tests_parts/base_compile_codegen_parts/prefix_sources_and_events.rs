@@ -904,6 +904,57 @@
     }
 
     #[test]
+    fn expression_rewrite_skips_typescript_type_positions() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            is_ts: true,
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(value: External, other: NS.Type = fallback): Result<External> => factory<Generic>(value as Cast, other satisfies Shape)",
+                &options,
+            ),
+            "(value: External, other: NS.Type = _ctx.fallback): Result<External> => _ctx.factory<Generic>(value as Cast, other satisfies Shape)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(<Cast>value).field + (source as NS.Type) + factory<Generic>(arg)",
+                &options,
+            ),
+            "(<Cast>_ctx.value).field + (_ctx.source as NS.Type) + _ctx.factory<Generic>(_ctx.arg)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function run<T extends Base>(value: T): Result<T> { const local: T = value; return local + T + outside }",
+                &options,
+            ),
+            "function run<T extends Base>(value: T): Result<T> { const local: T = value; return local + _ctx.T + _ctx.outside }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "type Local = External; interface Shape { field: External }; const value: Local = source; value + Local",
+                &options,
+            ),
+            "type Local = External; interface Shape { field: External }; const value: Local = _ctx.source; value + _ctx.Local",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("value as External", &options),
+            "_ctx.value as External",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("value satisfies Shape", &options),
+            "_ctx.value satisfies Shape",
+        );
+        assert_eq!(
+            rewrite_js_like_expression("as + value", &options),
+            "_ctx.as + _ctx.value",
+        );
+    }
+
+    #[test]
     fn expression_rewrite_indexes_dense_flat_identifiers() {
         const IDENTIFIERS: usize = 4_096;
         let expression = vec!["value"; IDENTIFIERS].join(" + ");

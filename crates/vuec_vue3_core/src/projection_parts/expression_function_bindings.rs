@@ -4,10 +4,17 @@ struct ProcessExpressionFunctionScope {
     max_scope_end: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ProcessExpressionNonReferenceRange {
+    range_start: usize,
+    max_range_end: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
+    non_reference_ranges: Vec<ProcessExpressionNonReferenceRange>,
     scopes: BTreeMap<String, Vec<ProcessExpressionFunctionScope>>,
     parsed: bool,
 }
@@ -58,6 +65,23 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
     fn add_binding(&mut self, span: oxc_span::Span) {
         if let Some(span) = self.relative_identifier_span(span) {
             self.bindings.bindings.insert(span);
+        }
+    }
+
+    fn add_non_reference_range(&mut self, span: oxc_span::Span) {
+        if let Some((range_start, max_range_end)) = self.relative_span(span) {
+            self.bindings
+                .non_reference_ranges
+                .push(ProcessExpressionNonReferenceRange {
+                    range_start,
+                    max_range_end,
+                });
+        }
+    }
+
+    fn add_non_reference_between(&mut self, after: u32, before: u32) {
+        if after <= before {
+            self.add_non_reference_range(oxc_span::Span::new(after, before));
         }
     }
 
@@ -349,6 +373,14 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
                 scope.max_scope_end = max_scope_end;
             }
         }
+        self.bindings
+            .non_reference_ranges
+            .sort_unstable_by_key(|range| (range.range_start, range.max_range_end));
+        let mut max_range_end = 0usize;
+        for range in &mut self.bindings.non_reference_ranges {
+            max_range_end = max_range_end.max(range.max_range_end);
+            range.max_range_end = max_range_end;
+        }
         self.bindings.parsed = true;
         self.bindings
     }
@@ -409,6 +441,24 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
             }
             oxc_ast::AstKind::VariableDeclaration(declaration) => {
                 self.enter_variable_declaration(declaration);
+            }
+            oxc_ast::AstKind::TSAsExpression(expression) => {
+                self.add_non_reference_between(
+                    oxc_span::GetSpan::span(&expression.expression).end,
+                    oxc_span::GetSpan::span(&expression.type_annotation).start,
+                );
+            }
+            oxc_ast::AstKind::TSSatisfiesExpression(expression) => {
+                self.add_non_reference_between(
+                    oxc_span::GetSpan::span(&expression.expression).end,
+                    oxc_span::GetSpan::span(&expression.type_annotation).start,
+                );
+            }
+            oxc_ast::AstKind::TSTypeAliasDeclaration(declaration) => {
+                self.add_non_reference_range(declaration.span);
+            }
+            oxc_ast::AstKind::TSInterfaceDeclaration(declaration) => {
+                self.add_non_reference_range(declaration.span);
             }
             oxc_ast::AstKind::PrivateIdentifier(identifier) => {
                 if let Some(span) = self.relative_identifier_span(identifier.span) {
@@ -507,6 +557,28 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
         };
         self.leave_lexical_scope(entered_lexical_scope);
     }
+
+    fn visit_ts_type(&mut self, ty: &oxc_ast::ast::TSType<'ast>) {
+        self.add_non_reference_range(oxc_span::GetSpan::span(ty));
+    }
+
+    fn visit_ts_type_annotation(&mut self, ty: &oxc_ast::ast::TSTypeAnnotation<'ast>) {
+        self.add_non_reference_range(ty.span);
+    }
+
+    fn visit_ts_type_parameter_declaration(
+        &mut self,
+        parameters: &oxc_ast::ast::TSTypeParameterDeclaration<'ast>,
+    ) {
+        self.add_non_reference_range(parameters.span);
+    }
+
+    fn visit_ts_type_parameter_instantiation(
+        &mut self,
+        parameters: &oxc_ast::ast::TSTypeParameterInstantiation<'ast>,
+    ) {
+        self.add_non_reference_range(parameters.span);
+    }
 }
 
 pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
@@ -520,10 +592,16 @@ pub(crate) fn process_expression_function_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> ProcessExpressionFunctionBindingIndex {
+    let needs_typescript_parse = source_type.is_typescript()
+        && (raw.as_bytes().iter().any(|byte| matches!(byte, b':' | b'<'))
+            || ["as", "interface", "satisfies", "type"]
+                .iter()
+                .any(|keyword| source_contains_identifier(raw, keyword)));
     let needs_binding_parse = raw.as_bytes().contains(&b'(')
         || ["class", "const", "let", "using", "var"]
             .iter()
-            .any(|keyword| source_contains_identifier(raw, keyword));
+            .any(|keyword| source_contains_identifier(raw, keyword))
+        || needs_typescript_parse;
     if !needs_binding_parse {
         return ProcessExpressionFunctionBindingIndex::default();
     }
@@ -713,7 +791,13 @@ pub(crate) fn process_expression_is_function_non_reference_key(
     start: usize,
     end: usize,
 ) -> bool {
-    bindings.non_reference_keys.contains(&(start, end))
+    if bindings.non_reference_keys.contains(&(start, end)) {
+        return true;
+    }
+    let containing = bindings
+        .non_reference_ranges
+        .partition_point(|range| range.range_start <= start);
+    containing > 0 && end <= bindings.non_reference_ranges[containing - 1].max_range_end
 }
 
 pub(crate) fn process_expression_function_bindings_parsed(
