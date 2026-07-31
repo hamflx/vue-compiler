@@ -21,6 +21,15 @@ pub fn process_expression_projection(payload: &Value) -> Value {
     }
 
     let options = vue3_options_from_transform_context(context);
+    let source_type = transform_on_source_type(context);
+    if process_expression_ast_required_unavailable(raw, source_type) {
+        return json!({
+            "kind": "error",
+            "code": 46,
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+            "message": PROCESS_EXPRESSION_AST_LIMIT_MESSAGE,
+        });
+    }
     let locals = process_expression_locals(payload, context);
     if as_params {
         if is_simple_identifier_ascii(raw) {
@@ -70,12 +79,10 @@ pub fn process_expression_projection(payload: &Value) -> Value {
     let parse_ok = if process_expression_uses_supported_external_plugin(raw, context) {
         true
     } else if as_raw_statements {
-        let parsed = store.parse_program(&source, transform_on_source_type(context));
+        let parsed = store.parse_program(&source, source_type);
         !parsed.panicked && parsed.errors.is_empty()
     } else {
-        store
-            .parse_expression(&source, transform_on_source_type(context))
-            .is_ok()
+        store.parse_expression(&source, source_type).is_ok()
     };
     if !parse_ok {
         return json!({

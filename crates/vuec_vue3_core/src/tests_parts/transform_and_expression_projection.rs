@@ -566,6 +566,63 @@
     }
 
     #[test]
+    fn process_expression_projection_supports_jsx_and_tsx_plugins() {
+        let jsx = process_expression_test_projection(
+            "(item) => <><div title=\"raw\">hello {item}</div><Comp {...props}>{outside}</Comp></>",
+            json!({
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "expressionPlugins": [["jsx", {}]]
+            }),
+        );
+
+        assert_eq!(jsx["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&jsx),
+            "(item) => <><div title=\"raw\">hello {item}</div><Comp {..._ctx.props}>{_ctx.outside}</Comp></>",
+        );
+
+        let tsx = process_expression_test_projection(
+            "(item: Item) => <Comp value={item as Item}>{outside}</Comp>",
+            json!({
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "expressionPlugins": ["typescript", "jsx"]
+            }),
+        );
+
+        assert_eq!(tsx["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&tsx),
+            "(item: Item) => <Comp value={item as Item}>{_ctx.outside}</Comp>",
+        );
+    }
+
+    #[test]
+    fn process_expression_projection_rejects_jsx_above_the_safe_ast_limit() {
+        let source = format!("<div>{}{{outside}}</div>", "plain text ".repeat(450));
+        assert!(source.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        let projection = process_expression_test_projection(
+            &source,
+            json!({
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "expressionPlugins": ["jsx"]
+            }),
+        );
+
+        assert_eq!(projection["kind"], json!("error"));
+        assert_eq!(projection["code"], json!(46));
+        assert_eq!(
+            projection["message"],
+            json!(PROCESS_EXPRESSION_AST_LIMIT_MESSAGE),
+        );
+    }
+
+    #[test]
     fn process_expression_projection_scopes_local_declarations() {
         let projection = process_expression_test_statement_projection(
             "function run(input) { use(hoisted); var hoisted = source; { let block = hoisted; use(block) } try { throw input } catch ({ message }) { use(message) } for (const item of items) { use(item) } return hoisted }; hoisted + block + message + item",

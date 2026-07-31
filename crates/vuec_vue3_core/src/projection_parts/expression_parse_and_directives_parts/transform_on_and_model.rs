@@ -192,8 +192,20 @@ pub(crate) fn transform_on_root_function_locals_lexer(expression: &str) -> Vec<S
 }
 
 pub(crate) fn transform_on_source_type(context: &Value) -> oxc_span::SourceType {
-    let _ = context;
-    oxc_span::SourceType::ts()
+    let jsx = context
+        .get("expressionPlugins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|plugin| {
+            plugin.as_str() == Some("jsx")
+                || plugin
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(Value::as_str)
+                    == Some("jsx")
+        });
+    oxc_span::SourceType::ts().with_jsx(jsx)
 }
 
 pub(crate) fn transform_on_is_member_expression_lexer(expression: &str) -> bool {

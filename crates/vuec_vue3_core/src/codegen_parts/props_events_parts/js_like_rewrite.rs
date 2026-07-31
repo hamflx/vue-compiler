@@ -23,6 +23,11 @@ pub(crate) fn rewrite_js_like_expression_into(
     root_locals: Vec<String>,
     output: &mut String,
 ) {
+    let source_type = expression_source_type(options);
+    if process_expression_ast_required_unavailable(expression, source_type) {
+        output.push_str(expression);
+        return;
+    }
     let regular_expression_ranges = js_like_regular_expression_ranges(expression, options);
     let bindings = JsLikeExpressionBindingIndex::new(expression, options);
     rewrite_js_like_expression_into_with_ranges(
@@ -57,6 +62,10 @@ impl JsLikeExpressionBindingIndex {
 
     fn parsed(&self) -> bool {
         process_expression_function_bindings_parsed(&self.locals)
+    }
+
+    fn ast_required_unavailable(&self) -> bool {
+        process_expression_function_bindings_ast_required_unavailable(&self.locals)
     }
 
     fn arrow_param(&self, start: usize, end: usize) -> bool {
@@ -99,6 +108,10 @@ impl<'a> JsLikeExpressionBindingCursor<'a> {
 
     fn parsed(self) -> bool {
         self.index.parsed()
+    }
+
+    fn ast_required_unavailable(self) -> bool {
+        self.index.ast_required_unavailable()
     }
 
     fn arrow_param(self, start: usize, end: usize) -> bool {
@@ -159,6 +172,10 @@ fn rewrite_js_like_expression_into_with_ranges(
     regular_expression_ranges: &[(usize, usize)],
     bindings: JsLikeExpressionBindingCursor<'_>,
 ) {
+    if bindings.ast_required_unavailable() {
+        output.push_str(expression);
+        return;
+    }
     let mut regular_expression_index = 0usize;
     let mut scopes = vec![Scope {
         locals: root_locals,
@@ -511,6 +528,9 @@ pub(crate) fn js_like_regular_expression_ranges(
 
     let store = JsAstStore::new();
     let source_type = expression_source_type(options);
+    if process_expression_ast_required_unavailable(expression, source_type) {
+        return Vec::new();
+    }
     if let Ok(parsed) = store.parse_expression(expression, source_type) {
         let mut collector = JsLikeRegExpCollector::default();
         oxc_ast_visit::Visit::visit_expression(&mut collector, &parsed);

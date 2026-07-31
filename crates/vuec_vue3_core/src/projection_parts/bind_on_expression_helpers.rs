@@ -820,6 +820,10 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
         process_expression_function_bindings_parsed(&self.index.locals)
     }
 
+    fn ast_required_unavailable(self) -> bool {
+        process_expression_function_bindings_ast_required_unavailable(&self.index.locals)
+    }
+
     fn identifier_spans(self, source_len: usize) -> Vec<(usize, usize)> {
         let source_end = self.source_offset.saturating_add(source_len);
         process_expression_function_identifier_spans(&self.index.locals)
@@ -876,6 +880,9 @@ fn process_expression_identifier_spans_with_bindings(
     locals: &[String],
     bindings: ProcessExpressionIdentifierBindingCursor<'_>,
 ) -> Vec<ProcessExpressionIdentifier> {
+    if bindings.ast_required_unavailable() {
+        return Vec::new();
+    }
     let mut spans = Vec::new();
     let identifier_spans = if bindings.parsed() {
         bindings.identifier_spans(raw.len())

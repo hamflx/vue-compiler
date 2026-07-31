@@ -20,6 +20,7 @@ pub(crate) struct ProcessExpressionFunctionBindingIndex {
     non_reference_ranges: Vec<ProcessExpressionNonReferenceRange>,
     scopes: BTreeMap<String, Vec<ProcessExpressionFunctionScope>>,
     parsed: bool,
+    ast_required_unavailable: bool,
 }
 
 struct ProcessExpressionFunctionBindingCollector<'source> {
@@ -703,6 +704,21 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
         oxc_ast_visit::walk::walk_identifier_reference(self, identifier);
     }
 
+    fn visit_jsx_element_name(&mut self, name: &oxc_ast::ast::JSXElementName<'ast>) {
+        self.add_non_reference_range(oxc_span::GetSpan::span(name));
+        oxc_ast_visit::walk::walk_jsx_element_name(self, name);
+    }
+
+    fn visit_jsx_attribute_name(&mut self, name: &oxc_ast::ast::JSXAttributeName<'ast>) {
+        self.add_non_reference_range(oxc_span::GetSpan::span(name));
+        oxc_ast_visit::walk::walk_jsx_attribute_name(self, name);
+    }
+
+    fn visit_jsx_text(&mut self, text: &oxc_ast::ast::JSXText<'ast>) {
+        self.add_non_reference_range(text.span);
+        oxc_ast_visit::walk::walk_jsx_text(self, text);
+    }
+
     fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'ast>) {
         if property.shorthand {
             self.add_object_shorthand_span(oxc_span::GetSpan::span(&property.value));
@@ -727,9 +743,26 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
 }
 
 pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
+pub(crate) const PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES: usize = 4 * 1024;
+pub(crate) const PROCESS_EXPRESSION_AST_LIMIT_MESSAGE: &str =
+    "Error parsing JavaScript expression: JSX expression exceeds the safe analysis limit.";
 // Oxc's visitor is recursive for left-deep expressions; large sources retain
 // the non-recursive lexical fallback instead of risking the thread stack.
-const PROCESS_EXPRESSION_MAX_FORCED_IDENTIFIER_AST_BYTES: usize = 4 * 1024;
+
+pub(crate) fn process_expression_requires_jsx_ast(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+) -> bool {
+    source_type.is_jsx() && raw.as_bytes().contains(&b'<')
+}
+
+pub(crate) fn process_expression_ast_required_unavailable(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+) -> bool {
+    process_expression_requires_jsx_ast(raw, source_type)
+        && raw.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
+}
 
 enum ProcessExpressionFunctionBindingParse {
     Parsed(ProcessExpressionFunctionBindingIndex),
@@ -747,12 +780,13 @@ pub(crate) fn process_expression_identifier_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> ProcessExpressionFunctionBindingIndex {
-    let needs_lexical_disambiguation = raw.as_bytes().contains(&b'`')
+    let needs_lexical_disambiguation = process_expression_requires_jsx_ast(raw, source_type)
+        || raw.as_bytes().contains(&b'`')
         || raw.as_bytes().contains(&b'/')
         || !raw.is_ascii()
         || process_expression_may_have_destructure_assignment(raw);
     let collect_identifiers = needs_lexical_disambiguation
-        && raw.len() <= PROCESS_EXPRESSION_MAX_FORCED_IDENTIFIER_AST_BYTES;
+        && raw.len() <= PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES;
     if collect_identifiers {
         process_expression_function_bindings_with_mode(raw, source_type, true)
     } else {
@@ -765,6 +799,12 @@ fn process_expression_function_bindings_with_mode(
     source_type: oxc_span::SourceType,
     collect_identifiers: bool,
 ) -> ProcessExpressionFunctionBindingIndex {
+    if process_expression_ast_required_unavailable(raw, source_type) {
+        return ProcessExpressionFunctionBindingIndex {
+            ast_required_unavailable: true,
+            ..ProcessExpressionFunctionBindingIndex::default()
+        };
+    }
     let needs_typescript_parse = source_type.is_typescript()
         && (raw.as_bytes().iter().any(|byte| matches!(byte, b':' | b'<'))
             || ["as", "interface", "satisfies", "type"]
@@ -978,6 +1018,12 @@ pub(crate) fn process_expression_function_bindings_parsed(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> bool {
     bindings.parsed
+}
+
+pub(crate) fn process_expression_function_bindings_ast_required_unavailable(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> bool {
+    bindings.ast_required_unavailable
 }
 
 pub(crate) fn process_expression_function_identifier_spans(

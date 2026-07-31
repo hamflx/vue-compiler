@@ -472,6 +472,124 @@
     }
 
     #[test]
+    fn js_like_rewrite_supports_jsx_expression_plugins() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            expression_plugins: vec!["jsx".into()],
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"() => <div title="raw">hello {msg}<span>{other}</span></div>"#,
+                &options,
+            ),
+            r#"() => <div title="raw">hello {_ctx.msg}<span>{_ctx.other}</span></div>"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(item) => <><Foo.Bar {...props}>{item}</Foo.Bar><Comp value={outside} /></>",
+                &options,
+            ),
+            "(item) => <><Foo.Bar {..._ctx.props}>{item}</Foo.Bar><Comp value={_ctx.outside} /></>",
+        );
+
+        let mut tsx = options.clone();
+        tsx.expression_plugins.push("typescript".into());
+        assert_eq!(
+            rewrite_js_like_expression(
+                "(item: Item) => <Comp>{item as Item}{outside}</Comp>",
+                &tsx,
+            ),
+            "(item: Item) => <Comp>{item as Item}{_ctx.outside}</Comp>",
+        );
+
+        let result = base_compile(
+            TemplateSource {
+                filename: "jsx.vue".into(),
+                source: "<div>{{ () => <span>{msg}</span> }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options.clone(),
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(
+            result.code.contains("() => <span>{_ctx.msg}</span>"),
+            "{}",
+            result.code,
+        );
+
+        let malformed = base_compile(
+            TemplateSource {
+                filename: "malformed-jsx.vue".into(),
+                source: "<div>{{ () => <span>{msg} }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(!malformed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn js_like_rewrite_rejects_jsx_above_the_safe_ast_limit() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            expression_plugins: vec!["jsx".into()],
+            ..Vue3CompilerOptions::default()
+        };
+        let exact_jsx = format!(
+            "<div>{}{{msg}}</div>",
+            "x".repeat(PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES - "<div>{msg}</div>".len()),
+        );
+        assert_eq!(exact_jsx.len(), PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert_eq!(
+            rewrite_js_like_expression(&exact_jsx, &options),
+            exact_jsx.replace("{msg}", "{_ctx.msg}"),
+        );
+
+        let long_jsx = format!("<div>{}{{msg}}</div>", "plain text ".repeat(450));
+        assert!(long_jsx.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert_eq!(
+            rewrite_js_like_expression(&long_jsx, &options),
+            long_jsx,
+        );
+
+        let deep_jsx = format!(
+            "{}{{outside}}{}",
+            "<Box>".repeat(700),
+            "</Box>".repeat(700),
+        );
+        assert!(deep_jsx.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert_eq!(
+            rewrite_js_like_expression(&deep_jsx, &options),
+            deep_jsx,
+        );
+
+        let mut compile_options = options;
+        compile_options.source_map = true;
+        let result = base_compile(
+            TemplateSource {
+                filename: "long-jsx.vue".into(),
+                source: format!("<section>{{{{ {long_jsx} }}}}</section>"),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            compile_options,
+        );
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "46"
+                && diagnostic.message == PROCESS_EXPRESSION_AST_LIMIT_MESSAGE));
+        assert!(!result.code.contains("<_ctx.div"), "{}", result.code);
+        assert!(!result.code.contains("_ctx.plain"), "{}", result.code);
+    }
+
+    #[test]
     fn js_like_rewrite_supports_ecmascript_unicode_identifiers() {
         let options = Vue3CompilerOptions {
             prefix_identifiers: true,

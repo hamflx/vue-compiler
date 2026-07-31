@@ -168,6 +168,14 @@ pub(crate) fn push_for_expression_diagnostic(
         ));
         return;
     }
+    if push_expression_ast_limit_diagnostic(
+        expression,
+        dir.exp_span.or(dir.span),
+        source_type,
+        diagnostics,
+    ) {
+        return;
+    }
     if store.parse_for_expression(expression, source_type).is_err() {
         diagnostics.push(vue3_for_diagnostic(
             Vue3ErrorCode::XVForMalformedExpression,
@@ -252,6 +260,9 @@ pub(crate) fn push_event_handler_parse_diagnostic(
     if expression.is_empty() {
         return;
     }
+    if push_expression_ast_limit_diagnostic(expression, span, source_type, diagnostics) {
+        return;
+    }
     let wrapped = format!("({expression})");
     if store.parse_expression(&wrapped, source_type).is_ok() {
         return;
@@ -282,6 +293,9 @@ pub(crate) fn push_expression_parse_diagnostic(
     if expression.is_empty() {
         return;
     }
+    if push_expression_ast_limit_diagnostic(expression, span, source_type, diagnostics) {
+        return;
+    }
     let wrapped = format!("({expression})");
     let Err(err) = store.parse_expression(&wrapped, source_type) else {
         return;
@@ -291,8 +305,23 @@ pub(crate) fn push_expression_parse_diagnostic(
     ));
 }
 
+fn push_expression_ast_limit_diagnostic(
+    expression: &str,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    if !process_expression_ast_required_unavailable(expression, source_type) {
+        return false;
+    }
+    diagnostics.push(
+        Diagnostic::error("46", PROCESS_EXPRESSION_AST_LIMIT_MESSAGE).with_span(span),
+    );
+    true
+}
+
 pub(crate) fn expression_source_type(options: &Vue3CompilerOptions) -> oxc_span::SourceType {
-    if options.is_ts
+    let source_type = if options.is_ts
         || options
             .expression_plugins
             .iter()
@@ -301,5 +330,11 @@ pub(crate) fn expression_source_type(options: &Vue3CompilerOptions) -> oxc_span:
         oxc_span::SourceType::ts()
     } else {
         oxc_span::SourceType::mjs()
-    }
+    };
+    source_type.with_jsx(
+        options
+            .expression_plugins
+            .iter()
+            .any(|plugin| plugin == "jsx"),
+    )
 }

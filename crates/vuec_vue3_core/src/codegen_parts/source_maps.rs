@@ -627,6 +627,9 @@ pub(crate) fn expression_source_map_tokens(
     include_globals: bool,
     source_type: oxc_span::SourceType,
 ) -> Vec<(usize, String)> {
+    if process_expression_ast_required_unavailable(expression, source_type) {
+        return Vec::new();
+    }
     parsed_expression_source_map_tokens(expression, include_globals, source_type)
         .unwrap_or_else(|| lexical_expression_source_map_tokens(expression, include_globals))
 }
@@ -673,6 +676,9 @@ fn parsed_expression_source_map_tokens(
     include_globals: bool,
     source_type: oxc_span::SourceType,
 ) -> Option<Vec<(usize, String)>> {
+    if process_expression_ast_required_unavailable(expression, source_type) {
+        return Some(Vec::new());
+    }
     let store = JsAstStore::new();
     let (mut collector, source_start, source_end) =
         if let Ok(parsed) = store.parse_expression(expression, source_type) {
