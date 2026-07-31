@@ -700,13 +700,16 @@ pub(crate) struct ProcessExpressionIdentifier {
     pub(crate) is_constant: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ProcessExpressionArrowBinding {
-    pub(crate) name: String,
-    pub(crate) param_start: usize,
-    pub(crate) param_end: usize,
-    pub(crate) body_start: usize,
-    pub(crate) body_end: usize,
+#[derive(Clone, Copy, Debug)]
+struct ProcessExpressionArrowScope {
+    body_start: usize,
+    max_body_end: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProcessExpressionArrowBindingIndex {
+    params: BTreeSet<(usize, usize)>,
+    scopes: BTreeMap<String, Vec<ProcessExpressionArrowScope>>,
 }
 
 #[derive(Clone, Debug)]
@@ -777,7 +780,7 @@ pub(crate) fn process_expression_identifier_spans(
         if method_name {
             continue;
         }
-        let arrow_param = process_expression_is_arrow_param(&arrow_bindings, ident, start, end);
+        let arrow_param = process_expression_is_arrow_param(&arrow_bindings, start, end);
         let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
         let function_param =
             arrow_param || function_name || process_expression_is_function_param(raw, start);
@@ -955,25 +958,24 @@ pub(crate) fn process_expression_is_function_param(raw: &str, start: usize) -> b
 }
 
 pub(crate) fn process_expression_is_arrow_param(
-    bindings: &[ProcessExpressionArrowBinding],
-    ident: &str,
+    bindings: &ProcessExpressionArrowBindingIndex,
     start: usize,
     end: usize,
 ) -> bool {
-    bindings.iter().any(|binding| {
-        binding.name == ident && binding.param_start == start && binding.param_end == end
-    })
+    bindings.params.contains(&(start, end))
 }
 
 pub(crate) fn process_expression_is_arrow_local(
-    bindings: &[ProcessExpressionArrowBinding],
+    bindings: &ProcessExpressionArrowBindingIndex,
     ident: &str,
     start: usize,
     end: usize,
 ) -> bool {
-    bindings.iter().any(|binding| {
-        binding.name == ident && binding.body_start <= start && end <= binding.body_end
-    })
+    let Some(scopes) = bindings.scopes.get(ident) else {
+        return false;
+    };
+    let containing = scopes.partition_point(|scope| scope.body_start <= start);
+    containing > 0 && end <= scopes[containing - 1].max_body_end
 }
 
 pub(crate) fn process_expression_is_in_new_expression(raw: &str, start: usize) -> bool {
@@ -1066,8 +1068,10 @@ pub(crate) fn process_expression_rewrite_identifier(
     }
 }
 
-pub(crate) fn process_expression_arrow_bindings(raw: &str) -> Vec<ProcessExpressionArrowBinding> {
-    let mut bindings = Vec::new();
+pub(crate) fn process_expression_arrow_bindings(
+    raw: &str,
+) -> ProcessExpressionArrowBindingIndex {
+    let mut bindings = ProcessExpressionArrowBindingIndex::default();
     for arrow in process_expression_arrow_offsets(raw) {
         let Some(param_range) = process_expression_arrow_param_range(raw, arrow) else {
             continue;
@@ -1075,13 +1079,23 @@ pub(crate) fn process_expression_arrow_bindings(raw: &str) -> Vec<ProcessExpress
         let body_start = skip_ws_forward(raw, arrow + 2);
         let body_end = process_expression_arrow_body_end(raw, body_start);
         for (param_start, param_end) in process_expression_param_binding_spans(raw, param_range) {
-            bindings.push(ProcessExpressionArrowBinding {
-                name: raw[param_start..param_end].to_string(),
-                param_start,
-                param_end,
-                body_start,
-                body_end,
-            });
+            bindings.params.insert((param_start, param_end));
+            bindings
+                .scopes
+                .entry(raw[param_start..param_end].to_string())
+                .or_default()
+                .push(ProcessExpressionArrowScope {
+                    body_start,
+                    max_body_end: body_end,
+                });
+        }
+    }
+    for scopes in bindings.scopes.values_mut() {
+        scopes.sort_unstable_by_key(|scope| (scope.body_start, scope.max_body_end));
+        let mut max_body_end = 0usize;
+        for scope in scopes {
+            max_body_end = max_body_end.max(scope.max_body_end);
+            scope.max_body_end = max_body_end;
         }
     }
     bindings

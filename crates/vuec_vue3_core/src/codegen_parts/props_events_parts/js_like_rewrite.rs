@@ -161,7 +161,6 @@ fn rewrite_js_like_expression_into_with_ranges(
                     &scopes,
                     process_expression_is_arrow_param(
                         &arrow_bindings,
-                        ident,
                         ident_start,
                         ident_end,
                     ),
@@ -183,7 +182,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 .get(index)
                 .map_or(expression.len(), |(offset, _)| *offset);
             let ident = &expression[start..end];
-            let arrow_param = process_expression_is_arrow_param(&arrow_bindings, ident, start, end);
+            let arrow_param = process_expression_is_arrow_param(&arrow_bindings, start, end);
             let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
             let next = next_non_ws(expression, end);
             let prev = previous;

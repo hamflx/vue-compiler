@@ -525,6 +525,46 @@
     }
 
     #[test]
+    fn arrow_binding_index_preserves_outer_same_name_scopes() {
+        let expression = "x => ((x => x)(value) + x), x";
+        let bindings = process_expression_arrow_bindings(expression);
+        let spans = expression
+            .match_indices('x')
+            .map(|(start, value)| (start, start + value.len()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(spans.len(), 5);
+        assert!(process_expression_is_arrow_param(
+            &bindings, spans[0].0, spans[0].1
+        ));
+        assert!(process_expression_is_arrow_param(
+            &bindings, spans[1].0, spans[1].1
+        ));
+        assert!(process_expression_is_arrow_local(
+            &bindings, "x", spans[2].0, spans[2].1
+        ));
+        assert!(process_expression_is_arrow_local(
+            &bindings, "x", spans[3].0, spans[3].1
+        ));
+        assert!(!process_expression_is_arrow_local(
+            &bindings, "x", spans[4].0, spans[4].1
+        ));
+    }
+
+    #[test]
+    fn js_like_rewrite_indexes_dense_arrow_bindings() {
+        const ARROWS: usize = 4_096;
+        let expression = format!("[{}]", vec!["x => x"; ARROWS].join(", "));
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(rewrite_js_like_expression(&expression, &options), expression);
+    }
+
+    #[test]
     fn base_compile_accepts_v_for_of_expression_with_v_memo() {
         let result = base_compile(
             TemplateSource {
