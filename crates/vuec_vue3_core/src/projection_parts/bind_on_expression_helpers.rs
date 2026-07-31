@@ -620,10 +620,8 @@ pub(crate) fn process_expression_params_projection(
 ) -> Value {
     let source = format!("({raw})=>{{}}");
     let store = JsAstStore::new();
-    if store
-        .parse_expression(&source, transform_on_source_type(context))
-        .is_err()
-    {
+    let source_type = transform_on_source_type(context);
+    if store.parse_expression(&source, source_type).is_err() {
         return json!({
             "kind": "error",
             "code": 46,
@@ -631,15 +629,30 @@ pub(crate) fn process_expression_params_projection(
             "message": "Error parsing JavaScript expression: Unexpected token",
         });
     }
-    let children =
-        process_expression_params_children(raw, options, node.get("loc").unwrap_or(&Value::Null));
+    let bindings =
+        ProcessExpressionIdentifierBindingIndex::new_with_source_type(&source, source_type);
+    let bindings = ProcessExpressionIdentifierBindingCursor::new(&bindings).at(1);
+    if bindings.ast_required_unavailable() {
+        return json!({
+            "kind": "error",
+            "code": 46,
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+            "message": PROCESS_EXPRESSION_AST_LIMIT_MESSAGE,
+        });
+    }
+    let children = process_expression_params_children(
+        raw,
+        options,
+        node.get("loc").unwrap_or(&Value::Null),
+        bindings,
+    );
     if children.is_empty() {
         return json!({
             "kind": "setConstType",
             "constType": 3,
         });
     }
-    let identifiers = vue3_for_alias_locals(raw);
+    let identifiers = bindings.binding_names(raw);
     let mut helper_source = String::new();
     for child in &children {
         if let Some(content) = child.get("content").and_then(Value::as_str) {
@@ -655,12 +668,14 @@ pub(crate) fn process_expression_params_projection(
     })
 }
 
-pub(crate) fn process_expression_params_children(
+fn process_expression_params_children(
     raw: &str,
     options: &Vue3CompilerOptions,
     loc: &Value,
+    bindings: ProcessExpressionIdentifierBindingCursor<'_>,
 ) -> Vec<Value> {
-    let mut identifiers = process_expression_param_identifier_spans(raw, (0, raw.len()), options);
+    let mut identifiers =
+        process_expression_identifier_spans_with_bindings(raw, options, &[], bindings);
     identifiers.sort_by_key(|identifier| (identifier.start, identifier.end));
     let mut filtered = Vec::<ProcessExpressionIdentifier>::new();
     for identifier in identifiers {
@@ -749,9 +764,16 @@ struct ProcessExpressionIdentifierBindingIndex {
 
 impl ProcessExpressionIdentifierBindingIndex {
     fn new(raw: &str, options: &Vue3CompilerOptions) -> Self {
+        Self::new_with_source_type(raw, expression_source_type(options))
+    }
+
+    fn new_with_source_type(
+        raw: &str,
+        source_type: oxc_span::SourceType,
+    ) -> Self {
         Self {
             arrows: process_expression_arrow_bindings(raw),
-            locals: process_expression_identifier_bindings(raw, expression_source_type(options)),
+            locals: process_expression_identifier_bindings(raw, source_type),
             may_have_destructure_assignment: process_expression_may_have_destructure_assignment(
                 raw,
             ),
@@ -824,6 +846,43 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
         process_expression_function_bindings_ast_required_unavailable(&self.index.locals)
     }
 
+    fn decoded_identifier_name(self, start: usize, end: usize) -> Option<&'a str> {
+        process_expression_function_decoded_identifier_name(
+            &self.index.locals,
+            self.source_offset + start,
+            self.source_offset + end,
+        )
+    }
+
+    fn binding_names(self, raw: &str) -> Vec<String> {
+        let source_end = self.source_offset.saturating_add(raw.len());
+        let mut names = Vec::new();
+        let mut seen = BTreeSet::new();
+        for &(start, end) in process_expression_function_binding_spans(&self.index.locals).range((
+            std::ops::Bound::Included((self.source_offset, 0)),
+            std::ops::Bound::Excluded((source_end, 0)),
+        )) {
+            if end > source_end {
+                continue;
+            }
+            let relative_start = start.saturating_sub(self.source_offset);
+            let relative_end = end.saturating_sub(self.source_offset);
+            let Some(raw_name) = raw.get(relative_start..relative_end) else {
+                continue;
+            };
+            let name = process_expression_function_decoded_identifier_name(
+                &self.index.locals,
+                start,
+                end,
+            )
+            .unwrap_or(raw_name);
+            if seen.insert(name) {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
     fn identifier_spans(self, source_len: usize) -> Vec<(usize, usize)> {
         let source_end = self.source_offset.saturating_add(source_len);
         process_expression_function_identifier_spans(&self.index.locals)
@@ -890,7 +949,10 @@ fn process_expression_identifier_spans_with_bindings(
         process_expression_lexical_identifier_spans(raw)
     };
     for (start, end) in identifier_spans {
-        let ident = &raw[start..end];
+        let raw_ident = &raw[start..end];
+        let ident = bindings
+            .decoded_identifier_name(start, end)
+            .unwrap_or(raw_ident);
         let prev = previous_non_ws(raw, start);
         let next = next_non_ws(raw, end);
         if is_keyword(ident) {
@@ -1020,76 +1082,6 @@ fn process_expression_lexical_identifier_spans(raw: &str) -> Vec<(usize, usize)>
             end = offset + next.len_utf8();
         }
         spans.push((start, end));
-    }
-    spans
-}
-
-pub(crate) fn process_expression_param_identifier_spans(
-    raw: &str,
-    range: (usize, usize),
-    options: &Vue3CompilerOptions,
-) -> Vec<ProcessExpressionIdentifier> {
-    let mut spans = Vec::new();
-    let mut quote = None::<char>;
-    let mut escaped = false;
-    let mut chars = raw[range.0..range.1]
-        .char_indices()
-        .map(|(offset, ch)| (range.0 + offset, ch))
-        .peekable();
-    while let Some((start, ch)) = chars.next() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        if !is_identifier_start(ch) {
-            continue;
-        }
-        let mut end = start + ch.len_utf8();
-        while let Some(&(offset, next)) = chars.peek() {
-            if !is_identifier_continue(next) {
-                break;
-            }
-            chars.next();
-            end = offset + next.len_utf8();
-        }
-        let ident = &raw[start..end];
-        if is_keyword(ident) || next_non_ws(raw, end) == Some(':') {
-            continue;
-        }
-        if process_expression_param_default_rhs(raw, range.0, start) {
-            let content = if is_global_or_literal(ident) {
-                ident.to_string()
-            } else {
-                process_expression_rewrite_identifier(
-                    ident, options, None, None, false, &[], None,
-                )
-            };
-            spans.push(ProcessExpressionIdentifier {
-                start,
-                end,
-                content,
-                prefix: None,
-                is_constant: is_global_or_literal(ident),
-            });
-        } else {
-            spans.push(ProcessExpressionIdentifier {
-                start,
-                end,
-                content: ident.to_string(),
-                prefix: None,
-                is_constant: true,
-            });
-        }
     }
     spans
 }

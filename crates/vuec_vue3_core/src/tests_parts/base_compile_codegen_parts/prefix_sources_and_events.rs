@@ -648,6 +648,210 @@
     }
 
     #[test]
+    fn js_like_rewrite_supports_escaped_ecmascript_identifiers() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            source_map: true,
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(r"\u0061 + outside", &options),
+            "_ctx.a + _ctx.outside",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r"fo\u006f + \u{61}", &options),
+            "_ctx.foo + _ctx.a",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r"(\u0061) => \u0061 + outside", &options),
+            "(a) => a + _ctx.outside",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"const \u0061 = source; \u0061 + outside",
+                &options,
+            ),
+            "const a = _ctx.source; a + _ctx.outside",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"obj.\u0061 + ({ \u0062: value, [\u0063]: other, \u0064 })",
+                &options,
+            ),
+            r"_ctx.obj.\u0061 + ({ \u0062: _ctx.value, [_ctx.c]: _ctx.other, d: _ctx.d })",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r"\u004dath.max(value)", &options),
+            "Math.max(_ctx.value)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"function named(value) { return value |> % + \u0061 }",
+                &options,
+            ),
+            "function named(value) { return value |> % + _ctx.a }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"\u006futer: while (ready) { break \u006futer }",
+                &options,
+            ),
+            r"\u006futer: while (_ctx.ready) { break \u006futer }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"class Box { #\u0076alue; method() { return this.#\u0076alue + outside } }",
+                &options,
+            ),
+            r"class Box { #\u0076alue; method() { return this.#\u0076alue + _ctx.outside } }",
+        );
+
+        let mut inline = options.clone();
+        inline.inline = true;
+        inline
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        assert_eq!(
+            rewrite_js_like_expression(r"\u0063ount = next", &inline),
+            "count.value = _ctx.next",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r"++\u0063ount; \u0063ount++", &inline),
+            "++count.value; count.value++",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r"({ value: \u0063ount } = source)",
+                &inline,
+            ),
+            "({ value: count.value } = _ctx.source)",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r"({ \u0063ount })", &inline),
+            "({ count: count.value })",
+        );
+        inline
+            .binding_metadata
+            .insert("alias".into(), "props-aliased".into());
+        inline
+            .props_aliases
+            .insert("alias".into(), "source-key".into());
+        assert_eq!(
+            rewrite_js_like_expression(r"\u0061lias", &inline),
+            r#"__props["source-key"]"#,
+        );
+
+        let source = r"<div>{{ \u0061 + outside }}</div>";
+        let result = base_compile(
+            TemplateSource {
+                filename: "escaped-identifier.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(
+            result
+                .code
+                .contains("_toDisplayString(_ctx.a + _ctx.outside)"),
+            "{}",
+            result.code,
+        );
+        let generated_offset = result.code.find("_ctx.a").expect("generated identifier");
+        let generated = loc_for_offset(&result.code, generated_offset + "_ctx.".len())
+            .expect("generated loc");
+        let original = result
+            .map
+            .expect("source map")
+            .original_position(vuec_source::GeneratedPosition::new(
+                generated.0,
+                generated.1,
+            ))
+            .expect("source map lookup")
+            .expect("original position");
+        let expected = loc_for_offset(source, source.find(r"\u0061").expect("source identifier"))
+            .expect("source loc");
+        assert_eq!((original.line, original.column), expected);
+        assert_eq!(original.name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn js_like_rewrite_fails_closed_for_unavailable_escaped_identifier_ast() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+        for invalid in [r"\u{110000} + outside", r"\u0069f + outside"] {
+            assert_eq!(rewrite_js_like_expression(invalid, &options), invalid);
+            let result = base_compile(
+                TemplateSource {
+                    filename: "invalid-escape.vue".into(),
+                    source: format!("<div>{{{{ {invalid} }}}}</div>"),
+                    file_id: FileId(0),
+                    base_offset: 0,
+                },
+                options.clone(),
+            );
+            assert!(result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "46"));
+        }
+
+        let long = format!(r"\u0061 + {}", "outside + ".repeat(450));
+        assert!(long.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert_eq!(rewrite_js_like_expression(&long, &options), long);
+        let result = base_compile(
+            TemplateSource {
+                filename: "long-escape.vue".into(),
+                source: format!("<div>{{{{ {long} }}}}</div>"),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "46"
+                && diagnostic.message == PROCESS_EXPRESSION_AST_LIMIT_MESSAGE
+        }));
+        assert!(!result.code.contains(r"\_ctx.u0061"), "{}", result.code);
+
+        let long_string = format!(r#""{}\\u0061" + outside"#, "x".repeat(4_096));
+        assert!(long_string.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        assert!(!process_expression_ast_required_unavailable(
+            &long_string,
+            oxc_span::SourceType::mjs(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_string, &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            }),
+            format!(r#""{}\\u0061" + _ctx.outside"#, "x".repeat(4_096)),
+        );
+
+        let long_comment = format!(r"/* {} \u0061 */ outside", "x".repeat(4_096));
+        assert!(!process_expression_ast_required_unavailable(
+            &long_comment,
+            oxc_span::SourceType::mjs(),
+        ));
+        assert_eq!(
+            rewrite_js_like_expression(&long_comment, &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            }),
+            format!(r"/* {} \u0061 */ _ctx.outside", "x".repeat(4_096)),
+        );
+    }
+
+    #[test]
     fn js_like_rewrite_ignores_regex_punctuation_when_rewriting_assignments() {
         let mut options = Vue3CompilerOptions {
             prefix_identifiers: true,
@@ -766,16 +970,6 @@
             .map(|(start, end)| &expression[start..end])
             .collect::<Vec<_>>();
         assert_eq!(binding_names, ["first", "alias"]);
-
-        let param_names = process_expression_param_identifier_spans(
-            expression,
-            param_range,
-            &options,
-        )
-        .into_iter()
-        .map(|span| &expression[span.start..span.end])
-        .collect::<Vec<_>>();
-        assert_eq!(param_names, ["first", "alias"]);
 
         let identifiers = process_expression_identifier_spans(expression, &options, &[]);
         assert!(identifiers

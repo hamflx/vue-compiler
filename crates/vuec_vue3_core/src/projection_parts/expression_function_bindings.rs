@@ -14,6 +14,8 @@ struct ProcessExpressionNonReferenceRange {
 pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
     destructure_assignment_spans: BTreeSet<(usize, usize)>,
+    // Ordinary spellings use their source slice; only decoded spellings allocate.
+    decoded_identifier_names: BTreeMap<(usize, usize), String>,
     identifier_spans: BTreeSet<(usize, usize)>,
     object_shorthand_spans: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
@@ -24,6 +26,7 @@ pub(crate) struct ProcessExpressionFunctionBindingIndex {
 }
 
 struct ProcessExpressionFunctionBindingCollector<'source> {
+    parse_source: &'source str,
     source: &'source str,
     source_start: usize,
     source_end: usize,
@@ -33,8 +36,14 @@ struct ProcessExpressionFunctionBindingCollector<'source> {
 }
 
 impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
-    fn new(source: &'source str, source_start: usize, source_end: usize) -> Self {
+    fn new(
+        parse_source: &'source str,
+        source: &'source str,
+        source_start: usize,
+        source_end: usize,
+    ) -> Self {
         Self {
+            parse_source,
             source,
             source_start,
             source_end,
@@ -73,19 +82,44 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
     }
 
     fn add_identifier_span(&mut self, span: oxc_span::Span, expected_name: &str) {
-        let Some((start, end)) = self.relative_identifier_span(span) else {
+        let Some(((start, end), identifier)) = self.matching_identifier_span(span) else {
             return;
         };
-        let Some(identifier) = self
-            .source
-            .get(self.source_start + start..self.source_start + end)
-        else {
-            return;
-        };
-        if identifier != expected_name {
-            return;
-        }
         self.bindings.identifier_spans.insert((start, end));
+        self.add_decoded_identifier_name((start, end), identifier, expected_name);
+    }
+
+    fn add_non_reference_identifier(&mut self, span: oxc_span::Span, expected_name: &str) {
+        let Some((identifier_span, identifier)) = self.matching_identifier_span(span) else {
+            return;
+        };
+        self.bindings.non_reference_keys.insert(identifier_span);
+        self.add_decoded_identifier_name(identifier_span, identifier, expected_name);
+    }
+
+    fn matching_identifier_span(
+        &self,
+        span: oxc_span::Span,
+    ) -> Option<((usize, usize), &'source str)> {
+        let (start, end) = self.relative_identifier_span(span)?;
+        let absolute_start = self.source_start.checked_add(start)?;
+        let absolute_end = self.source_start.checked_add(end)?;
+        let identifier = self.source.get(absolute_start..absolute_end)?;
+        let parsed_identifier = self.parse_source.get(absolute_start..absolute_end)?;
+        (identifier == parsed_identifier).then_some(((start, end), identifier))
+    }
+
+    fn add_decoded_identifier_name(
+        &mut self,
+        span: (usize, usize),
+        identifier: &str,
+        expected_name: &str,
+    ) {
+        if identifier != expected_name {
+            self.bindings
+                .decoded_identifier_names
+                .insert(span, expected_name.to_string());
+        }
     }
 
     fn add_object_shorthand_span(&mut self, span: oxc_span::Span) {
@@ -704,6 +738,21 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
         oxc_ast_visit::walk::walk_identifier_reference(self, identifier);
     }
 
+    fn visit_identifier_name(&mut self, identifier: &oxc_ast::ast::IdentifierName<'ast>) {
+        self.add_non_reference_identifier(identifier.span, identifier.name.as_str());
+        oxc_ast_visit::walk::walk_identifier_name(self, identifier);
+    }
+
+    fn visit_label_identifier(&mut self, identifier: &oxc_ast::ast::LabelIdentifier<'ast>) {
+        self.add_non_reference_identifier(identifier.span, identifier.name.as_str());
+        oxc_ast_visit::walk::walk_label_identifier(self, identifier);
+    }
+
+    fn visit_private_identifier(&mut self, identifier: &oxc_ast::ast::PrivateIdentifier<'ast>) {
+        self.add_non_reference_identifier(identifier.span, identifier.name.as_str());
+        oxc_ast_visit::walk::walk_private_identifier(self, identifier);
+    }
+
     fn visit_jsx_element_name(&mut self, name: &oxc_ast::ast::JSXElementName<'ast>) {
         self.add_non_reference_range(oxc_span::GetSpan::span(name));
         oxc_ast_visit::walk::walk_jsx_element_name(self, name);
@@ -745,9 +794,9 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
 pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
 pub(crate) const PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES: usize = 4 * 1024;
 pub(crate) const PROCESS_EXPRESSION_AST_LIMIT_MESSAGE: &str =
-    "Error parsing JavaScript expression: JSX expression exceeds the safe analysis limit.";
-// Oxc's visitor is recursive for left-deep expressions; large sources retain
-// the non-recursive lexical fallback instead of risking the thread stack.
+    "Error parsing JavaScript expression: expression exceeds the safe AST analysis limit.";
+// Oxc's visitor is recursive for left-deep expressions. Inputs that require
+// exact AST roles fail closed above this bound; other inputs retain the lexer.
 
 pub(crate) fn process_expression_requires_jsx_ast(
     raw: &str,
@@ -756,11 +805,64 @@ pub(crate) fn process_expression_requires_jsx_ast(
     source_type.is_jsx() && raw.as_bytes().contains(&b'<')
 }
 
-pub(crate) fn process_expression_ast_required_unavailable(
+pub(crate) fn process_expression_requires_lossless_ast(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> bool {
     process_expression_requires_jsx_ast(raw, source_type)
+        || process_expression_may_have_identifier_escape(raw)
+}
+
+fn process_expression_may_have_identifier_escape(raw: &str) -> bool {
+    // Template and regexp contents stay conservative because distinguishing
+    // their embedded expression boundaries requires the AST we are gating.
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index = index.saturating_add(2);
+                    } else {
+                        let current = bytes[index];
+                        index += 1;
+                        if current == quote {
+                            break;
+                        }
+                    }
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() {
+                    if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'\\' if bytes.get(index + 1) == Some(&b'u') => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+pub(crate) fn process_expression_ast_required_unavailable(
+    raw: &str,
+    source_type: oxc_span::SourceType,
+) -> bool {
+    process_expression_requires_lossless_ast(raw, source_type)
         && raw.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
 }
 
@@ -780,7 +882,7 @@ pub(crate) fn process_expression_identifier_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
 ) -> ProcessExpressionFunctionBindingIndex {
-    let needs_lexical_disambiguation = process_expression_requires_jsx_ast(raw, source_type)
+    let needs_lexical_disambiguation = process_expression_requires_lossless_ast(raw, source_type)
         || raw.as_bytes().contains(&b'`')
         || raw.as_bytes().contains(&b'/')
         || !raw.is_ascii()
@@ -799,6 +901,7 @@ fn process_expression_function_bindings_with_mode(
     source_type: oxc_span::SourceType,
     collect_identifiers: bool,
 ) -> ProcessExpressionFunctionBindingIndex {
+    let ast_required = process_expression_requires_lossless_ast(raw, source_type);
     if process_expression_ast_required_unavailable(raw, source_type) {
         return ProcessExpressionFunctionBindingIndex {
             ast_required_unavailable: true,
@@ -836,7 +939,14 @@ fn process_expression_function_bindings_with_mode(
             return bindings;
         }
     }
-    ProcessExpressionFunctionBindingIndex::default()
+    if ast_required {
+        ProcessExpressionFunctionBindingIndex {
+            ast_required_unavailable: true,
+            ..ProcessExpressionFunctionBindingIndex::default()
+        }
+    } else {
+        ProcessExpressionFunctionBindingIndex::default()
+    }
 }
 
 fn process_expression_parse_function_bindings(
@@ -853,6 +963,7 @@ fn process_expression_parse_function_bindings(
         let trimmed_end = parse_source.trim_end().len();
         if span.start as usize == trimmed_start && span.end as usize == trimmed_end {
             let mut collector = ProcessExpressionFunctionBindingCollector::new(
+                parse_source,
                 original_source,
                 0,
                 original_source.len(),
@@ -875,6 +986,7 @@ fn process_expression_parse_function_bindings(
     let source_start = FUNCTION_BODY_PREFIX.len();
     let source_end = source_start + original_source.len();
     let mut collector = ProcessExpressionFunctionBindingCollector::new(
+        &wrapped_parse_source,
         &wrapped_original_source,
         source_start,
         source_end,
@@ -1005,6 +1117,9 @@ pub(crate) fn process_expression_is_function_non_reference_key(
     start: usize,
     end: usize,
 ) -> bool {
+    if bindings.object_shorthand_spans.contains(&(start, end)) {
+        return false;
+    }
     if bindings.non_reference_keys.contains(&(start, end)) {
         return true;
     }
@@ -1026,10 +1141,41 @@ pub(crate) fn process_expression_function_bindings_ast_required_unavailable(
     bindings.ast_required_unavailable
 }
 
+pub(crate) fn process_expression_function_decoded_identifier_name(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+    start: usize,
+    end: usize,
+) -> Option<&str> {
+    bindings
+        .decoded_identifier_names
+        .get(&(start, end))
+        .map(String::as_str)
+}
+
+pub(crate) fn process_expression_function_decoded_identifier_at(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+    start: usize,
+) -> Option<(usize, &str)> {
+    let (&(candidate_start, end), name) = bindings
+        .decoded_identifier_names
+        .range((
+            std::ops::Bound::Included((start, 0)),
+            std::ops::Bound::Included((start, usize::MAX)),
+        ))
+        .next()?;
+    (candidate_start == start).then_some((end, name.as_str()))
+}
+
 pub(crate) fn process_expression_function_identifier_spans(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> &BTreeSet<(usize, usize)> {
     &bindings.identifier_spans
+}
+
+pub(crate) fn process_expression_function_binding_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.bindings
 }
 
 pub(crate) fn process_expression_function_object_shorthand_spans(

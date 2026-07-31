@@ -442,6 +442,74 @@
     }
 
     #[test]
+    fn process_expression_projection_decodes_escaped_identifiers() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+        let reference = process_expression_test_projection(r"\u0061 + outside", context.clone());
+        assert_eq!(
+            projection_code(&reference),
+            "_ctx.a + _ctx.outside",
+        );
+        assert_eq!(reference["children"][0]["loc"]["source"], json!(r"\u0061"));
+
+        let scoped = process_expression_test_projection(
+            r"(\u0061) => \u0061 + outside",
+            context.clone(),
+        );
+        assert_eq!(projection_code(&scoped), "(a) => a + _ctx.outside");
+
+        let properties = process_expression_test_projection(
+            r"obj.\u0061 + ({ \u0062: value, [\u0063]: other, \u0064 })",
+            context,
+        );
+        assert_eq!(
+            projection_code(&properties),
+            r"_ctx.obj.\u0061 + ({ \u0062: _ctx.value, [_ctx.c]: _ctx.other, d: _ctx.d })",
+        );
+
+        let labels = process_expression_test_statement_projection(
+            r"\u006futer: while (ready) { break \u006futer }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        assert_eq!(
+            projection_code(&labels),
+            r"\u006futer: while (_ctx.ready) { break \u006futer }",
+        );
+
+        let inline = process_expression_test_projection(
+            r"({ \u0063ount })",
+            json!({
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": { "count": "setup-ref" }
+            }),
+        );
+        assert_eq!(projection_code(&inline), "({ count: count.value })");
+    }
+
+    #[test]
+    fn process_expression_projection_rejects_unavailable_escaped_identifier_ast() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+        for invalid in [r"\u{110000} + outside", r"\u0069f + outside"] {
+            let projection = process_expression_test_projection(invalid, context.clone());
+            assert_eq!(projection["kind"], json!("error"));
+            assert_eq!(projection["code"], json!(46));
+        }
+
+        let long = format!(r"\u0061 + {}", "outside + ".repeat(450));
+        assert!(long.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES);
+        let projection = process_expression_test_projection(&long, context);
+        assert_eq!(projection["kind"], json!("error"));
+        assert_eq!(projection["code"], json!(46));
+        assert_eq!(
+            projection["message"],
+            json!(PROCESS_EXPRESSION_AST_LIMIT_MESSAGE),
+        );
+    }
+
+    #[test]
     fn process_expression_projection_preserves_slot_params_as_bindings() {
         let projection = process_expression_projection(&json!({
             "node": {
@@ -463,6 +531,62 @@
         assert_eq!(projection["children"][1]["content"], json!("foo"));
         assert_eq!(projection["children"][2], json!(" }"));
         assert_eq!(projection["identifiers"], json!(["foo"]));
+    }
+
+    #[test]
+    fn process_expression_projection_decodes_escaped_slot_params() {
+        let content = r"{ \u0061, value: \u0062 = outside }";
+        let projection = process_expression_projection(&json!({
+            "node": {
+                "type": 4,
+                "content": content,
+                "isStatic": false,
+                "loc": {
+                    "start": { "offset": 0, "line": 1, "column": 1 },
+                    "end": { "offset": content.len(), "line": 1, "column": content.len() + 1 },
+                    "source": content
+                }
+            },
+            "context": {
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            },
+            "asParams": true
+        }));
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection_code(&projection),
+            "{ a, value: b = _ctx.outside }",
+        );
+        assert_eq!(projection["identifiers"], json!(["a", "b"]));
+
+        let typed = r"\u0061: Item = outside";
+        let typed_projection = process_expression_projection(&json!({
+            "node": {
+                "type": 4,
+                "content": typed,
+                "isStatic": false,
+                "loc": {
+                    "start": { "offset": 0, "line": 1, "column": 1 },
+                    "end": { "offset": typed.len(), "line": 1, "column": typed.len() + 1 },
+                    "source": typed
+                }
+            },
+            "context": {
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {},
+                "isTS": true
+            },
+            "asParams": true
+        }));
+        assert_eq!(
+            projection_code(&typed_projection),
+            "a: Item = _ctx.outside",
+        );
+        assert_eq!(typed_projection["identifiers"], json!(["a"]));
     }
 
     #[test]

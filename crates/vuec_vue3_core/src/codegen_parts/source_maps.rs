@@ -630,8 +630,11 @@ pub(crate) fn expression_source_map_tokens(
     if process_expression_ast_required_unavailable(expression, source_type) {
         return Vec::new();
     }
-    parsed_expression_source_map_tokens(expression, include_globals, source_type)
-        .unwrap_or_else(|| lexical_expression_source_map_tokens(expression, include_globals))
+    match parsed_expression_source_map_tokens(expression, include_globals, source_type) {
+        Some(tokens) => tokens,
+        None if process_expression_requires_lossless_ast(expression, source_type) => Vec::new(),
+        None => lexical_expression_source_map_tokens(expression, include_globals),
+    }
 }
 
 #[derive(Default)]

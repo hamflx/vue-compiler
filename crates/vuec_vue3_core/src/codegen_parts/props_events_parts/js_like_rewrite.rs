@@ -114,6 +114,14 @@ impl<'a> JsLikeExpressionBindingCursor<'a> {
         self.index.ast_required_unavailable()
     }
 
+    fn decoded_identifier_at(self, start: usize) -> Option<(usize, &'a str)> {
+        let (end, name) = process_expression_function_decoded_identifier_at(
+            &self.index.locals,
+            self.source_offset + start,
+        )?;
+        Some((end.checked_sub(self.source_offset)?, name))
+    }
+
     fn arrow_param(self, start: usize, end: usize) -> bool {
         self.index
             .arrow_param(self.source_offset + start, self.source_offset + end)
@@ -287,7 +295,11 @@ fn rewrite_js_like_expression_into_with_ranges(
         {
             let operator = if ch == '+' { "++" } else { "--" };
             let ident_start = skip_ws_forward(expression, byte + operator.len());
-            if let Some((ident, ident_end)) = read_identifier_at(expression, ident_start) {
+            let identifier = bindings
+                .decoded_identifier_at(ident_start)
+                .map(|(end, name)| (name, end))
+                .or_else(|| read_identifier_at(expression, ident_start));
+            if let Some((ident, ident_end)) = identifier {
                 let function_binding = bindings.local(ident, ident_start, ident_end);
                 if let Some((replacement, consumed_end)) = rewrite_js_like_update(
                     ident,
@@ -305,20 +317,28 @@ fn rewrite_js_like_expression_into_with_ranges(
                 }
             }
         }
-        if is_identifier_start(ch) {
+        let decoded_identifier = bindings.decoded_identifier_at(byte);
+        if decoded_identifier.is_some() || is_identifier_start(ch) {
             let start = byte;
-            index += 1;
-            while index < chars.len() && is_identifier_continue(chars[index].1) {
+            let (end, ident) = if let Some((end, name)) = decoded_identifier {
+                index = js_like_char_index_at_or_after(&chars, index, end);
+                (end, name)
+            } else {
                 index += 1;
-            }
-            let end = chars
-                .get(index)
-                .map_or(expression.len(), |(offset, _)| *offset);
-            let ident = &expression[start..end];
+                while index < chars.len() && is_identifier_continue(chars[index].1) {
+                    index += 1;
+                }
+                let end = chars
+                    .get(index)
+                    .map_or(expression.len(), |(offset, _)| *offset);
+                (end, &expression[start..end])
+            };
+            let raw_ident = &expression[start..end];
             let arrow_param = bindings.arrow_param(start, end);
             let arrow_local = bindings.arrow_local(ident, start, end);
             let function_binding = bindings.local(ident, start, end);
             let function_non_reference = bindings.non_reference(start, end);
+            let object_shorthand = bindings.object_shorthand(expression, start, end);
             let next = next_non_ws(expression, end);
             let prev = previous;
             if !process_expression_update_argument(expression, start, end)
@@ -348,7 +368,7 @@ fn rewrite_js_like_expression_into_with_ranges(
                 options.inline
                     && options.binding_metadata.contains_key(ident)
                     && bindings.destructure_assignment(expression, start, end),
-                bindings.object_shorthand(expression, start, end),
+                object_shorthand,
             ) {
                 output.push_str(&replacement);
                 index = js_like_char_index_at_or_after(&chars, index, consumed_end);
@@ -369,6 +389,11 @@ fn rewrite_js_like_expression_into_with_ranges(
                 output.push_str(&replacement);
                 index = js_like_char_index_at_or_after(&chars, index, consumed_end);
                 previous = TokenKind::Other;
+                continue;
+            }
+            if function_non_reference {
+                output.push_str(raw_ident);
+                previous = TokenKind::Identifier;
                 continue;
             }
             if is_keyword(ident) {
@@ -412,8 +437,9 @@ fn rewrite_js_like_expression_into_with_ranges(
             let skip_property = process_expression_is_static_member(expression, start)
                 || (next == Some(':') && last_keyword.as_deref() != Some("case"))
                 || function_non_reference;
-            if skip_property
-                || is_global_or_literal(ident)
+            if skip_property {
+                output.push_str(raw_ident);
+            } else if is_global_or_literal(ident)
                 || is_generated_asset_import_ident(ident)
                 || arrow_param
                 || arrow_local
@@ -424,9 +450,14 @@ fn rewrite_js_like_expression_into_with_ranges(
                 output.push_str(ident);
             } else {
                 let content = rewrite_identifier(ident, options);
-                output.push_str(&parenthesize_rewritten_identifier_for_new_expression(
+                let content = parenthesize_rewritten_identifier_for_new_expression(
                     expression, start, end, &content,
-                ));
+                );
+                if object_shorthand && content != ident {
+                    output.push_str(ident);
+                    output.push_str(": ");
+                }
+                output.push_str(&content);
             }
             previous = TokenKind::Identifier;
             continue;
