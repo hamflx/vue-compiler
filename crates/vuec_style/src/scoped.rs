@@ -11,6 +11,8 @@ pub(crate) const STYLE_SCOPED_MAX_KEYFRAME_RENDER_BYTES: usize = 256 * 1024 * 10
 pub(crate) const STYLE_SCOPED_MAX_WARNINGS: usize = 65_536;
 pub(crate) const STYLE_SCOPED_MAX_WARNING_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const STYLE_SCOPED_MAX_RENDER_BYTES: usize = 256 * 1024 * 1024;
 // Selector rewriting performs several full scans and can retain both formatted
 // and scope-injected copies. These weights bound cumulative work before either
 // kind of intermediate is allocated.
@@ -31,6 +33,8 @@ pub(crate) struct ScopedStyleLimits {
     pub(crate) max_warnings: usize,
     pub(crate) max_warning_bytes: usize,
     pub(crate) max_selector_work_bytes: usize,
+    pub(crate) max_output_bytes: usize,
+    pub(crate) max_render_bytes: usize,
 }
 
 impl Default for ScopedStyleLimits {
@@ -47,6 +51,8 @@ impl Default for ScopedStyleLimits {
             max_warnings: STYLE_SCOPED_MAX_WARNINGS,
             max_warning_bytes: STYLE_SCOPED_MAX_WARNING_BYTES,
             max_selector_work_bytes: STYLE_SCOPED_MAX_SELECTOR_WORK_BYTES,
+            max_output_bytes: STYLE_SCOPED_MAX_OUTPUT_BYTES,
+            max_render_bytes: STYLE_SCOPED_MAX_RENDER_BYTES,
         }
     }
 }
@@ -60,6 +66,7 @@ pub(crate) struct ScopedStyleBudget {
     pub(crate) keyframe_render_bytes: usize,
     pub(crate) warnings: usize,
     pub(crate) warning_bytes: usize,
+    pub(crate) render_bytes: usize,
 }
 
 impl ScopedStyleBudget {
@@ -72,6 +79,7 @@ impl ScopedStyleBudget {
             keyframe_render_bytes: 0,
             warnings: 0,
             warning_bytes: 0,
+            render_bytes: 0,
         }
     }
 
@@ -177,6 +185,69 @@ impl ScopedStyleBudget {
         self.keyframe_render_bytes = render_bytes;
         Ok(())
     }
+
+    pub(crate) fn append_render_str(
+        &mut self,
+        output: &mut String,
+        value: &str,
+    ) -> Result<(), StylePreprocessError> {
+        self.reserve_render_append(output, value.len())?;
+        output.push_str(value);
+        Ok(())
+    }
+
+    pub(crate) fn append_render_char(
+        &mut self,
+        output: &mut String,
+        value: char,
+    ) -> Result<(), StylePreprocessError> {
+        self.reserve_render_append(output, value.len_utf8())?;
+        output.push(value);
+        Ok(())
+    }
+
+    pub(crate) fn claim_render_copy(&mut self, bytes: usize) -> Result<(), StylePreprocessError> {
+        if bytes > self.limits.max_output_bytes {
+            return Err(scoped_output_limit_error(self.limits));
+        }
+        self.claim_render_bytes(bytes)
+    }
+
+    fn reserve_render_append(
+        &mut self,
+        output: &mut String,
+        bytes: usize,
+    ) -> Result<(), StylePreprocessError> {
+        let output_bytes = output.len().checked_add(bytes).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style output size overflowed")
+        })?;
+        if output_bytes > self.limits.max_output_bytes {
+            return Err(scoped_output_limit_error(self.limits));
+        }
+        let render_bytes = self.next_render_bytes(bytes)?;
+        output.try_reserve(bytes).map_err(|_| {
+            StylePreprocessError::scoped_limit(
+                "scoped style output could not reserve capacity within the configured limit",
+            )
+        })?;
+        self.render_bytes = render_bytes;
+        Ok(())
+    }
+
+    fn claim_render_bytes(&mut self, bytes: usize) -> Result<(), StylePreprocessError> {
+        self.render_bytes = self.next_render_bytes(bytes)?;
+        Ok(())
+    }
+
+    fn next_render_bytes(&self, bytes: usize) -> Result<usize, StylePreprocessError> {
+        let render_bytes = self.render_bytes.checked_add(bytes).ok_or_else(|| {
+            StylePreprocessError::scoped_limit("scoped style rendering work size overflowed")
+        })?;
+        if render_bytes > self.limits.max_render_bytes {
+            return Err(scoped_render_limit_error(self.limits));
+        }
+        Ok(render_bytes)
+    }
 }
 
 fn keyframe_output_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
@@ -190,6 +261,20 @@ fn keyframe_render_limit_error(limits: ScopedStyleLimits) -> StylePreprocessErro
     StylePreprocessError::scoped_limit(format!(
         "scoped style keyframe rendering exceeds the maximum work budget of {} bytes",
         limits.max_keyframe_render_bytes
+    ))
+}
+
+fn scoped_output_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
+    StylePreprocessError::scoped_limit(format!(
+        "scoped style output exceeds the maximum of {} bytes",
+        limits.max_output_bytes
+    ))
+}
+
+fn scoped_render_limit_error(limits: ScopedStyleLimits) -> StylePreprocessError {
+    StylePreprocessError::scoped_limit(format!(
+        "scoped style rendering exceeds the maximum work budget of {} bytes",
+        limits.max_render_bytes
     ))
 }
 
@@ -239,7 +324,13 @@ pub(crate) fn transform_scoped_style_with_limits(
     } else {
         Vec::new()
     };
-    let code = rewrite_css_items(source, scope_id, &keyframes, CssBlockContext::Root);
+    let code = rewrite_css_items(
+        source,
+        scope_id,
+        &keyframes,
+        CssBlockContext::Root,
+        &mut budget,
+    )?;
     Ok(ScopedStyleTransform { code, diagnostics })
 }
 

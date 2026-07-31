@@ -17,7 +17,8 @@ pub(crate) fn rewrite_css_items(
     scope_id: &str,
     keyframes: &BTreeMap<String, String>,
     context: CssBlockContext,
-) -> String {
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
     let mut output = String::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -35,10 +36,14 @@ pub(crate) fn rewrite_css_items(
                 && css_next_item_is_at_rule_block(source, cursor)
             {
                 if !output.ends_with('\n') {
-                    output.push('\n');
+                    budget.append_render_char(&mut output, '\n')?;
                 }
             } else {
-                push_normalized_css_whitespace(&mut output, &source[whitespace_start..cursor]);
+                append_scoped_normalized_whitespace(
+                    &mut output,
+                    &source[whitespace_start..cursor],
+                    budget,
+                )?;
             }
         }
         if cursor >= source.len() {
@@ -46,23 +51,22 @@ pub(crate) fn rewrite_css_items(
         }
         if source[cursor..].starts_with("/*") {
             let Some(end_offset) = source[cursor + 2..].find("*/") else {
-                output.push_str(&source[cursor..]);
+                budget.append_render_str(&mut output, &source[cursor..])?;
                 break;
             };
             let end = cursor + 2 + end_offset + 2;
-            output.push_str(&source[cursor..end]);
+            budget.append_render_str(&mut output, &source[cursor..end])?;
             cursor = end;
             continue;
         }
 
         let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
             if context == CssBlockContext::Deep {
-                output.push_str(&rewrite_animation_declarations(
-                    &source[cursor..],
-                    keyframes,
-                ));
+                let rewritten =
+                    rewrite_scoped_declaration_body(&source[cursor..], keyframes, budget)?;
+                budget.append_render_str(&mut output, &rewritten)?;
             } else {
-                output.push_str(&source[cursor..]);
+                budget.append_render_str(&mut output, &source[cursor..])?;
             }
             break;
         };
@@ -72,25 +76,27 @@ pub(crate) fn rewrite_css_items(
         let brace_spacing = &raw_prelude[prelude_end..];
         if delimiter_ch == ';' {
             if context == CssBlockContext::Deep {
-                output.push_str(&rewrite_declaration_segment(prelude, keyframes));
+                budget.claim_render_copy(prelude.len())?;
+                let rewritten = rewrite_declaration_segment(prelude, keyframes);
+                budget.append_render_str(&mut output, &rewritten)?;
             } else {
-                output.push_str(prelude);
+                budget.append_render_str(&mut output, prelude)?;
             }
-            output.push(';');
+            budget.append_render_char(&mut output, ';')?;
             cursor = delimiter + 1;
             continue;
         }
 
         let Some(close) = find_matching_brace(source, delimiter) else {
-            output.push_str(&source[cursor..]);
+            budget.append_render_str(&mut output, &source[cursor..])?;
             break;
         };
         let body = &source[delimiter + 1..close];
         if prelude.starts_with('@') {
             let rewritten_prelude = rewrite_at_rule_prelude(prelude, keyframes);
-            output.push_str(&rewritten_prelude);
-            output.push_str(brace_spacing);
-            output.push('{');
+            budget.append_render_str(&mut output, &rewritten_prelude)?;
+            budget.append_render_str(&mut output, brace_spacing)?;
+            budget.append_render_char(&mut output, '{')?;
             let next_context = if is_keyframes_at_rule(prelude) {
                 CssBlockContext::Keyframes
             } else if matches!(context, CssBlockContext::Deep) {
@@ -98,23 +104,24 @@ pub(crate) fn rewrite_css_items(
             } else {
                 CssBlockContext::Container
             };
-            let rewritten_body = rewrite_css_items(body, scope_id, keyframes, next_context);
+            let rewritten_body =
+                rewrite_css_items(body, scope_id, keyframes, next_context, budget)?;
             if css_block_contains_style_rules(&rewritten_body)
                 || css_block_contains_at_rule_with_style_rules(&rewritten_body)
             {
-                output.push('\n');
+                budget.append_render_char(&mut output, '\n')?;
                 if next_context == CssBlockContext::Deep {
-                    output.push_str(rewritten_body.trim_end());
+                    budget.append_render_str(&mut output, rewritten_body.trim_end())?;
                 } else {
-                    output.push_str(rewritten_body.trim());
+                    budget.append_render_str(&mut output, rewritten_body.trim())?;
                 }
                 if css_block_body_has_trailing_whitespace(body) {
-                    output.push('\n');
+                    budget.append_render_char(&mut output, '\n')?;
                 }
             } else {
-                output.push_str(&rewritten_body);
+                budget.append_render_str(&mut output, &rewritten_body)?;
             }
-            output.push('}');
+            budget.append_render_char(&mut output, '}')?;
         } else {
             let has_nested_block =
                 !matches!(context, CssBlockContext::Keyframes) && css_block_has_nested_block(body);
@@ -147,16 +154,18 @@ pub(crate) fn rewrite_css_items(
             } else {
                 selector_rewrite.selector
             };
-            output.push_str(&selector);
-            output.push_str(brace_spacing);
-            output.push('{');
+            budget.append_render_str(&mut output, &selector)?;
+            budget.append_render_str(&mut output, brace_spacing)?;
+            budget.append_render_char(&mut output, '{')?;
             if context == CssBlockContext::Keyframes {
-                output.push_str(&rewrite_css_items(
+                let rewritten = rewrite_css_items(
                     body,
                     scope_id,
                     keyframes,
                     CssBlockContext::Keyframes,
-                ));
+                    budget,
+                )?;
+                budget.append_render_str(&mut output, &rewritten)?;
             } else if context == CssBlockContext::Deep
                 || (selector_rewrite.deep_passthrough && has_nested_block)
             {
@@ -164,36 +173,51 @@ pub(crate) fn rewrite_css_items(
                     && has_direct_nested_rule
                     && deep_container_direct_nested_wraps_parent_declarations(prelude)
                 {
-                    rewrite_deep_passthrough_wrapped_nested_body(body, scope_id, keyframes)
+                    rewrite_deep_passthrough_wrapped_nested_body(body, scope_id, keyframes, budget)?
                 } else {
-                    rewrite_deep_passthrough_body(body, scope_id, keyframes)
+                    rewrite_deep_passthrough_body(body, scope_id, keyframes, budget)?
                 };
                 if css_block_starts_with_block(&rewritten_body) {
                     if css_block_starts_with_commented_block(&rewritten_body) {
-                        output.push(' ');
+                        budget.append_render_char(&mut output, ' ')?;
                     } else {
-                        output.push('\n');
+                        budget.append_render_char(&mut output, '\n')?;
                     }
-                    output.push_str(rewritten_body.trim());
-                    output.push('\n');
+                    budget.append_render_str(&mut output, rewritten_body.trim())?;
+                    budget.append_render_char(&mut output, '\n')?;
                 } else {
-                    output.push_str(&rewritten_body);
+                    budget.append_render_str(&mut output, &rewritten_body)?;
                 }
             } else if has_nested_block {
-                output.push_str(&rewrite_nested_scoped_rule_body(
+                let rewritten = rewrite_nested_scoped_rule_body(
                     body,
                     scope_id,
                     keyframes,
                     has_direct_nested_rule,
-                ));
+                    budget,
+                )?;
+                budget.append_render_str(&mut output, &rewritten)?;
             } else {
-                output.push_str(&rewrite_scoped_declaration_body(body, keyframes));
+                let rewritten = rewrite_scoped_declaration_body(body, keyframes, budget)?;
+                budget.append_render_str(&mut output, &rewritten)?;
             }
-            output.push('}');
+            budget.append_render_char(&mut output, '}')?;
         }
         cursor = close + 1;
     }
-    output
+    Ok(output)
+}
+
+fn append_scoped_normalized_whitespace(
+    output: &mut String,
+    whitespace: &str,
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
+    if whitespace.contains('\n') || whitespace.contains('\r') {
+        budget.append_render_char(output, '\n')
+    } else {
+        budget.append_render_str(output, whitespace)
+    }
 }
 
 pub(crate) fn collect_scoped_selector_deprecation_warnings(
@@ -253,16 +277,19 @@ pub(crate) fn rewrite_deep_passthrough_body(
     body: &str,
     scope_id: &str,
     keyframes: &BTreeMap<String, String>,
-) -> String {
-    let rewritten = rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep);
-    normalize_deep_passthrough_parent_anchor_blocks(&rewritten)
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
+    let rewritten = rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep, budget)?;
+    budget.claim_render_copy(rewritten.len())?;
+    Ok(normalize_deep_passthrough_parent_anchor_blocks(&rewritten))
 }
 
 pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
     body: &str,
     scope_id: &str,
     keyframes: &BTreeMap<String, String>,
-) -> String {
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
     let mut declarations = String::new();
     let mut nested_blocks = Vec::new();
     let mut cursor = 0usize;
@@ -270,24 +297,28 @@ pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(body, cursor);
         if cursor > whitespace_start {
-            push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+            append_scoped_normalized_whitespace(
+                &mut declarations,
+                &body[whitespace_start..cursor],
+                budget,
+            )?;
         }
         if cursor >= body.len() {
             break;
         }
         if body[cursor..].starts_with("/*") {
             let Some(end_offset) = body[cursor + 2..].find("*/") else {
-                declarations.push_str(&body[cursor..]);
+                budget.append_render_str(&mut declarations, &body[cursor..])?;
                 break;
             };
             let end = cursor + 2 + end_offset + 2;
-            declarations.push_str(&body[cursor..end]);
+            budget.append_render_str(&mut declarations, &body[cursor..end])?;
             cursor = end;
             continue;
         }
 
         let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
-            declarations.push_str(&body[cursor..]);
+            budget.append_render_str(&mut declarations, &body[cursor..])?;
             break;
         };
         let raw_prelude = &body[cursor..delimiter];
@@ -295,19 +326,19 @@ pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
         let prelude = raw_prelude[..prelude_end].trim();
         let brace_spacing = &raw_prelude[prelude_end..];
         if delimiter_ch == ';' {
-            declarations.push_str(prelude);
-            declarations.push(';');
+            budget.append_render_str(&mut declarations, prelude)?;
+            budget.append_render_char(&mut declarations, ';')?;
             cursor = delimiter + 1;
             continue;
         }
 
         let Some(close) = find_matching_brace(body, delimiter) else {
-            declarations.push_str(&body[cursor..]);
+            budget.append_render_str(&mut declarations, &body[cursor..])?;
             break;
         };
         if css_prelude_is_block_declaration(prelude) {
             let end = css_block_declaration_end(body, close);
-            declarations.push_str(&body[cursor..end]);
+            budget.append_render_str(&mut declarations, &body[cursor..end])?;
             cursor = end;
             continue;
         }
@@ -322,49 +353,56 @@ pub(crate) fn rewrite_deep_passthrough_wrapped_nested_body(
                 CssBlockContext::Deep
             };
             let nested_rewritten =
-                rewrite_css_items(nested_body, scope_id, keyframes, next_context);
-            block.push_str(&rewritten_prelude);
-            block.push_str(brace_spacing);
-            block.push('{');
+                rewrite_css_items(nested_body, scope_id, keyframes, next_context, budget)?;
+            budget.append_render_str(&mut block, &rewritten_prelude)?;
+            budget.append_render_str(&mut block, brace_spacing)?;
+            budget.append_render_char(&mut block, '{')?;
             if css_block_contains_style_rules(&nested_rewritten)
                 || css_block_contains_at_rule_with_style_rules(&nested_rewritten)
             {
-                block.push('\n');
-                block.push_str(nested_rewritten.trim());
-                block.push('\n');
+                budget.append_render_char(&mut block, '\n')?;
+                budget.append_render_str(&mut block, nested_rewritten.trim())?;
+                budget.append_render_char(&mut block, '\n')?;
             } else {
-                block.push_str(&nested_rewritten);
+                budget.append_render_str(&mut block, &nested_rewritten)?;
             }
-            block.push('}');
+            budget.append_render_char(&mut block, '}')?;
         } else {
-            block.push_str(&rewrite_deep_passthrough_selector(prelude));
-            block.push_str(brace_spacing);
-            block.push('{');
-            let nested_rewritten =
-                rewrite_css_items(nested_body, scope_id, keyframes, CssBlockContext::Deep);
-            block.push_str(&nested_rewritten);
-            block.push('}');
+            let selector = rewrite_deep_passthrough_selector(prelude);
+            budget.append_render_str(&mut block, &selector)?;
+            budget.append_render_str(&mut block, brace_spacing)?;
+            budget.append_render_char(&mut block, '{')?;
+            let nested_rewritten = rewrite_css_items(
+                nested_body,
+                scope_id,
+                keyframes,
+                CssBlockContext::Deep,
+                budget,
+            )?;
+            budget.append_render_str(&mut block, &nested_rewritten)?;
+            budget.append_render_char(&mut block, '}')?;
         }
+        budget.claim_render_copy(block.len())?;
         nested_blocks.push(normalize_style_output(&block));
         cursor = close + 1;
     }
 
     let mut output = String::new();
-    let declarations = rewrite_scoped_declaration_body(&declarations, keyframes);
-    let declarations = normalize_nested_scoped_declarations(&declarations);
+    let declarations = rewrite_scoped_declaration_body(&declarations, keyframes, budget)?;
+    let declarations = normalize_nested_scoped_declarations_with_budget(&declarations, budget)?;
     if !declarations.trim().is_empty() {
-        output.push_str("\n& {");
-        output.push_str(&declarations);
-        output.push_str("\n}");
+        budget.append_render_str(&mut output, "\n& {")?;
+        budget.append_render_str(&mut output, &declarations)?;
+        budget.append_render_str(&mut output, "\n}")?;
     }
     for block in nested_blocks {
-        output.push('\n');
-        output.push_str(&block);
+        budget.append_render_char(&mut output, '\n')?;
+        budget.append_render_str(&mut output, &block)?;
     }
     if !output.is_empty() {
-        output.push('\n');
+        budget.append_render_char(&mut output, '\n')?;
     }
-    output
+    Ok(output)
 }
 
 pub(crate) fn normalize_deep_passthrough_parent_anchor_blocks(source: &str) -> String {
@@ -602,7 +640,8 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
     scope_id: &str,
     keyframes: &BTreeMap<String, String>,
     wrap_declarations: bool,
-) -> String {
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
     let mut declarations = String::new();
     let mut nested_blocks = Vec::new();
     let mut ordered_output = String::new();
@@ -613,9 +652,13 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
         cursor = skip_css_whitespace(body, cursor);
         if cursor > whitespace_start {
             if wrap_declarations {
-                declarations.push_str(&body[whitespace_start..cursor]);
+                budget.append_render_str(&mut declarations, &body[whitespace_start..cursor])?;
             } else {
-                push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+                append_scoped_normalized_whitespace(
+                    &mut declarations,
+                    &body[whitespace_start..cursor],
+                    budget,
+                )?;
             }
         }
         if cursor >= body.len() {
@@ -623,17 +666,17 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
         }
         if body[cursor..].starts_with("/*") {
             let Some(end_offset) = body[cursor + 2..].find("*/") else {
-                declarations.push_str(&body[cursor..]);
+                budget.append_render_str(&mut declarations, &body[cursor..])?;
                 break;
             };
             let end = cursor + 2 + end_offset + 2;
-            declarations.push_str(&body[cursor..end]);
+            budget.append_render_str(&mut declarations, &body[cursor..end])?;
             cursor = end;
             continue;
         }
 
         let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
-            declarations.push_str(&body[cursor..]);
+            budget.append_render_str(&mut declarations, &body[cursor..])?;
             break;
         };
         let raw_prelude = &body[cursor..delimiter];
@@ -641,19 +684,19 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
         let prelude = raw_prelude[..prelude_end].trim();
         let brace_spacing = &raw_prelude[prelude_end..];
         if delimiter_ch == ';' {
-            declarations.push_str(prelude);
-            declarations.push(';');
+            budget.append_render_str(&mut declarations, prelude)?;
+            budget.append_render_char(&mut declarations, ';')?;
             cursor = delimiter + 1;
             continue;
         }
 
         let Some(close) = find_matching_brace(body, delimiter) else {
-            declarations.push_str(&body[cursor..]);
+            budget.append_render_str(&mut declarations, &body[cursor..])?;
             break;
         };
         if css_prelude_is_block_declaration(prelude) {
             let end = css_block_declaration_end(body, close);
-            declarations.push_str(&body[cursor..end]);
+            budget.append_render_str(&mut declarations, &body[cursor..end])?;
             cursor = end;
             continue;
         }
@@ -664,7 +707,8 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
                 &mut declarations,
                 keyframes,
                 true,
-            );
+                budget,
+            )?;
         } else if nested_blocks.is_empty() {
             trim_wrapped_declaration_semicolon =
                 nested_block_trims_previous_declaration_semicolon(prelude, nested_body);
@@ -678,32 +722,33 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
             };
             let nested_rewritten =
                 if wrap_declarations && next_context == CssBlockContext::Container {
-                    rewrite_nested_scoped_rule_body(nested_body, scope_id, keyframes, true)
+                    rewrite_nested_scoped_rule_body(nested_body, scope_id, keyframes, true, budget)?
                 } else {
-                    rewrite_css_items(nested_body, scope_id, keyframes, next_context)
+                    rewrite_css_items(nested_body, scope_id, keyframes, next_context, budget)?
                 };
             let mut block = String::new();
-            block.push_str(&rewritten_prelude);
-            block.push_str(brace_spacing);
-            block.push('{');
+            budget.append_render_str(&mut block, &rewritten_prelude)?;
+            budget.append_render_str(&mut block, brace_spacing)?;
+            budget.append_render_char(&mut block, '{')?;
             if css_block_contains_style_rules(&nested_rewritten)
                 || css_block_contains_at_rule_with_style_rules(&nested_rewritten)
             {
-                block.push('\n');
-                block.push_str(nested_rewritten.trim());
-                block.push('\n');
+                budget.append_render_char(&mut block, '\n')?;
+                budget.append_render_str(&mut block, nested_rewritten.trim())?;
+                budget.append_render_char(&mut block, '\n')?;
             } else {
-                block.push_str(&nested_rewritten);
+                budget.append_render_str(&mut block, &nested_rewritten)?;
             }
-            block.push('}');
+            budget.append_render_char(&mut block, '}')?;
+            budget.claim_render_copy(block.len())?;
             let block = normalize_style_output(&block);
             if wrap_declarations {
                 nested_blocks.push(block);
             } else {
                 if !ordered_output.is_empty() && !ordered_output.ends_with('\n') {
-                    ordered_output.push('\n');
+                    budget.append_render_char(&mut ordered_output, '\n')?;
                 }
-                ordered_output.push_str(&block);
+                budget.append_render_str(&mut ordered_output, &block)?;
             }
         } else {
             let has_nested_block = css_block_has_nested_block(nested_body);
@@ -711,31 +756,36 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
                 has_nested_block && css_block_has_direct_nested_rule(nested_body);
             let mut block = String::new();
             if has_direct_nested_rule {
-                block.push_str(prelude);
+                budget.append_render_str(&mut block, prelude)?;
             } else {
-                block.push_str(&rewrite_selector_list(prelude, scope_id));
+                let selector = rewrite_selector_list(prelude, scope_id);
+                budget.append_render_str(&mut block, &selector)?;
             }
-            block.push_str(brace_spacing);
-            block.push('{');
+            budget.append_render_str(&mut block, brace_spacing)?;
+            budget.append_render_char(&mut block, '{')?;
             if has_nested_block {
-                block.push_str(&rewrite_nested_scoped_rule_body(
+                let rewritten = rewrite_nested_scoped_rule_body(
                     nested_body,
                     scope_id,
                     keyframes,
                     has_direct_nested_rule,
-                ));
+                    budget,
+                )?;
+                budget.append_render_str(&mut block, &rewritten)?;
             } else {
-                block.push_str(&rewrite_scoped_declaration_body(nested_body, keyframes));
+                let rewritten = rewrite_scoped_declaration_body(nested_body, keyframes, budget)?;
+                budget.append_render_str(&mut block, &rewritten)?;
             }
-            block.push('}');
+            budget.append_render_char(&mut block, '}')?;
+            budget.claim_render_copy(block.len())?;
             let block = normalize_style_output(&block);
             if wrap_declarations {
                 nested_blocks.push(block);
             } else {
                 if !ordered_output.is_empty() && !ordered_output.ends_with('\n') {
-                    ordered_output.push('\n');
+                    budget.append_render_char(&mut ordered_output, '\n')?;
                 }
-                ordered_output.push_str(&block);
+                budget.append_render_str(&mut ordered_output, &block)?;
             }
         }
         cursor = close + 1;
@@ -747,25 +797,32 @@ pub(crate) fn rewrite_nested_scoped_rule_body(
             &declarations,
             keyframes,
             trim_wrapped_declaration_semicolon,
-        ) {
-            output.push_str("\n&[");
-            output.push_str(scope_id);
-            output.push_str("] {");
-            output.push_str(&declarations);
-            output.push_str("\n}");
+            budget,
+        )? {
+            budget.append_render_str(&mut output, "\n&[")?;
+            budget.append_render_str(&mut output, scope_id)?;
+            budget.append_render_str(&mut output, "] {")?;
+            budget.append_render_str(&mut output, &declarations)?;
+            budget.append_render_str(&mut output, "\n}")?;
         }
         for block in nested_blocks {
-            output.push('\n');
-            output.push_str(&block);
+            budget.append_render_char(&mut output, '\n')?;
+            budget.append_render_str(&mut output, &block)?;
         }
     } else {
-        flush_scoped_nested_declarations(&mut ordered_output, &mut declarations, keyframes, false);
-        output.push_str(&ordered_output);
+        flush_scoped_nested_declarations(
+            &mut ordered_output,
+            &mut declarations,
+            keyframes,
+            false,
+            budget,
+        )?;
+        budget.append_render_str(&mut output, &ordered_output)?;
     }
     if !output.is_empty() {
-        output.push('\n');
+        budget.append_render_char(&mut output, '\n')?;
     }
-    output
+    Ok(output)
 }
 
 pub(crate) fn flush_scoped_nested_declarations(
@@ -773,41 +830,49 @@ pub(crate) fn flush_scoped_nested_declarations(
     declarations: &mut String,
     keyframes: &BTreeMap<String, String>,
     separate_before_next_block: bool,
-) {
+    budget: &mut ScopedStyleBudget,
+) -> Result<(), StylePreprocessError> {
     if declarations.is_empty() {
-        return;
+        return Ok(());
     }
-    let rewritten = rewrite_scoped_declaration_body(declarations, keyframes);
-    output.push_str(rewritten.trim_end());
+    let rewritten = rewrite_scoped_declaration_body(declarations, keyframes, budget)?;
+    budget.append_render_str(output, rewritten.trim_end())?;
     if separate_before_next_block && !output.ends_with('\n') {
-        output.push('\n');
+        budget.append_render_char(output, '\n')?;
     }
     declarations.clear();
+    Ok(())
 }
 
 pub(crate) fn rewrite_scoped_declaration_body(
     body: &str,
     keyframes: &BTreeMap<String, String>,
-) -> String {
-    rewrite_animation_declarations(body, keyframes)
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
+    budget.claim_render_copy(body.len())?;
+    Ok(rewrite_animation_declarations(body, keyframes))
 }
 
 pub(crate) fn format_scoped_nested_declarations(
     declarations: &str,
     keyframes: &BTreeMap<String, String>,
     trim_last_semicolon: bool,
-) -> Option<String> {
-    let mut declarations = rewrite_scoped_declaration_body(declarations, keyframes);
+    budget: &mut ScopedStyleBudget,
+) -> Result<Option<String>, StylePreprocessError> {
+    let mut declarations = rewrite_scoped_declaration_body(declarations, keyframes, budget)?;
     if trim_last_semicolon {
+        budget.claim_render_copy(declarations.len().saturating_sub(1))?;
         declarations = remove_last_top_level_semicolon(&declarations);
     }
     if declarations.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     if declarations.contains('\n') || declarations.contains('\r') {
-        Some(declarations.trim_end().to_string())
+        let trimmed = declarations.trim_end();
+        budget.claim_render_copy(trimmed.len())?;
+        Ok(Some(trimmed.to_string()))
     } else {
-        Some(normalize_nested_scoped_declarations(&declarations))
+        normalize_nested_scoped_declarations_with_budget(&declarations, budget).map(Some)
     }
 }
 
@@ -982,13 +1047,22 @@ pub(crate) fn last_top_level_semicolon(source: &str) -> Option<usize> {
     last
 }
 
-pub(crate) fn normalize_nested_scoped_declarations(declarations: &str) -> String {
-    let collapsed = collapse_css_whitespace_outside_strings(declarations.trim());
+fn normalize_nested_scoped_declarations_with_budget(
+    declarations: &str,
+    budget: &mut ScopedStyleBudget,
+) -> Result<String, StylePreprocessError> {
+    let trimmed = declarations.trim();
+    budget.claim_render_copy(trimmed.len())?;
+    let collapsed = collapse_css_whitespace_outside_strings(trimmed);
     if collapsed.is_empty() {
-        String::new()
-    } else {
-        format!(" {collapsed}")
+        return Ok(String::new());
     }
+    let output_bytes = collapsed
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| StylePreprocessError::scoped_limit("scoped style output size overflowed"))?;
+    budget.claim_render_copy(output_bytes)?;
+    Ok(format!(" {collapsed}"))
 }
 
 pub(crate) fn collapse_css_whitespace_outside_strings(source: &str) -> String {

@@ -1053,6 +1053,8 @@
             max_warnings: 0,
             max_warning_bytes: 0,
             max_selector_work_bytes: 161,
+            max_output_bytes: usize::MAX,
+            max_render_bytes: usize::MAX,
         };
         assert_eq!(
             rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
@@ -1088,6 +1090,160 @@
     }
 
     #[test]
+    fn scoped_render_budget_appends_are_atomic() {
+        let limits = ScopedStyleLimits {
+            max_output_bytes: 3,
+            max_render_bytes: 5,
+            ..ScopedStyleLimits::default()
+        };
+        let mut budget = ScopedStyleBudget::new(limits);
+        let mut first = String::new();
+        let mut second = String::new();
+        budget.append_render_str(&mut first, "abc").unwrap();
+        budget.append_render_str(&mut second, "de").unwrap();
+        assert_eq!((first.as_str(), second.as_str(), budget.render_bytes), ("abc", "de", 5));
+
+        let error = budget
+            .append_render_char(&mut first, 'x')
+            .expect_err("one-short output limit must fail");
+        assert!(error.message.contains("output exceeds"));
+        assert_eq!((first.as_str(), budget.render_bytes), ("abc", 5));
+
+        let error = budget
+            .append_render_char(&mut second, 'f')
+            .expect_err("one-short render limit must fail");
+        assert!(error.message.contains("rendering exceeds"));
+        assert_eq!((second.as_str(), budget.render_bytes), ("de", 5));
+
+        let mut overflow = ScopedStyleBudget::new(ScopedStyleLimits {
+            max_output_bytes: usize::MAX,
+            max_render_bytes: usize::MAX,
+            ..ScopedStyleLimits::default()
+        });
+        overflow.render_bytes = usize::MAX;
+        let mut output = String::new();
+        let error = overflow
+            .append_render_char(&mut output, 'x')
+            .expect_err("render arithmetic overflow must fail");
+        assert!(error.message.contains("overflowed"));
+        assert!(output.is_empty());
+        assert_eq!(overflow.render_bytes, usize::MAX);
+    }
+
+    #[test]
+    fn scoped_render_limits_have_exact_boundaries() {
+        let source = ".a{}";
+        let scope_id = "x";
+        let mut measured = ScopedStyleBudget::new(ScopedStyleLimits {
+            max_output_bytes: usize::MAX,
+            max_render_bytes: usize::MAX,
+            ..ScopedStyleLimits::default()
+        });
+        let output = rewrite_css_items(
+            source,
+            scope_id,
+            &BTreeMap::new(),
+            CssBlockContext::Root,
+            &mut measured,
+        )
+        .unwrap();
+        let exact = ScopedStyleLimits {
+            max_output_bytes: output.len(),
+            max_render_bytes: measured.render_bytes,
+            ..ScopedStyleLimits::default()
+        };
+
+        assert_eq!(
+            rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
+            output
+        );
+        for limits in [
+            ScopedStyleLimits {
+                max_output_bytes: output.len() - 1,
+                ..exact
+            },
+            ScopedStyleLimits {
+                max_render_bytes: measured.render_bytes - 1,
+                ..exact
+            },
+        ] {
+            let error = rewrite_scoped_selectors_with_limits(source, scope_id, limits)
+                .expect_err("one-short scoped render limit must fail");
+            assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+        }
+    }
+
+    #[test]
+    fn scoped_render_budget_counts_generated_output_across_ancestors() {
+        let depth = 32;
+        let mut source = "@media x{".repeat(depth);
+        source.push_str(&".a{}".repeat(8));
+        source.push_str(&"}".repeat(depth));
+        let scope_id = "x".repeat(4 * 1024);
+        let limits = ScopedStyleLimits {
+            max_render_bytes: 512 * 1024,
+            ..ScopedStyleLimits::default()
+        };
+
+        assert!(source.len() < limits.max_source_bytes);
+        validate_scoped_style_resources(&source, &scope_id, limits).unwrap();
+        let error = transform_scoped_style_with_limits(&source, &scope_id, false, limits)
+            .err()
+            .expect("ancestor output copies must consume the render budget");
+        assert_eq!(error.code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert!(error.message.contains("rendering exceeds"));
+    }
+
+    #[test]
+    fn scoped_render_limit_failure_is_atomic() {
+        let source = ".a{}";
+        let scope_id = "data-v-x";
+        let mut measured = ScopedStyleBudget::new(ScopedStyleLimits {
+            max_output_bytes: usize::MAX,
+            max_render_bytes: usize::MAX,
+            ..ScopedStyleLimits::default()
+        });
+        rewrite_css_items(
+            source,
+            scope_id,
+            &BTreeMap::new(),
+            CssBlockContext::Root,
+            &mut measured,
+        )
+        .unwrap();
+        let result = compile_style_with_scoped_limits(
+            source,
+            StyleCompileOptions {
+                id: Some(scope_id.into()),
+                scoped: true,
+                modules: true,
+                vars: vec!["color".into()],
+                source_map: true,
+                source_map_base_offset: 17,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+            ScopedStyleLimits {
+                max_render_bytes: measured.render_bytes - 1,
+                ..ScopedStyleLimits::default()
+            },
+        );
+
+        assert!(result.code.is_empty());
+        assert!(result.map.is_none());
+        assert!(result.modules.is_none());
+        assert!(result.vars.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("rendering exceeds"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_SCOPED_LIMIT");
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 17, 18))
+        );
+    }
+
+    #[test]
     fn scoped_selector_work_limit_has_an_exact_boundary() {
         let source = ".a,.b{}";
         let scope_id = "x";
@@ -1103,6 +1259,8 @@
             max_warnings: 0,
             max_warning_bytes: 0,
             max_selector_work_bytes: 87,
+            max_output_bytes: usize::MAX,
+            max_render_bytes: usize::MAX,
         };
         assert_eq!(
             rewrite_scoped_selectors_with_limits(source, scope_id, exact).unwrap(),
@@ -1630,6 +1788,8 @@
                 max_warnings: 0,
                 max_warning_bytes: 0,
                 max_selector_work_bytes: 0,
+                max_output_bytes: 0,
+                max_render_bytes: 0,
             },
         );
         assert!(unscoped.errors.is_empty());
