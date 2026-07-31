@@ -1,3 +1,4 @@
+#[cfg(test)]
 pub(crate) fn process_expression_arrow_body_end(raw: &str, body_start: usize) -> usize {
     if raw[body_start..].starts_with('{') {
         return find_matching_forward(raw, body_start, '{', '}')
@@ -32,6 +33,98 @@ pub(crate) fn process_expression_arrow_body_end(raw: &str, body_start: usize) ->
         }
     }
     raw.len()
+}
+
+pub(crate) fn process_expression_arrow_body_ends(
+    raw: &str,
+    body_starts: &[usize],
+) -> Vec<usize> {
+    debug_assert!(body_starts.windows(2).all(|pair| pair[0] < pair[1]));
+    debug_assert!(body_starts
+        .iter()
+        .all(|start| *start <= raw.len() && raw.is_char_boundary(*start)));
+
+    let mut body_ends = vec![raw.len(); body_starts.len()];
+    let mut body_depths = vec![0usize; body_starts.len()];
+    let mut next_body = 0usize;
+    let mut terminators = Vec::<(usize, usize)>::new();
+    let mut block_stack = Vec::<Option<usize>>::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+
+    for (offset, ch) in raw.char_indices() {
+        let mut block_body = None;
+        while body_starts
+            .get(next_body)
+            .is_some_and(|start| *start <= offset)
+        {
+            body_depths[next_body] = depth;
+            if body_starts[next_body] == offset && ch == '{' {
+                block_body = Some(next_body);
+            }
+            next_body += 1;
+        }
+
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+
+        match ch {
+            '(' | '[' | '{' => {
+                if ch == '{' {
+                    block_stack.push(block_body);
+                }
+                depth = depth.saturating_add(1);
+            }
+            ')' | ']' | '}' => {
+                terminators.push((depth, offset));
+                if ch == '}' {
+                    if let Some(Some(body)) = block_stack.pop() {
+                        body_ends[body] = offset + ch.len_utf8();
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            ',' | ';' => {
+                terminators.push((depth, offset));
+            }
+            _ => {}
+        }
+    }
+    while next_body < body_starts.len() {
+        body_depths[next_body] = depth;
+        next_body += 1;
+    }
+    terminators.sort_unstable();
+
+    for (index, (&body_start, &body_depth)) in
+        body_starts.iter().zip(&body_depths).enumerate()
+    {
+        if raw[body_start..].starts_with('{') {
+            continue;
+        }
+        let next = terminators.partition_point(|&(depth, offset)| {
+            depth < body_depth || depth == body_depth && offset < body_start
+        });
+        if let Some(&(depth, body_end)) = terminators.get(next) {
+            if depth == body_depth {
+                body_ends[index] = body_end;
+            }
+        }
+    }
+    body_ends
 }
 
 pub(crate) fn process_expression_assignment_rhs<'a>(

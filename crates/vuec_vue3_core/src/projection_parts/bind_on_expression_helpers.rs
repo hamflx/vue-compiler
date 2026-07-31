@@ -1066,12 +1066,20 @@ pub(crate) fn process_expression_arrow_bindings(
     raw: &str,
 ) -> ProcessExpressionArrowBindingIndex {
     let mut bindings = ProcessExpressionArrowBindingIndex::default();
+    let mut arrows = Vec::new();
     for arrow in process_expression_arrow_offsets(raw) {
         let Some(param_range) = process_expression_arrow_param_range(raw, arrow) else {
             continue;
         };
         let body_start = skip_ws_forward(raw, arrow + 2);
-        let body_end = process_expression_arrow_body_end(raw, body_start);
+        arrows.push((param_range, body_start));
+    }
+    let body_starts = arrows
+        .iter()
+        .map(|(_, body_start)| *body_start)
+        .collect::<Vec<_>>();
+    let body_ends = process_expression_arrow_body_ends(raw, &body_starts);
+    for ((param_range, body_start), body_end) in arrows.into_iter().zip(body_ends) {
         for (param_start, param_end) in process_expression_param_binding_spans(raw, param_range) {
             bindings.params.insert((param_start, param_end));
             bindings

@@ -605,6 +605,44 @@
     }
 
     #[test]
+    fn arrow_body_end_index_matches_scalar_scan_boundaries() {
+        for expression in [
+            "a => b => c => value",
+            "a => (b => b)(value), tail",
+            "a => { return { nested: true } }, tail",
+            r#"a => 'comma, and \' quote' + value, tail"#,
+            "a => ({ value: [one, two] }), tail",
+            "a => value), tail",
+            "a => value; tail",
+        ] {
+            let body_starts = process_expression_arrow_offsets(expression)
+                .into_iter()
+                .map(|arrow| skip_ws_forward(expression, arrow + 2))
+                .collect::<Vec<_>>();
+            let indexed = process_expression_arrow_body_ends(expression, &body_starts);
+            let scalar = body_starts
+                .iter()
+                .map(|start| process_expression_arrow_body_end(expression, *start))
+                .collect::<Vec<_>>();
+
+            assert_eq!(indexed, scalar, "body ends differ for {expression:?}");
+        }
+    }
+
+    #[test]
+    fn js_like_rewrite_indexes_deeply_nested_arrow_bodies() {
+        const ARROWS: usize = 4_096;
+        let expression = format!("{}x", "x => ".repeat(ARROWS));
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(rewrite_js_like_expression(&expression, &options), expression);
+    }
+
+    #[test]
     fn base_compile_accepts_v_for_of_expression_with_v_memo() {
         let result = base_compile(
             TemplateSource {
