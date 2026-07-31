@@ -21,6 +21,11 @@ pub fn js_program_errors_to_vue3_invalid_expression_diagnostic(
     js_error_to_vue3_invalid_expression_diagnostic(&error, source_text, span)
 }
 
+/// Returns the byte offset of the primary label on the first Oxc diagnostic.
+pub fn js_diagnostics_primary_offset(errors: &[OxcDiagnostic]) -> Option<usize> {
+    errors.first().and_then(primary_label_offset)
+}
+
 /// Creates the official Vue 3 invalid-expression message from Oxc text.
 pub fn vue3_expression_parse_error_message(raw: &str) -> String {
     let detail = raw
@@ -43,10 +48,7 @@ pub fn js_parse_error_span(
     span: Option<Span>,
 ) -> Option<Span> {
     let span = span?;
-    let relative = error
-        .diagnostics()
-        .first()
-        .and_then(primary_label_offset)
+    let relative = js_diagnostics_primary_offset(error.diagnostics())
         .or_else(|| parse_oxc_line_column(error.message()).map(|(_line, column)| column))
         .map(|offset| offset.min(source_text.len()))
         .unwrap_or(source_text.len());

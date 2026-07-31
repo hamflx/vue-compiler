@@ -509,6 +509,13 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
     }
 }
 
+pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
+
+enum ProcessExpressionFunctionBindingParse {
+    Parsed(ProcessExpressionFunctionBindingIndex),
+    Failed { error_offset: Option<usize> },
+}
+
 pub(crate) fn process_expression_function_bindings(
     raw: &str,
     source_type: oxc_span::SourceType,
@@ -521,14 +528,19 @@ pub(crate) fn process_expression_function_bindings(
         return ProcessExpressionFunctionBindingIndex::default();
     }
 
-    if let Some(bindings) = process_expression_parse_function_bindings(raw, raw, source_type) {
+    if let ProcessExpressionFunctionBindingParse::Parsed(bindings) =
+        process_expression_parse_function_bindings(raw, raw, source_type)
+    {
         return bindings;
     }
     if raw.contains("|>") {
         let normalized = raw.replace("|>", ", ");
-        if let Some(bindings) =
-            process_expression_parse_function_bindings(&normalized, raw, source_type)
-        {
+        if let Some(bindings) = process_expression_recover_pipeline_function_bindings(
+            normalized,
+            raw,
+            source_type,
+            PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES,
+        ) {
             return bindings;
         }
     }
@@ -539,7 +551,7 @@ fn process_expression_parse_function_bindings(
     parse_source: &str,
     original_source: &str,
     source_type: oxc_span::SourceType,
-) -> Option<ProcessExpressionFunctionBindingIndex> {
+) -> ProcessExpressionFunctionBindingParse {
     debug_assert_eq!(parse_source.len(), original_source.len());
 
     let store = JsAstStore::new();
@@ -554,7 +566,7 @@ fn process_expression_parse_function_bindings(
                 original_source.len(),
             );
             oxc_ast_visit::Visit::visit_expression(&mut collector, &expression);
-            return Some(collector.finish());
+            return ProcessExpressionFunctionBindingParse::Parsed(collector.finish());
         }
     }
 
@@ -563,7 +575,10 @@ fn process_expression_parse_function_bindings(
     let wrapped_original_source = format!("{FUNCTION_BODY_PREFIX}{original_source}\n}}\n");
     let parsed = store.parse_program(&wrapped_parse_source, source_type);
     if parsed.panicked || !parsed.errors.is_empty() {
-        return None;
+        let error_offset = js_diagnostics_primary_offset(&parsed.errors)
+            .and_then(|offset| offset.checked_sub(FUNCTION_BODY_PREFIX.len()))
+            .filter(|offset| *offset < parse_source.len());
+        return ProcessExpressionFunctionBindingParse::Failed { error_offset };
     }
     let source_start = FUNCTION_BODY_PREFIX.len();
     let source_end = source_start + original_source.len();
@@ -573,7 +588,108 @@ fn process_expression_parse_function_bindings(
         source_end,
     );
     oxc_ast_visit::Visit::visit_program(&mut collector, &parsed.program);
-    Some(collector.finish())
+    ProcessExpressionFunctionBindingParse::Parsed(collector.finish())
+}
+
+fn process_expression_recover_pipeline_function_bindings(
+    mut parse_source: String,
+    original_source: &str,
+    source_type: oxc_span::SourceType,
+    max_topic_recoveries: usize,
+) -> Option<ProcessExpressionFunctionBindingIndex> {
+    debug_assert_eq!(parse_source.len(), original_source.len());
+
+    for recovered in 0..=max_topic_recoveries {
+        let error_offset = match process_expression_parse_function_bindings(
+            &parse_source,
+            original_source,
+            source_type,
+        ) {
+            ProcessExpressionFunctionBindingParse::Parsed(bindings) => return Some(bindings),
+            ProcessExpressionFunctionBindingParse::Failed { error_offset } => error_offset?,
+        };
+        if recovered == max_topic_recoveries {
+            return None;
+        }
+        let (start, end, replacement) =
+            process_expression_pipeline_topic_recovery(&parse_source, error_offset)?;
+        parse_source.replace_range(start..end, replacement);
+    }
+    None
+}
+
+fn process_expression_pipeline_topic_recovery(
+    source: &str,
+    error_offset: usize,
+) -> Option<(usize, usize, &'static str)> {
+    const TOPICS: [(&str, &str); 5] = [
+        ("@@", "$_"),
+        ("^^", "$_"),
+        ("%", "$"),
+        ("#", "$"),
+        ("^", "$"),
+    ];
+
+    let previous_token_end =
+        process_expression_pipeline_topic_chain_start(source, error_offset)?;
+    for (topic, replacement) in TOPICS {
+        let starts = [
+            Some(error_offset),
+            (topic.len() > 1)
+                .then(|| error_offset.checked_sub(topic.len() - 1))
+                .flatten(),
+            previous_token_end.checked_sub(topic.len()),
+        ];
+        for start in starts.into_iter().flatten() {
+            let end = start.checked_add(topic.len())?;
+            let error_matches = error_offset >= start
+                && (error_offset < end || end == previous_token_end);
+            if !error_matches
+                || source.get(start..end) != Some(topic)
+                || source
+                    .get(end..)
+                    .and_then(|tail| tail.chars().next())
+                    .is_some_and(is_identifier_continue)
+            {
+                continue;
+            }
+            return Some((start, end, replacement));
+        }
+    }
+    None
+}
+
+fn process_expression_pipeline_topic_chain_start(
+    source: &str,
+    error_offset: usize,
+) -> Option<usize> {
+    let mut end = source.get(..error_offset)?.trim_end().len();
+    while let Some((last, ch)) = previous_char(source, end) {
+        match ch {
+            ']' => end = find_matching_backward(source, last, '[', ']')?,
+            ')' => end = find_matching_backward(source, last, '(', ')')?,
+            ch if is_identifier_continue(ch) => {
+                let mut identifier_start = last;
+                while let Some((previous, ch)) = previous_char(source, identifier_start) {
+                    if !is_identifier_continue(ch) {
+                        break;
+                    }
+                    identifier_start = previous;
+                }
+                let before_identifier = source.get(..identifier_start)?.trim_end();
+                if let Some(before_member) = before_identifier.strip_suffix("?.") {
+                    end = before_member.len();
+                } else if let Some(before_member) = before_identifier.strip_suffix('.') {
+                    end = before_member.len();
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+        end = source.get(..end)?.trim_end().len();
+    }
+    Some(end)
 }
 
 pub(crate) fn process_expression_is_function_binding(

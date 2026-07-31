@@ -38,7 +38,7 @@ use vuec_html::{
     resolve_html_namespace, HtmlTextMode, HtmlTokenKind, HtmlTokenizer,
 };
 use vuec_js::{
-    js_error_to_vue3_invalid_expression_diagnostic,
+    js_diagnostics_primary_offset, js_error_to_vue3_invalid_expression_diagnostic,
     js_program_errors_to_vue3_invalid_expression_diagnostic, JsAstStore,
 };
 use vuec_pass::TransformContext;

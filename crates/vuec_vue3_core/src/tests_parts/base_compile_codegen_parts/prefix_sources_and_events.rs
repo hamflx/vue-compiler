@@ -793,6 +793,117 @@
     }
 
     #[test]
+    fn expression_rewrite_recovers_hack_pipeline_topic_bindings() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        for topic in ["%", "#", "^", "@@", "^^"] {
+            let source = format!(
+                "function named(value) {{ const local = value; return local |> {topic} + outside }}"
+            );
+            assert_eq!(
+                rewrite_js_like_expression(&source, &options),
+                format!(
+                    "function named(value) {{ const local = value; return local |> {topic} + _ctx.outside }}"
+                ),
+                "topic {topic}",
+            );
+
+            let source = format!(
+                "function named(value, key, arg) {{ return value |> {topic}.field + {topic}[key] + {topic}(arg) + outside }}"
+            );
+            assert_eq!(
+                rewrite_js_like_expression(&source, &options),
+                format!(
+                    "function named(value, key, arg) {{ return value |> {topic}.field + {topic}[key] + {topic}(arg) + _ctx.outside }}"
+                ),
+                "topic operations {topic}",
+            );
+        }
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function named(value, mod) { return value |> (% % mod) + outside }",
+                &options,
+            ),
+            "function named(value, mod) { return value |> (% % mod) + _ctx.outside }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function named(value, mask) { return value |> (^ ^ mask) + outside }",
+                &options,
+            ),
+            "function named(value, mask) { return value |> (^ ^ mask) + _ctx.outside }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "class Box { #value; method(input) { const local = this.#value; return input |> # + local + outside } }",
+                &options,
+            ),
+            "class Box { #value; method(input) { const local = this.#value; return input |> # + local + _ctx.outside } }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function named(value, pair, wrap) { const local = value; return value |> pair(%, %, local) |> wrap(%, outside) }",
+                &options,
+            ),
+            "function named(value, pair, wrap) { const local = value; return value |> pair(%, %, local) |> wrap(%, _ctx.outside) }",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"function named(value) { const raw = "% # ^ @@ ^^"; const pattern = /[%#^]/; /* % # ^ @@ ^^ */ return value |> % + outside }"#,
+                &options,
+            ),
+            r#"function named(value) { const raw = "% # ^ @@ ^^"; const pattern = /[%#^]/; /* % # ^ @@ ^^ */ return value |> % + _ctx.outside }"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                "function named(value) { const note = '偏移'; return value |> ^^ + outside }",
+                &options,
+            ),
+            "function named(value) { const note = '偏移'; return value |> ^^ + _ctx.outside }",
+        );
+    }
+
+    #[test]
+    fn pipeline_topic_binding_recovery_is_bounded() {
+        fn pipeline_with_topics(topics: usize) -> String {
+            format!(
+                "function named(value) {{ return value |> tuple({}) }}",
+                vec!["%"; topics].join(", ")
+            )
+        }
+
+        let exact = pipeline_with_topics(PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES);
+        let exact_bindings =
+            process_expression_function_bindings(&exact, oxc_span::SourceType::mjs());
+        assert!(process_expression_function_bindings_parsed(
+            &exact_bindings
+        ));
+
+        let overflow =
+            pipeline_with_topics(PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES + 1);
+        let overflow_bindings =
+            process_expression_function_bindings(&overflow, oxc_span::SourceType::mjs());
+        assert!(!process_expression_function_bindings_parsed(
+            &overflow_bindings
+        ));
+
+        let unrelated_error =
+            "function named(value) { return value |> % + ; const local = value }";
+        let unrelated_bindings = process_expression_function_bindings(
+            unrelated_error,
+            oxc_span::SourceType::mjs(),
+        );
+        assert!(!process_expression_function_bindings_parsed(
+            &unrelated_bindings
+        ));
+    }
+
+    #[test]
     fn expression_rewrite_indexes_dense_flat_identifiers() {
         const IDENTIFIERS: usize = 4_096;
         let expression = vec!["value"; IDENTIFIERS].join(" + ");

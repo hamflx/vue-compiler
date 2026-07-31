@@ -453,6 +453,36 @@
     }
 
     #[test]
+    fn process_expression_projection_recovers_hack_pipeline_topic_bindings() {
+        for topic in ["%", "#", "^", "@@", "^^"] {
+            let source = format!(
+                "function named(value) {{ const local = value; return local |> {topic} + outside }}"
+            );
+            let projection = process_expression_test_projection(
+                &source,
+                json!({
+                    "prefixIdentifiers": true,
+                    "identifiers": {},
+                    "bindingMetadata": {},
+                    "expressionPlugins": [[
+                        "pipelineOperator",
+                        { "proposal": "hack", "topicToken": topic }
+                    ]]
+                }),
+            );
+
+            assert_eq!(projection["kind"], json!("compound"), "topic {topic}");
+            assert_eq!(
+                projection_code(&projection),
+                format!(
+                    "function named(value) {{ const local = value; return local |> {topic} + _ctx.outside }}"
+                ),
+                "topic {topic}",
+            );
+        }
+    }
+
+    #[test]
     fn process_expression_projection_scopes_local_declarations() {
         let projection = process_expression_test_statement_projection(
             "function run(input) { use(hoisted); var hoisted = source; { let block = hoisted; use(block) } try { throw input } catch ({ message }) { use(message) } for (const item of items) { use(item) } return hoisted }; hoisted + block + message + item",
