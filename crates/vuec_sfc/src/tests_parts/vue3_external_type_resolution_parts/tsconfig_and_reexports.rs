@@ -1366,6 +1366,29 @@ defineProps<Leaf>()
     }
 
     #[cfg(unix)]
+    fn vue3_test_non_utf8_path_operation_is_unsupported(
+        operation: &str,
+        result: std::io::Result<()>,
+    ) -> bool {
+        // Darwin reports EILSEQ when its filesystem API rejects a native path
+        // containing bytes that cannot be represented as UTF-8.
+        #[cfg(target_os = "macos")]
+        const MACOS_EILSEQ: i32 = 92;
+
+        match result {
+            Ok(()) => false,
+            #[cfg(target_os = "macos")]
+            Err(error) if error.raw_os_error() == Some(MACOS_EILSEQ) => {
+                eprintln!(
+                    "skipping non-UTF-8 path test because {operation} is unsupported: {error}"
+                );
+                true
+            }
+            Err(error) => panic!("{operation}: {error}"),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn vue3_external_type_caches_preserve_native_unix_paths() {
         use std::os::unix::ffi::OsStringExt;
@@ -1377,16 +1400,24 @@ defineProps<Leaf>()
         let second_path = dir
             .path()
             .join(std::ffi::OsString::from_vec(b"type-\x81.ts".to_vec()));
-        std::fs::write(
-            &first_path,
-            "export interface FirstNativePath { value: string }",
-        )
-        .expect("write first native path");
-        std::fs::write(
-            &second_path,
-            "export interface SecondNativePath { value: string }",
-        )
-        .expect("write second native path");
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "writing first non-UTF-8 path",
+            std::fs::write(
+                &first_path,
+                "export interface FirstNativePath { value: string }",
+            ),
+        ) {
+            return;
+        }
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "writing second non-UTF-8 path",
+            std::fs::write(
+                &second_path,
+                "export interface SecondNativePath { value: string }",
+            ),
+        ) {
+            return;
+        }
         assert_eq!(
             first_path.to_string_lossy(),
             second_path.to_string_lossy()

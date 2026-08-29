@@ -1056,17 +1056,17 @@ mod source_single_flight_tests {
         )
         .expect("write require augmentation");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::Bundler,
+            ..Vue3TypeResolverContext::default()
+        };
         let roots = [Vue3InlineModuleSource {
             filename: &filename,
             source: "import './node_modules/module-package/index'; import './node_modules/commonjs-package/index'",
             source_type: oxc_span::SourceType::ts(),
         }];
-        let augmentations = vue3_reachable_global_augmentation_files(
-            &filename,
-            &[],
-            &roots,
-            &Vue3TypeResolverContext::default(),
-        )
+        let augmentations =
+            vue3_reachable_global_augmentation_files(&filename, &[], &roots, &resolver)
         .expect("scan both package scope modes")
         .into_iter()
         .collect::<BTreeSet<_>>();

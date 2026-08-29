@@ -3049,8 +3049,9 @@ fn vue3_package_metadata_bounds_aliases_and_preserves_non_utf8_identities() {
         .expect("create package target cycle");
     assert_eq!(
         resolve_vue3_package_json_type_entry(&package_dir, None, &loop_resolver),
-        Vue3PackageJsonTypeResolution::Blocked
+        Vue3PackageJsonTypeResolution::Resolved(package_dir.join("loop/index.d.ts"))
     );
+    assert!(!loop_resolver.external_type_session.metadata_is_blocked());
 
     let first = dir
         .path()
@@ -3476,7 +3477,9 @@ fn vue3_tsconfig_types_names_are_target_bounded_before_validation() {
 fn vue3_tsconfig_named_type_candidate_paths_are_target_bounded() {
     let dir = tempfile::tempdir().expect("temp dir");
     let type_roots = [dir.path().join("first"), dir.path().join("second")];
-    let type_name = format!("@scope/{}", "x".repeat(4096));
+    // Keep each generated package-name component below common filesystem limits so the
+    // target-step boundary, rather than an OS-specific ENAMETOOLONG error, ends the probe.
+    let type_name = format!("@scope/{}", "x".repeat(128));
     let generated_steps = type_roots
         .iter()
         .map(|type_root| {

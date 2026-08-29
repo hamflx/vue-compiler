@@ -1225,12 +1225,32 @@ defineProps<
         let types = dir.path().join("types");
         let first = types.join(std::ffi::OsString::from_vec(vec![b'd', 0x80]));
         let second = types.join(std::ffi::OsString::from_vec(vec![b'd', 0x81]));
-        std::fs::create_dir_all(&first).expect("create first non-UTF-8 directory");
-        std::fs::create_dir_all(&second).expect("create second non-UTF-8 directory");
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "creating first non-UTF-8 directory",
+            std::fs::create_dir_all(&first),
+        ) {
+            return;
+        }
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "creating second non-UTF-8 directory",
+            std::fs::create_dir_all(&second),
+        ) {
+            return;
+        }
         let first_file = first.join("first.d.ts");
         let second_file = second.join("second.d.ts");
-        std::fs::write(&first_file, "declare interface First {}").expect("write first type");
-        std::fs::write(&second_file, "declare interface Second {}").expect("write second type");
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "writing into first non-UTF-8 directory",
+            std::fs::write(&first_file, "declare interface First {}"),
+        ) {
+            return;
+        }
+        if vue3_test_non_utf8_path_operation_is_unsupported(
+            "writing into second non-UTF-8 directory",
+            std::fs::write(&second_file, "declare interface Second {}"),
+        ) {
+            return;
+        }
         let resolver = Vue3TypeResolverContext::default();
         let mut files = Vec::new();
 

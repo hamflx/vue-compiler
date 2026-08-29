@@ -1411,7 +1411,10 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
         let target = package.join("literal*.d.ts");
         std::fs::write(&target, "export interface LiteralStar { value: string }")
             .expect("write literal-star target");
-        let resolver = Vue3TypeResolverContext::default();
+        let resolver = Vue3TypeResolverContext {
+            module_resolution: Vue3TypeModuleResolutionKind::NodeNext,
+            ..Vue3TypeResolverContext::default()
+        };
 
         assert_eq!(
             resolve_vue3_type_import(
