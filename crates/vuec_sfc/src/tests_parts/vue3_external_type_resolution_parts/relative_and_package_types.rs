@@ -4420,11 +4420,11 @@ defineProps<CommonJsDirect & CommonJsGeneric<{ genericLocal: number }> & CommonJ
     fn vue3_package_types_version_selector_supports_node_semver_ranges() {
         for selector in [
             "*",
-            "<=5.0",
-            "~5.0",
+            "<=5.6",
+            "~5.6",
             "^4.8 || >=5.0",
             "5.0 - 5.9",
-            ">=4.8 <5.3",
+            ">=4.8 <6",
             "5.x",
             "5.*",
         ] {
@@ -4434,7 +4434,7 @@ defineProps<CommonJsDirect & CommonJsGeneric<{ genericLocal: number }> & CommonJ
             );
         }
 
-        for selector in ["", ">=5.1", "<5.0", "4.x", "4.*", "5.1 - 5.9"] {
+        for selector in ["", ">=5.7", "<5.6", "4.x", "4.*", "5.7 - 5.9"] {
             assert!(
                 !vue3_package_types_version_selector_matches(selector),
                 "{selector}"
@@ -4595,6 +4595,7 @@ defineProps<TypesFieldProps & TypingsFieldProps & MainFieldProps & VersionedRoot
     fn vue3_compile_script_resolves_package_types_versions_type_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let node_modules = dir.path().join("node_modules");
+        write_vue3_typescript_version(dir.path(), "5.0.0");
         let versioned_pkg = node_modules.join("vuec-typesversions-pkg");
         std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
         std::fs::create_dir_all(versioned_pkg.join("future").join("feature"))

@@ -121,6 +121,8 @@ const style = native.compileStyle({
   id: 'data-v-smoke',
 });
 assert.match(style.code, /data-v-smoke/);
+assert.deepStrictEqual(style.errors, []);
+assert.ok(!style.diagnostics || style.diagnostics.length === 0);
 
 const manifest = native.apiManifest();
 assert.ok(manifest.exports.includes('compileVue2'));

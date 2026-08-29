@@ -290,6 +290,7 @@ struct Vue3MetadataFlightsToAbort {
     sources: Vec<std::sync::Arc<Vue3MetadataSourceFlight>>,
     tsconfigs: Vec<std::sync::Arc<Vue3SingleFlight<serde_json::Value>>>,
     tsconfig_settings: Vec<std::sync::Arc<Vue3TsconfigModuleResolutionFlight>>,
+    tsconfig_project_selections: Vec<std::sync::Arc<Vue3TsconfigProjectSelectionFlight>>,
     package_jsons: Vec<std::sync::Arc<Vue3SingleFlight<Vue3PackageJsonTypeManifest>>>,
 }
 
@@ -307,13 +308,34 @@ fn vue3_block_metadata_state(
     let tsconfigs = vue3_take_metadata_parse_flights(&mut state.tsconfig_cache);
     let tsconfig_settings =
         vue3_take_tsconfig_module_resolution_flights(&mut state.tsconfig_module_resolution_cache);
+    let tsconfig_project_selections = vue3_take_tsconfig_project_selection_flights(
+        &mut state.tsconfig_project_selection_cache,
+    );
     let package_jsons = vue3_take_metadata_parse_flights(&mut state.package_json_cache);
     Vue3MetadataFlightsToAbort {
         sources,
         tsconfigs,
         tsconfig_settings,
+        tsconfig_project_selections,
         package_jsons,
     }
+}
+
+fn vue3_take_tsconfig_project_selection_flights(
+    cache: &mut BTreeMap<
+        Vue3TsconfigProjectSelectionCacheKey,
+        Vue3TsconfigProjectSelectionCacheEntry,
+    >,
+) -> Vec<std::sync::Arc<Vue3TsconfigProjectSelectionFlight>> {
+    let mut flights = Vec::new();
+    cache.retain(|_, entry| match entry {
+        Vue3TsconfigProjectSelectionCacheEntry::Loading(flight) => {
+            flights.push(flight.clone());
+            false
+        }
+        Vue3TsconfigProjectSelectionCacheEntry::Ready(_) => true,
+    });
+    flights
 }
 
 fn vue3_take_tsconfig_module_resolution_flights(
@@ -369,6 +391,9 @@ fn vue3_abort_metadata_flights(flights: Vue3MetadataFlightsToAbort) {
         flight.abort();
     }
     for flight in flights.tsconfig_settings {
+        flight.abort();
+    }
+    for flight in flights.tsconfig_project_selections {
         flight.abort();
     }
     for flight in flights.package_jsons {

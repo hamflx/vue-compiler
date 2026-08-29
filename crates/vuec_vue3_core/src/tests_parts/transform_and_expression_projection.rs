@@ -406,6 +406,133 @@
     }
 
     #[test]
+    fn process_expression_projection_materializes_static_member_identifiers() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+        let member = process_expression_test_projection("foo + bar(baz.qux)", context.clone());
+        assert_eq!(member["children"][0]["content"], json!("_ctx.foo"));
+        assert_eq!(member["children"][1], json!(" + "));
+        assert_eq!(member["children"][2]["content"], json!("_ctx.bar"));
+        assert_eq!(member["children"][3], json!("("));
+        assert_eq!(member["children"][4]["content"], json!("_ctx.baz"));
+        assert_eq!(member["children"][5], json!("."));
+        assert_eq!(member["children"][6]["content"], json!("qux"));
+        assert_eq!(member["children"][6]["constType"], json!(0));
+        assert_eq!(member["children"][7], json!(")"));
+
+        let global = process_expression_test_projection("Math.max(1, 2)", context.clone());
+        assert_eq!(global["children"][0]["content"], json!("Math"));
+        assert_eq!(global["children"][0]["constType"], json!(0));
+        assert_eq!(global["children"][1], json!("."));
+        assert_eq!(global["children"][2]["content"], json!("max"));
+        assert_eq!(global["children"][2]["constType"], json!(0));
+        assert_eq!(global["children"][3], json!("(1, 2)"));
+
+        let constructor = process_expression_test_projection("new Date().getFullYear()", context);
+        assert_eq!(constructor["children"][0], json!("new "));
+        assert_eq!(constructor["children"][1]["content"], json!("Date"));
+        assert_eq!(constructor["children"][1]["constType"], json!(0));
+        assert_eq!(constructor["children"][2], json!("()."));
+        assert_eq!(constructor["children"][3]["content"], json!("getFullYear"));
+        assert_eq!(constructor["children"][3]["constType"], json!(0));
+        assert_eq!(constructor["children"][4], json!("()"));
+    }
+
+    #[test]
+    fn process_expression_projection_matches_babel_optional_chain_parent_kinds() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+
+        let optional = process_expression_test_projection("foo?.bar", context.clone());
+        assert_eq!(optional["children"][0]["content"], json!("_ctx.foo"));
+        assert_eq!(optional["children"][1], json!("?."));
+        assert_eq!(optional["children"][2]["content"], json!("bar"));
+        assert_eq!(optional["children"][2]["constType"], json!(3));
+
+        let optional_tail =
+            process_expression_test_projection("foo.bar?.baz", context.clone());
+        assert_eq!(optional_tail["children"][2]["content"], json!("bar"));
+        assert_eq!(optional_tail["children"][2]["constType"], json!(0));
+        assert_eq!(optional_tail["children"][4]["content"], json!("baz"));
+        assert_eq!(optional_tail["children"][4]["constType"], json!(3));
+
+        let optional_head =
+            process_expression_test_projection("foo?.bar.baz", context.clone());
+        assert_eq!(optional_head["children"][2]["content"], json!("bar"));
+        assert_eq!(optional_head["children"][2]["constType"], json!(3));
+        assert_eq!(optional_head["children"][4]["content"], json!("baz"));
+        assert_eq!(optional_head["children"][4]["constType"], json!(3));
+
+        let optional_call =
+            process_expression_test_projection("foo?.bar(Math)", context.clone());
+        assert_eq!(optional_call["children"][2]["constType"], json!(3));
+        assert_eq!(optional_call["children"][4]["content"], json!("Math"));
+        assert_eq!(optional_call["children"][4]["constType"], json!(3));
+
+        let terminated = process_expression_test_projection("(foo?.bar).baz", context);
+        assert_eq!(terminated["children"][3]["content"], json!("bar"));
+        assert_eq!(terminated["children"][3]["constType"], json!(3));
+        assert_eq!(terminated["children"][5]["content"], json!("baz"));
+        assert_eq!(terminated["children"][5]["constType"], json!(0));
+    }
+
+    #[test]
+    fn process_expression_projection_segments_keyword_and_global_static_members() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+        for property in ["default", "true", "Math"] {
+            let projection =
+                process_expression_test_projection(&format!("foo.{property}"), context.clone());
+            assert_eq!(projection["children"][0]["content"], json!("_ctx.foo"));
+            assert_eq!(projection["children"][1], json!("."));
+            assert_eq!(projection["children"][2]["content"], json!(property));
+            assert_eq!(projection["children"][2]["constType"], json!(0));
+        }
+
+        let escaped =
+            process_expression_test_projection(r"foo.\u0064efault", context);
+        assert_eq!(escaped["children"][2]["content"], json!("default"));
+        assert_eq!(escaped["children"][2]["constType"], json!(0));
+        assert_eq!(escaped["children"][2]["loc"]["source"], json!(r"\u0064efault"));
+    }
+
+    #[test]
+    fn process_expression_projection_matches_babel_constant_parent_boundaries() {
+        let context =
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} });
+
+        let argument = process_expression_test_projection("foo(Math)", context.clone());
+        assert_eq!(argument["children"][2]["content"], json!("Math"));
+        assert_eq!(argument["children"][2]["constType"], json!(0));
+
+        let constructor = process_expression_test_projection("new Foo(Math)", context.clone());
+        assert_eq!(constructor["children"][3]["content"], json!("Math"));
+        assert_eq!(constructor["children"][3]["constType"], json!(0));
+
+        let computed = process_expression_test_projection("obj[Math]", context.clone());
+        assert_eq!(computed["children"][2]["content"], json!("Math"));
+        assert_eq!(computed["children"][2]["constType"], json!(0));
+
+        let standalone = process_expression_test_projection("Math + foo", context.clone());
+        assert_eq!(standalone["children"][0]["content"], json!("Math"));
+        assert_eq!(standalone["children"][0]["constType"], json!(3));
+
+        let parenthesized = process_expression_test_projection("(Math).max", context.clone());
+        assert_eq!(parenthesized["children"][1]["content"], json!("Math"));
+        assert_eq!(parenthesized["children"][1]["constType"], json!(0));
+        assert_eq!(parenthesized["children"][3]["content"], json!("max"));
+        assert_eq!(parenthesized["children"][3]["constType"], json!(0));
+
+        let parameter = process_expression_test_projection("(x)=>x.foo", context);
+        assert_eq!(parameter["children"][1]["content"], json!("x"));
+        assert_eq!(parameter["children"][1]["constType"], json!(3));
+        assert_eq!(parameter["children"][3]["content"], json!("x"));
+        assert_eq!(parameter["children"][3]["constType"], json!(0));
+        assert_eq!(parameter["children"][5]["content"], json!("foo"));
+        assert_eq!(parameter["children"][5]["constType"], json!(0));
+    }
+
+    #[test]
     fn process_expression_projection_uses_parsed_identifier_roles() {
         let comment = process_expression_test_projection(
             "/* (value) => */ value + outside",
@@ -464,8 +591,9 @@
         );
         assert_eq!(
             projection_code(&properties),
-            r"_ctx.obj.\u0061 + ({ \u0062: _ctx.value, [_ctx.c]: _ctx.other, d: _ctx.d })",
+            r"_ctx.obj.a + ({ \u0062: _ctx.value, [_ctx.c]: _ctx.other, d: _ctx.d })",
         );
+        assert_eq!(properties["children"][2]["loc"]["source"], json!(r"\u0061"));
 
         let labels = process_expression_test_statement_projection(
             r"\u006futer: while (ready) { break \u006futer }",

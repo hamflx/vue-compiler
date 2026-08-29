@@ -1941,7 +1941,7 @@ pub(crate) fn vue3_package_types_version_selector_matches_version(
 
 pub(crate) fn vue3_package_typescript_baseline_version() -> nodejs_semver::Version {
     // Bounded SFC resolver baseline for the locked Vue 3 compiler-sfc harness.
-    (5, 0, 0).into()
+    (5, 6, 3).into()
 }
 
 fn vue3_package_type_field_path_with_mode(

@@ -312,7 +312,9 @@ function templateSfcSource(source) {
 
 function styleSfcSource(source, options) {
   if (/<style(?:\s|>)/i.test(source)) {
-    return source;
+    return /<(?:template|script)(?:\s|>)/i.test(source)
+      ? source
+      : `<template></template>${source}`;
   }
   const attrs = [];
   if (options.scoped) {
@@ -329,7 +331,7 @@ function styleSfcSource(source, options) {
   if (lang) {
     attrs.push(`lang="${escapeAttribute(lang)}"`);
   }
-  return `<style${attrs.length ? ` ${attrs.join(' ')}` : ''}>${source}</style>`;
+  return `<template></template><style${attrs.length ? ` ${attrs.join(' ')}` : ''}>${source}</style>`;
 }
 
 function escapeAttribute(value) {

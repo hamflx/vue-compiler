@@ -15,8 +15,7 @@
                 "references": [{ "path": "./tsconfig.app.json" }],
                 "compilerOptions": {
                     "paths": {
-                        "bar": ["./pp.ts"],
-                        "@/*": ["${configDir}/src/*"]
+                        "root-only-decoy": ["./pp.ts"]
                     }
                 }
             }"#,
@@ -25,7 +24,14 @@
         std::fs::write(
             dir.join("tsconfig.app.json"),
             r#"{
-                "extends": ["./tsconfigs/base.json"]
+                "extends": ["./tsconfigs/base.json"],
+                "include": ["src/**/*.vue"],
+                "compilerOptions": {
+                    "paths": {
+                        "bar": ["./pp.ts"],
+                        "@/*": ["${configDir}/src/*"]
+                    }
+                }
             }"#,
         )
         .expect("write app tsconfig");
@@ -105,14 +111,7 @@
         std::fs::write(
             dir.join("tsconfig.json"),
             r#"{
-                // Root alias survives comments and trailing commas.
-                "compilerOptions": {
-                    "paths": {
-                        "root-alias": ["./root.ts",],
-                        "app-alias": ["./app.ts",],
-                        "@base/*": ["./src/base/*",],
-                    },
-                },
+                // Project references survive comments and trailing commas.
                 "references": [
                     { "path": "./tsconfig.app.json", },
                 ],
@@ -125,6 +124,7 @@
                 "extends": [
                     "./config/base.json", // inherited aliases
                 ],
+                "include": ["../src/**/*.vue",],
             }"#,
         )
         .expect("write app tsconfig");
@@ -134,6 +134,7 @@
                 /* ${configDir} resolves from the referencing config directory. */
                 "compilerOptions": {
                     "paths": {
+                        "root-alias": ["${configDir}/root.ts",],
                         "app-alias": ["${configDir}/app.ts",],
                         "@base/*": ["${configDir}/src/base/*",],
                     },

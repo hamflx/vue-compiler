@@ -24,9 +24,7 @@
                 "files": [],
                 "compilerOptions": {
                     "paths": {
-                        "bar": ["./pp.ts"],
-                        "user": ["./user.ts"],
-                        "@/*": ["${configDir}/src/*"]
+                        "root-only-decoy": ["./pp.ts"]
                     }
                 },
                 "references": [
@@ -58,7 +56,12 @@
             r#"{
                 "include": ["../**/*.ts", "../**/*.vue"],
                 "compilerOptions": {
-                    "composite": true
+                    "composite": true,
+                    "paths": {
+                        "bar": ["../pp.ts"],
+                        "user": ["../user.ts"],
+                        "@/*": ["${configDir}/../src/*"]
+                    }
                 },
                 "references": [
                     { "path": "../tsconfig.json" }
@@ -872,14 +875,6 @@ defineProps<ChoiceProps>()
         std::fs::write(
             dir.path().join("tsconfig.json"),
             r#"{
-                // Root path mapping.
-                "compilerOptions": {
-                    "paths": {
-                        "root-alias": ["./root.ts",],
-                        "app-alias": ["${configDir}/app.ts",],
-                        "@base/*": ["${configDir}/src/base/*",],
-                    },
-                },
                 "references": [
                     { "path": "./tsconfig.app.json", },
                 ],
@@ -892,6 +887,7 @@ defineProps<ChoiceProps>()
                 "extends": [
                     "./config/base.json", // inherited alias
                 ],
+                "include": ["../src/**/*.vue",],
             }"#,
         )
         .expect("write app tsconfig");
@@ -899,6 +895,13 @@ defineProps<ChoiceProps>()
             dir.path().join("config").join("base.json"),
             r#"{
                 /* Extended JSONC configs remain part of the metadata graph. */
+                "compilerOptions": {
+                    "paths": {
+                        "root-alias": ["${configDir}/root.ts",],
+                        "app-alias": ["${configDir}/app.ts",],
+                        "@base/*": ["${configDir}/src/base/*",],
+                    },
+                },
             }"#,
         )
         .expect("write base tsconfig");

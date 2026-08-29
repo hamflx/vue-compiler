@@ -466,7 +466,7 @@ fn resolve_vue3_relative_type_import_with_mode(
         }
     }
     let Some((_, matched_root, suffix)) = matched else {
-        return resolve_vue3_type_import_path_with_mode(
+        return resolve_vue3_relative_type_import_fast_path_with_mode(
             &candidate,
             resolution_mode,
             type_resolver,
@@ -479,8 +479,11 @@ fn resolve_vue3_relative_type_import_with_mode(
     {
         return None;
     }
-    let resolved =
-        resolve_vue3_type_import_path_with_mode(&candidate, resolution_mode, type_resolver);
+    let resolved = resolve_vue3_relative_type_import_fast_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    );
     if resolved.is_some()
         || type_resolver.external_type_session.failure_epoch() != failure_epoch
     {

@@ -405,6 +405,13 @@
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let node_modules = dir.join("node_modules");
+        let typescript_pkg = node_modules.join("typescript");
+        std::fs::create_dir_all(&typescript_pkg).expect("create typescript package");
+        std::fs::write(
+            typescript_pkg.join("package.json"),
+            r#"{"version":"5.0.0"}"#,
+        )
+        .expect("write typescript manifest");
         let versioned_pkg = node_modules.join("vuec-bridge-typesversions");
         std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
         std::fs::create_dir_all(versioned_pkg.join("future").join("feature"))

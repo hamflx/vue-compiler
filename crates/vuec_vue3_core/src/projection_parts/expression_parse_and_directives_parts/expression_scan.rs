@@ -378,7 +378,8 @@ pub(crate) fn process_expression_dynamic_static_reference(
     start: usize,
     end: usize,
 ) -> bool {
-    next_non_ws(raw, end) == Some('(') || process_expression_preceded_by_new(raw, start)
+    matches!(next_non_ws(raw, end), Some('(' | '.' | '[' | '?'))
+        || process_expression_preceded_by_new(raw, start)
 }
 
 pub(crate) fn process_expression_preceded_by_new(raw: &str, start: usize) -> bool {

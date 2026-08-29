@@ -1,3 +1,13 @@
+const NPM_INSTALL_ARGS: &[&str] = &[
+    "install",
+    "--ignore-scripts",
+    "--include=optional",
+    "--no-audit",
+    "--no-fund",
+    "--package-lock=false",
+    "--omit=dev",
+];
+
 fn ensure_official_npm_install(
     version_line: VersionLine,
     baseline: &BaselineLock,
@@ -25,7 +35,12 @@ fn ensure_official_npm_install(
         "version": "0.0.0",
     });
     write_json(&install_root.join("package.json"), &package_json)?;
-    run_npm_install_specs(&install_root, &specs, "official npm package install")?;
+    run_npm_install_specs(
+        &install_root,
+        &specs,
+        "official npm package install",
+        false,
+    )?;
 
     let marker_body = serde_json::json!({
         "version_line": version_line,
@@ -69,19 +84,22 @@ fn reset_official_npm_node_modules(install_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_npm_install_specs(install_root: &Path, specs: &[String], label: &str) -> Result<()> {
+fn run_npm_install_specs(
+    install_root: &Path,
+    specs: &[String],
+    label: &str,
+    legacy_peer_deps: bool,
+) -> Result<()> {
     let npm = resolve_program("npm");
     let mut command = Command::new(npm);
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--include=optional")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--omit=dev")
-        .args(specs)
-        .current_dir(install_root);
+    command.args(NPM_INSTALL_ARGS);
+    if legacy_peer_deps {
+        // npm 11.4 can fail while auto-resolving Vitest's optional peer graph.
+        // The requested runner package versions stay locked, and ordinary dependencies
+        // are still installed.
+        command.arg("--legacy-peer-deps");
+    }
+    command.args(specs).current_dir(install_root);
     let output = command.output().with_context(|| {
         format!(
             "failed to spawn npm install for {label} in {}",
@@ -128,6 +146,7 @@ fn ensure_official_runner_dependencies(
         &install_root,
         &runner_specs,
         "official runner dependency install",
+        runner_install_uses_legacy_peer_deps(spec.version_line),
     )?;
     if let Err(first_err) = verify_conformance_runner_startup_dependencies(spec, &node_modules) {
         reset_official_npm_node_modules(&install_root)?;
@@ -136,6 +155,7 @@ fn ensure_official_runner_dependencies(
             &install_root,
             &runner_specs,
             "official runner dependency reinstall",
+            runner_install_uses_legacy_peer_deps(spec.version_line),
         )?;
         verify_conformance_runner_startup_dependencies(spec, &node_modules).with_context(|| {
             format!(
@@ -183,7 +203,12 @@ fn ensure_runtime_smoke_dependencies(
         return Ok(());
     }
 
-    run_npm_install_specs(install_root, &specs, "runtime smoke dependency install")?;
+    run_npm_install_specs(
+        install_root,
+        &specs,
+        "runtime smoke dependency install",
+        false,
+    )?;
     let marker_body = serde_json::json!({
         "version_line": version_line,
         "packages": specs,
@@ -191,6 +216,10 @@ fn ensure_runtime_smoke_dependencies(
     });
     write_json(&marker, &marker_body)?;
     Ok(())
+}
+
+fn runner_install_uses_legacy_peer_deps(version_line: VersionLine) -> bool {
+    matches!(version_line, VersionLine::Vue3)
 }
 
 fn runtime_smoke_dependency_specs(

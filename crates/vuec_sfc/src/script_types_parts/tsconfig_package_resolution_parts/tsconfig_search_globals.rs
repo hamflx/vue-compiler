@@ -33,6 +33,7 @@ struct Vue3TsconfigModuleResolutionSettings {
     paths_base_dir: Option<PathBuf>,
     base_url: Option<PathBuf>,
     base_url_is_declared: bool,
+    references: Vec<PathBuf>,
 }
 
 impl Vue3TsconfigModuleResolutionSettings {
@@ -93,7 +94,12 @@ impl Vue3TsconfigModuleResolutionSettings {
                 self.base_url
                     .as_ref()
                     .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
-            );
+            )
+            .saturating_add(self.references.iter().fold(0usize, |weight, path| {
+                weight
+                    .saturating_add(std::mem::size_of::<PathBuf>())
+                    .saturating_add(path.as_os_str().as_encoded_bytes().len())
+            }));
         self.path_mappings
             .iter()
             .flatten()
@@ -150,6 +156,7 @@ struct Vue3TsconfigInheritedResolverOptions {
     resolve_package_json_exports: Vue3TsconfigInheritedOption<bool>,
     resolve_package_json_imports: Vue3TsconfigInheritedOption<bool>,
     target: Vue3TsconfigInheritedOption<Vue3TsconfigTargetKind>,
+    references: Vec<PathBuf>,
 }
 
 impl Vue3TsconfigInheritedResolverOptions {
@@ -343,6 +350,124 @@ enum Vue3TsconfigModuleResolutionLoad {
     Blocked,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3TsconfigProjectSelectionCacheKey {
+    state: Vue3TsconfigGraphStateKey,
+    importer: PathBuf,
+    typescript_version: String,
+    metadata_generation: u64,
+}
+
+impl Vue3TsconfigProjectSelectionCacheKey {
+    fn new(
+        root_config: &Path,
+        importer: &Path,
+        type_resolver: &Vue3TypeResolverContext,
+    ) -> Option<Self> {
+        if type_resolver.external_type_session.max_tsconfig_depth() == 0 {
+            type_resolver.external_type_session.block_metadata();
+            return None;
+        }
+        let root_config_dir = root_config.parent().unwrap_or_else(|| Path::new(""));
+        let state = type_resolver
+            .external_type_session
+            .claim_tsconfig_node(vue3_tsconfig_graph_state_key(
+                root_config,
+                root_config_dir,
+            ))?;
+        let metadata_generation = {
+            let session = type_resolver.external_type_session.lock();
+            if session.metadata_blocked {
+                return None;
+            }
+            session.metadata_generation
+        };
+        let importer = vue3_external_type_lexical_path(importer);
+        if !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(&normalize_path_string(&importer))
+        {
+            return None;
+        }
+        Some(Self {
+            state,
+            importer,
+            typescript_version: type_resolver.typescript_version.to_string(),
+            metadata_generation,
+        })
+    }
+
+    fn payload_weight(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.importer.as_os_str().as_encoded_bytes().len())
+            .saturating_add(self.typescript_version.len())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Vue3TsconfigProjectSelection {
+    config_path: Option<PathBuf>,
+}
+
+impl Vue3TsconfigProjectSelection {
+    fn payload_weight(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(
+            self.config_path
+                .as_ref()
+                .map_or(0, |path| path.as_os_str().as_encoded_bytes().len()),
+        )
+    }
+}
+
+type Vue3TsconfigProjectSelectionFlight = Vue3SingleFlight<Vue3TsconfigProjectSelection>;
+
+#[derive(Clone, Debug)]
+enum Vue3TsconfigProjectSelectionCacheEntry {
+    Loading(std::sync::Arc<Vue3TsconfigProjectSelectionFlight>),
+    Ready(std::sync::Arc<Vue3TsconfigProjectSelection>),
+}
+
+enum Vue3TsconfigProjectSelectionLoad {
+    Ready(std::sync::Arc<Vue3TsconfigProjectSelection>),
+    Wait(Vue3TsconfigProjectSelectionWaiter),
+    Start(Vue3TsconfigProjectSelectionOwner),
+    Blocked,
+}
+
+fn vue3_tsconfig_cached_ready_entries(state: &Vue3ExternalTypeLoadState) -> usize {
+    state
+        .tsconfig_module_resolution_cache
+        .values()
+        .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Ready(_)))
+        .count()
+        .saturating_add(
+            state
+                .tsconfig_project_selection_cache
+                .values()
+                .filter(|entry| {
+                    matches!(entry, Vue3TsconfigProjectSelectionCacheEntry::Ready(_))
+                })
+                .count(),
+        )
+}
+
+fn vue3_tsconfig_cached_loading_entries(state: &Vue3ExternalTypeLoadState) -> usize {
+    state
+        .tsconfig_module_resolution_cache
+        .values()
+        .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Loading(_)))
+        .count()
+        .saturating_add(
+            state
+                .tsconfig_project_selection_cache
+                .values()
+                .filter(|entry| {
+                    matches!(entry, Vue3TsconfigProjectSelectionCacheEntry::Loading(_))
+                })
+                .count(),
+        )
+}
+
 struct Vue3TsconfigModuleResolutionWaiter {
     session: Vue3ExternalTypeLoadSession,
     flight: std::sync::Arc<Vue3TsconfigModuleResolutionFlight>,
@@ -408,11 +533,7 @@ impl Vue3TsconfigModuleResolutionOwner {
             return None;
         }
 
-        let ready_entries = state
-            .tsconfig_module_resolution_cache
-            .values()
-            .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Ready(_)))
-            .count();
+        let ready_entries = vue3_tsconfig_cached_ready_entries(&state);
         let remaining_weight = state
             .limits
             .max_tsconfig_settings_cache_weight
@@ -492,11 +613,7 @@ impl Vue3ExternalTypeLoadSession {
             None => {}
         }
 
-        let loading_entries = state
-            .tsconfig_module_resolution_cache
-            .values()
-            .filter(|entry| matches!(entry, Vue3TsconfigModuleResolutionCacheEntry::Loading(_)))
-            .count();
+        let loading_entries = vue3_tsconfig_cached_loading_entries(&state);
         if loading_entries >= state.limits.max_tsconfig_nodes {
             let flights = vue3_block_metadata_state(&mut state);
             drop(state);
@@ -538,6 +655,200 @@ fn vue3_tsconfig_module_resolution_flight_matches(
     matches!(
         entry,
         Some(Vue3TsconfigModuleResolutionCacheEntry::Loading(flight))
+            if flight.id == flight_id
+    )
+}
+
+struct Vue3TsconfigProjectSelectionWaiter {
+    session: Vue3ExternalTypeLoadSession,
+    flight: std::sync::Arc<Vue3TsconfigProjectSelectionFlight>,
+}
+
+impl Vue3TsconfigProjectSelectionWaiter {
+    fn wait(self) -> Option<std::sync::Arc<Vue3TsconfigProjectSelection>> {
+        match self.flight.wait() {
+            Vue3SingleFlightOutcome::Complete(Some(selection)) => {
+                let mut state = self.session.lock();
+                if state.metadata_blocked
+                    || state.metadata_generation != self.flight.generation
+                {
+                    state.failure_epoch += 1;
+                    return None;
+                }
+                state.stats.tsconfig_settings_cache_hits += 1;
+                Some(selection)
+            }
+            Vue3SingleFlightOutcome::Complete(None) | Vue3SingleFlightOutcome::Aborted => {
+                if !self.session.metadata_is_blocked() {
+                    self.session.block_metadata();
+                }
+                None
+            }
+        }
+    }
+}
+
+struct Vue3TsconfigProjectSelectionOwner {
+    session: Vue3ExternalTypeLoadSession,
+    cache_key: Vue3TsconfigProjectSelectionCacheKey,
+    flight: std::sync::Arc<Vue3TsconfigProjectSelectionFlight>,
+    active: bool,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Vue3TsconfigProjectSelectionOwner {
+    fn complete(
+        mut self,
+        config_path: Option<PathBuf>,
+    ) -> Option<std::sync::Arc<Vue3TsconfigProjectSelection>> {
+        let selection = std::sync::Arc::new(Vue3TsconfigProjectSelection { config_path });
+        let cache_weight = self
+            .cache_key
+            .payload_weight()
+            .saturating_add(selection.payload_weight());
+        let session = self.session.clone();
+        let mut state = session.lock();
+        let current = vue3_tsconfig_project_selection_flight_matches(
+            state
+                .tsconfig_project_selection_cache
+                .get(&self.cache_key),
+            self.flight.id,
+        );
+        let stale = state.metadata_blocked
+            || state.metadata_generation != self.flight.generation
+            || state.metadata_generation != self.cache_key.metadata_generation
+            || !current;
+        if stale {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            self.flight.abort();
+            self.active = false;
+            return None;
+        }
+
+        let ready_entries = vue3_tsconfig_cached_ready_entries(&state);
+        let remaining_weight = state
+            .limits
+            .max_tsconfig_settings_cache_weight
+            .saturating_sub(state.stats.cached_tsconfig_settings_weight);
+        let retain = ready_entries < state.limits.max_tsconfig_settings_cache_entries
+            && cache_weight <= state.limits.max_tsconfig_settings_cache_entry_weight
+            && cache_weight <= remaining_weight;
+        if retain {
+            state.tsconfig_project_selection_cache.insert(
+                self.cache_key.clone(),
+                Vue3TsconfigProjectSelectionCacheEntry::Ready(selection.clone()),
+            );
+            state.stats.cached_tsconfig_settings_weight += cache_weight;
+        } else {
+            state
+                .tsconfig_project_selection_cache
+                .remove(&self.cache_key);
+        }
+        self.flight.complete(Some(selection.clone()));
+        drop(state);
+        self.active = false;
+        Some(selection)
+    }
+}
+
+impl Drop for Vue3TsconfigProjectSelectionOwner {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let session = self.session.clone();
+        let mut state = session.lock();
+        let flights = vue3_block_metadata_state(&mut state);
+        drop(state);
+        vue3_abort_metadata_flights(flights);
+        self.flight.abort();
+        self.active = false;
+    }
+}
+
+impl Vue3ExternalTypeLoadSession {
+    fn begin_tsconfig_project_selection_load(
+        &self,
+        cache_key: Vue3TsconfigProjectSelectionCacheKey,
+    ) -> Vue3TsconfigProjectSelectionLoad {
+        let owner = std::thread::current().id();
+        let mut state = self.lock();
+        if state.metadata_blocked
+            || state.metadata_generation != cache_key.metadata_generation
+        {
+            state.failure_epoch += 1;
+            return Vue3TsconfigProjectSelectionLoad::Blocked;
+        }
+        match state
+            .tsconfig_project_selection_cache
+            .get(&cache_key)
+            .cloned()
+        {
+            Some(Vue3TsconfigProjectSelectionCacheEntry::Ready(selection)) => {
+                state.stats.tsconfig_settings_cache_hits += 1;
+                return Vue3TsconfigProjectSelectionLoad::Ready(selection);
+            }
+            Some(Vue3TsconfigProjectSelectionCacheEntry::Loading(flight)) => {
+                if flight.owner == owner {
+                    let flights = vue3_block_metadata_state(&mut state);
+                    drop(state);
+                    vue3_abort_metadata_flights(flights);
+                    return Vue3TsconfigProjectSelectionLoad::Blocked;
+                }
+                return Vue3TsconfigProjectSelectionLoad::Wait(
+                    Vue3TsconfigProjectSelectionWaiter {
+                        session: self.clone(),
+                        flight,
+                    },
+                );
+            }
+            None => {}
+        }
+
+        let loading_entries = vue3_tsconfig_cached_loading_entries(&state);
+        if loading_entries >= state.limits.max_tsconfig_nodes {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return Vue3TsconfigProjectSelectionLoad::Blocked;
+        }
+        let flight_id = state.next_metadata_flight_id;
+        let Some(next_flight_id) = flight_id.checked_add(1) else {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return Vue3TsconfigProjectSelectionLoad::Blocked;
+        };
+        state.next_metadata_flight_id = next_flight_id;
+        let flight = std::sync::Arc::new(Vue3TsconfigProjectSelectionFlight::new(
+            flight_id,
+            owner,
+            state.metadata_generation,
+        ));
+        state.tsconfig_project_selection_cache.insert(
+            cache_key.clone(),
+            Vue3TsconfigProjectSelectionCacheEntry::Loading(flight.clone()),
+        );
+        drop(state);
+        Vue3TsconfigProjectSelectionLoad::Start(Vue3TsconfigProjectSelectionOwner {
+            session: self.clone(),
+            cache_key,
+            flight,
+            active: true,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+}
+
+fn vue3_tsconfig_project_selection_flight_matches(
+    entry: Option<&Vue3TsconfigProjectSelectionCacheEntry>,
+    flight_id: u64,
+) -> bool {
+    matches!(
+        entry,
+        Some(Vue3TsconfigProjectSelectionCacheEntry::Loading(flight))
             if flight.id == flight_id
     )
 }
@@ -961,6 +1272,7 @@ struct Vue3TsconfigGlobalSpecs {
     file_specs: Vue3TsconfigFileSpecs,
     type_package_specs: Vue3TsconfigGlobalTypePackageSpecs,
     output_directory_specs: Vue3TsconfigOutputDirectorySpecs,
+    paths_base_dir: Option<std::sync::Arc<PathBuf>>,
 }
 
 impl Vue3TsconfigGlobalSpecs {
@@ -969,6 +1281,9 @@ impl Vue3TsconfigGlobalSpecs {
         self.type_package_specs.overlay(overlay.type_package_specs);
         self.output_directory_specs
             .overlay(overlay.output_directory_specs);
+        if overlay.paths_base_dir.is_some() {
+            self.paths_base_dir = overlay.paths_base_dir;
+        }
     }
 
     fn apply_direct(
@@ -978,7 +1293,8 @@ impl Vue3TsconfigGlobalSpecs {
         template_config_dir: &Path,
         type_resolver: &Vue3TypeResolverContext,
     ) -> bool {
-        self.file_specs
+        let applied = self
+            .file_specs
             .apply_direct(value, config_dir, template_config_dir, type_resolver)
             && self.type_package_specs.apply_direct(
                 value,
@@ -991,7 +1307,22 @@ impl Vue3TsconfigGlobalSpecs {
                 config_dir,
                 template_config_dir,
                 type_resolver,
-            )
+            );
+        if !applied {
+            return false;
+        }
+        if vue3_tsconfig_declares_compiler_option(value, "paths") {
+            let weight = std::mem::size_of::<PathBuf>()
+                .saturating_add(config_dir.as_os_str().as_encoded_bytes().len());
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_materialization(weight)
+            {
+                return false;
+            }
+            self.paths_base_dir = Some(std::sync::Arc::new(config_dir.to_path_buf()));
+        }
+        true
     }
 }
 
@@ -1351,6 +1682,1083 @@ pub(crate) fn resolve_vue3_tsconfig_type_import(
     )
 }
 
+fn vue3_tsconfig_module_resolution_config_paths(
+    root_config: &Path,
+    root_references: &[PathBuf],
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vec<PathBuf>> {
+    let mut traversal = Vue3TsconfigGraphTraversal::default();
+    let mut configs = Vec::new();
+    let template_config_dir = root_config.parent().unwrap_or_else(|| Path::new(""));
+    let (_state_key, identity) = vue3_tsconfig_graph_enter(
+        root_config,
+        template_config_dir,
+        0,
+        &mut traversal,
+        type_resolver,
+    )?;
+    configs.push(root_config.to_path_buf());
+    for reference in root_references {
+        let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
+        vue3_collect_tsconfig_module_resolution_config_paths(
+            reference,
+            reference_dir,
+            &mut traversal,
+            1,
+            &mut configs,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            traversal.active_identities.remove(&identity);
+            return None;
+        }
+    }
+    traversal.active_identities.remove(&identity);
+    // Vue prepends every referenced config chunk. With a shared visited set,
+    // reversing original-order DFS discovery produces the same stable order.
+    configs.reverse();
+    (!type_resolver.external_type_session.metadata_is_blocked()).then_some(configs)
+}
+
+fn vue3_collect_tsconfig_module_resolution_config_paths(
+    config_path: &Path,
+    template_config_dir: &Path,
+    traversal: &mut Vue3TsconfigGraphTraversal,
+    depth: usize,
+    configs: &mut Vec<PathBuf>,
+    type_resolver: &Vue3TypeResolverContext,
+) {
+    let Some((_state_key, identity)) = vue3_tsconfig_graph_enter(
+        config_path,
+        template_config_dir,
+        depth,
+        traversal,
+        type_resolver,
+    ) else {
+        return;
+    };
+    configs.push(config_path.to_path_buf());
+    let _ = (|| {
+        let value = type_resolver
+            .external_type_session
+            .tsconfig_from_path(config_path)?;
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        for reference in vue3_tsconfig_reference_paths(&value, config_dir, type_resolver) {
+            let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
+            vue3_collect_tsconfig_module_resolution_config_paths(
+                &reference,
+                reference_dir,
+                traversal,
+                depth + 1,
+                configs,
+                type_resolver,
+            );
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+        }
+        Some(())
+    })();
+    traversal.active_identities.remove(&identity);
+}
+
+fn vue3_tsconfig_module_resolution_config_matches(
+    config_path: &Path,
+    root_config_dir: &Path,
+    filename: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<bool> {
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut traversal = Vue3TsconfigGraphTraversal::default();
+    let mut seen_files = BTreeSet::new();
+    let mut files = Vec::new();
+    let specs = vue3_tsconfig_global_type_files_from_config(
+        config_path,
+        root_config_dir,
+        false,
+        &mut traversal,
+        &mut seen_files,
+        &mut files,
+        type_resolver,
+        0,
+    )?;
+    let match_base_dir = specs
+        .paths_base_dir
+        .as_ref()
+        .map_or(config_dir, |path| path.as_path());
+    vue3_tsconfig_file_specs_match(
+        &specs.file_specs,
+        filename,
+        match_base_dir,
+        config_dir,
+        type_resolver,
+    )
+}
+
+fn vue3_tsconfig_file_specs_match(
+    specs: &Vue3TsconfigFileSpecs,
+    filename: &Path,
+    match_base_dir: &Path,
+    selected_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<bool> {
+    let normalized_filename =
+        vue3_materialized_normalized_path_string(filename, "", type_resolver)?;
+    let include_patterns = if let Some(includes) = specs.include.as_ref() {
+        let mut patterns = Vec::with_capacity(includes.targets.len());
+        for target in includes.targets.iter() {
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_discovery_entry()
+            {
+                return None;
+            }
+            let pattern = vue3_tsconfig_module_selection_pattern(
+                match_base_dir,
+                selected_config_dir,
+                &includes.config_dir,
+                &includes.template_config_dir,
+                target,
+                type_resolver,
+            )?;
+            patterns.push(pattern);
+        }
+        Some(patterns)
+    } else {
+        None
+    };
+    let exclude_patterns = if let Some(excludes) = specs.exclude.as_ref() {
+        let mut patterns = Vec::with_capacity(excludes.targets.len());
+        for target in excludes.targets.iter() {
+            if !type_resolver
+                .external_type_session
+                .claim_tsconfig_discovery_entry()
+            {
+                return None;
+            }
+            patterns.push(vue3_tsconfig_module_selection_pattern(
+                match_base_dir,
+                selected_config_dir,
+                &excludes.config_dir,
+                &excludes.template_config_dir,
+                target,
+                type_resolver,
+            )?);
+        }
+        patterns
+    } else {
+        Vec::new()
+    };
+    let included_by_directory = include_patterns.is_none()
+        && vue3_tsconfig_path_is_within_directory(filename, match_base_dir);
+
+    // Materialize every path while the session is unlocked. The glob budget
+    // intentionally retains the session mutex so its accounting is atomic.
+    let mut budget = type_resolver
+        .external_type_session
+        .tsconfig_glob_match_budget();
+    let included = if let Some(patterns) = include_patterns {
+        let mut matched = false;
+        for pattern in patterns {
+            let matcher = Vue3TsconfigGlobMatcher::new(&pattern);
+            match matcher.matches(&normalized_filename, &mut || budget.claim_step()) {
+                Some(true) => {
+                    matched = true;
+                    break;
+                }
+                Some(false) => {}
+                None => return None,
+            }
+        }
+        matched
+    } else {
+        included_by_directory
+    };
+    if !included {
+        return budget.finish().then_some(false);
+    }
+
+    for pattern in exclude_patterns {
+        let matcher = Vue3TsconfigGlobMatcher::new(&pattern);
+        match matcher.matches(&normalized_filename, &mut || budget.claim_step()) {
+            Some(true) => return budget.finish().then_some(false),
+            Some(false) => {}
+            None => return None,
+        }
+    }
+    budget.finish().then_some(true)
+}
+
+fn vue3_tsconfig_module_selection_pattern(
+    match_base_dir: &Path,
+    selected_config_dir: &Path,
+    declaration_config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    let path = if type_resolver.typescript_version >= (5, 5, 0).into()
+        && target.starts_with(VUE3_TSCONFIG_CONFIG_DIR_TEMPLATE)
+    {
+        vue3_materialized_tsconfig_target_path(
+            match_base_dir,
+            template_config_dir,
+            target,
+            type_resolver,
+        )?
+    } else {
+        vue3_materialized_tsconfig_rebased_file_spec_path(
+            match_base_dir,
+            selected_config_dir,
+            declaration_config_dir,
+            target,
+            type_resolver,
+        )?
+    };
+    vue3_materialized_normalized_path_string(&path, "", type_resolver)
+}
+
+fn vue3_materialized_tsconfig_rebased_file_spec_path(
+    match_base_dir: &Path,
+    selected_config_dir: &Path,
+    declaration_config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if declaration_config_dir == selected_config_dir {
+        return vue3_materialized_tsconfig_literal_target_path(
+            match_base_dir,
+            target,
+            type_resolver,
+        );
+    }
+
+    let declaration_target = vue3_materialized_tsconfig_literal_target_path(
+        declaration_config_dir,
+        target,
+        type_resolver,
+    )?;
+    if !vue3_tsconfig_paths_have_compatible_roots(selected_config_dir, &declaration_target) {
+        return Some(declaration_target);
+    }
+
+    let common_components = selected_config_dir
+        .components()
+        .zip(declaration_target.components())
+        .take_while(|(selected, target)| vue3_tsconfig_path_components_match(*selected, *target))
+        .count();
+    let mut parent_components = 0usize;
+    for component in selected_config_dir.components().skip(common_components) {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::ParentDir => {
+                parent_components = parent_components.saturating_add(1);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Some(declaration_target);
+            }
+        }
+    }
+    for component in declaration_target.components().skip(common_components) {
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            return Some(declaration_target);
+        }
+    }
+
+    let mut path_bytes = match_base_dir.as_os_str().as_encoded_bytes().len();
+    let mut needs_separator = !match_base_dir.as_os_str().is_empty()
+        && !vue3_tsconfig_path_ends_with_separator(match_base_dir);
+    for _ in 0..parent_components {
+        path_bytes = path_bytes
+            .saturating_add(usize::from(needs_separator))
+            .saturating_add("..".len());
+        needs_separator = true;
+    }
+    for component in declaration_target.components().skip(common_components) {
+        path_bytes = path_bytes
+            .saturating_add(usize::from(needs_separator))
+            .saturating_add(component.as_os_str().as_encoded_bytes().len());
+        needs_separator = true;
+    }
+    if !vue3_claim_tsconfig_path_materialization(path_bytes, type_resolver) {
+        return None;
+    }
+
+    let mut path = PathBuf::with_capacity(path_bytes);
+    path.push(match_base_dir);
+    for _ in 0..parent_components {
+        path.push("..");
+    }
+    for component in declaration_target.components().skip(common_components) {
+        path.push(component.as_os_str());
+    }
+    let path = normalize_path_components(path);
+    debug_assert!(path.as_os_str().as_encoded_bytes().len() <= path_bytes);
+    type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&path))
+        .then_some(path)
+}
+
+fn vue3_tsconfig_paths_have_compatible_roots(left: &Path, right: &Path) -> bool {
+    if left.has_root() != right.has_root() {
+        return false;
+    }
+    let left_prefix = left
+        .components()
+        .find(|component| matches!(component, std::path::Component::Prefix(_)));
+    let right_prefix = right
+        .components()
+        .find(|component| matches!(component, std::path::Component::Prefix(_)));
+    match (left_prefix, right_prefix) {
+        (Some(left), Some(right)) => vue3_tsconfig_path_components_match(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn vue3_tsconfig_path_components_match(
+    left: std::path::Component<'_>,
+    right: std::path::Component<'_>,
+) -> bool {
+    if cfg!(windows) {
+        left.as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(right.as_os_str().as_encoded_bytes())
+    } else {
+        left == right
+    }
+}
+
+fn vue3_tsconfig_path_ends_with_separator(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .last()
+        .is_some_and(|byte| *byte == b'/' || cfg!(windows) && *byte == b'\\')
+}
+
+fn vue3_compute_tsconfig_module_resolution_config(
+    root_config: &Path,
+    root_references: &[PathBuf],
+    filename: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let mut configs = vue3_tsconfig_module_resolution_config_paths(
+        root_config,
+        root_references,
+        type_resolver,
+    )?;
+    if configs.len() == 1 {
+        return configs.pop();
+    }
+    let root_config_dir = root_config.parent().unwrap_or_else(|| Path::new(""));
+    for config in &configs {
+        if vue3_tsconfig_module_resolution_config_matches(
+            config,
+            root_config_dir,
+            filename,
+            type_resolver,
+        )? {
+            return Some(config.clone());
+        }
+    }
+    configs.last().cloned()
+}
+
+fn vue3_select_tsconfig_module_resolution_config(
+    root_config: &Path,
+    root_references: &[PathBuf],
+    filename: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if root_references.is_empty() {
+        return Some(root_config.to_path_buf());
+    }
+    let cache_key = Vue3TsconfigProjectSelectionCacheKey::new(
+        root_config,
+        filename,
+        type_resolver,
+    )?;
+    let selection = match type_resolver
+        .external_type_session
+        .begin_tsconfig_project_selection_load(cache_key)
+    {
+        Vue3TsconfigProjectSelectionLoad::Ready(selection) => selection,
+        Vue3TsconfigProjectSelectionLoad::Wait(waiter) => waiter.wait()?,
+        Vue3TsconfigProjectSelectionLoad::Start(owner) => owner.complete(
+            vue3_compute_tsconfig_module_resolution_config(
+                root_config,
+                root_references,
+                filename,
+                type_resolver,
+            ),
+        )?,
+        Vue3TsconfigProjectSelectionLoad::Blocked => return None,
+    };
+    selection.config_path.clone()
+}
+
+fn vue3_load_tsconfig_module_resolution_settings(
+    config_path: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<Vue3TsconfigModuleResolutionSettings>> {
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    let cache_key = Vue3TsconfigModuleResolutionCacheKey::new(
+        config_path,
+        &config_dir,
+        type_resolver,
+    )?;
+    match type_resolver
+        .external_type_session
+        .begin_tsconfig_module_resolution_load(cache_key)
+    {
+        Vue3TsconfigModuleResolutionLoad::Ready(settings) => Some(settings),
+        Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter.wait(),
+        Vue3TsconfigModuleResolutionLoad::Start(owner) => {
+            let mut traversal = Vue3TsconfigGraphTraversal::default();
+            owner.complete(vue3_tsconfig_module_resolution_from_config(
+                config_path,
+                &config_dir,
+                &mut traversal,
+                0,
+                type_resolver,
+            ))
+        }
+        Vue3TsconfigModuleResolutionLoad::Blocked => None,
+    }
+}
+
+#[cfg(test)]
+mod vue3_project_reference_selection_tests {
+    use super::*;
+
+    fn write(path: &Path, source: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create project reference fixture directory");
+        }
+        std::fs::write(path, source).expect("write project reference fixture");
+    }
+
+    #[test]
+    fn shared_reference_dags_keep_vue_prepend_order() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{"references":[{"path":"./a.json"},{"path":"./b.json"}]}"#,
+        );
+        write(
+            &dir.path().join("a.json"),
+            r#"{"references":[{"path":"./c.json"}]}"#,
+        );
+        write(
+            &dir.path().join("b.json"),
+            r#"{
+                "references":[{"path":"./c.json"}],
+                "compilerOptions":{"paths":{"shared":["./b.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("c.json"),
+            r#"{"compilerOptions":{"paths":{"shared":["./c.ts"]}}}"#,
+        );
+        let expected = dir.path().join("b.ts");
+        write(&expected, "export interface Shared { fromB: string }");
+        write(
+            &dir.path().join("c.ts"),
+            "export interface Shared { fromC: string }",
+        );
+
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir.path().join("Comp.vue").to_string_lossy(),
+                "shared",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn self_reference_skips_single_config_glob_matching() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{
+                "references":[{"path":"./tsconfig.json"}],
+                "compilerOptions":{"paths":{"self":["./self.ts"]}}
+            }"#,
+        );
+        let expected = dir.path().join("self.ts");
+        write(&expected, "export interface SelfType { value: string }");
+        let resolver = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_tsconfig_glob_match_steps: 0,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir.path().join("Comp.vue").to_string_lossy(),
+                "self",
+                &resolver,
+            ),
+            Some(expected)
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn config_dir_selection_patterns_require_typescript_5_5() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{"references":[{"path":"./fallback.json"},{"path":"./templated.json"}]}"#,
+        );
+        write(
+            &dir.path().join("fallback.json"),
+            r#"{
+                "include":["src/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./fallback.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("templated.json"),
+            r#"{
+                "include":["${configDir}/src/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./templated.ts"]}}
+            }"#,
+        );
+        let fallback = dir.path().join("fallback.ts");
+        let templated = dir.path().join("templated.ts");
+        write(&fallback, "export interface Choice { fallback: string }");
+        write(&templated, "export interface Choice { templated: string }");
+        let filename = dir.path().join("src").join("Comp.vue");
+
+        let legacy = Vue3TypeResolverContext {
+            typescript_version: (5, 4, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(&filename.to_string_lossy(), "choice", &legacy),
+            Some(fallback)
+        );
+        let modern = Vue3TypeResolverContext {
+            typescript_version: (5, 5, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(&filename.to_string_lossy(), "choice", &modern),
+            Some(templated)
+        );
+    }
+
+    #[test]
+    fn literal_include_does_not_expand_to_a_directory_glob() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{"references":[{"path":"./fallback.json"},{"path":"./literal.json"}]}"#,
+        );
+        write(
+            &dir.path().join("fallback.json"),
+            r#"{
+                "include":["src/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./fallback.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("literal.json"),
+            r#"{
+                "include":["src"],
+                "compilerOptions":{"paths":{"choice":["./literal.ts"]}}
+            }"#,
+        );
+        let expected = dir.path().join("fallback.ts");
+        write(&expected, "export interface Choice { fallback: string }");
+        write(
+            &dir.path().join("literal.ts"),
+            "export interface Choice { literal: string }",
+        );
+
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir.path().join("src").join("Comp.vue").to_string_lossy(),
+                "choice",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn inherited_paths_base_controls_default_project_match() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{
+                "references":[
+                    {"path":"./fallback.json"},
+                    {"path":"./projects/app.json"}
+                ]
+            }"#,
+        );
+        write(
+            &dir.path().join("fallback.json"),
+            r#"{
+                "include":["projects/src/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./fallback.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("projects").join("app.json"),
+            r#"{"extends":"../config/base.json"}"#,
+        );
+        write(
+            &dir.path().join("config").join("base.json"),
+            r#"{"compilerOptions":{"paths":{"choice":["./inherited.ts"]}}}"#,
+        );
+        let expected = dir.path().join("fallback.ts");
+        write(&expected, "export interface Choice { fallback: string }");
+        write(
+            &dir.path().join("config").join("inherited.ts"),
+            "export interface Choice { inherited: string }",
+        );
+
+        let inspection_resolver = Vue3TypeResolverContext::default();
+        let app_config = dir.path().join("projects").join("app.json");
+        let mut traversal = Vue3TsconfigGraphTraversal::default();
+        let mut seen_files = BTreeSet::new();
+        let mut files = Vec::new();
+        let specs = vue3_tsconfig_global_type_files_from_config(
+            &app_config,
+            dir.path(),
+            false,
+            &mut traversal,
+            &mut seen_files,
+            &mut files,
+            &inspection_resolver,
+            0,
+        )
+        .expect("load effective project specs");
+        let expected_paths_base = dir.path().join("config");
+        assert_eq!(
+            specs.paths_base_dir.as_ref().map(|path| path.as_path()),
+            Some(expected_paths_base.as_path())
+        );
+        assert_eq!(
+            vue3_tsconfig_file_specs_match(
+                &specs.file_specs,
+                &dir.path().join("projects").join("src").join("Comp.vue"),
+                &expected_paths_base,
+                app_config.parent().expect("app config directory"),
+                &inspection_resolver,
+            ),
+            Some(false)
+        );
+
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir
+                    .path()
+                    .join("projects")
+                    .join("src")
+                    .join("Comp.vue")
+                    .to_string_lossy(),
+                "choice",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn inherited_file_specs_rebase_from_their_declaring_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{
+                "references":[
+                    {"path":"./fallback.json"},
+                    {"path":"./projects/app.json"}
+                ]
+            }"#,
+        );
+        write(
+            &dir.path().join("fallback.json"),
+            r#"{
+                "include":["config/src/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./fallback.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("projects").join("app.json"),
+            r#"{
+                "extends":"../config/base.json",
+                "compilerOptions":{"paths":{"choice":["../app.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("config").join("base.json"),
+            r#"{
+                "include":["src/**/*.vue"],
+                "exclude":["src/excluded/**/*.vue"]
+            }"#,
+        );
+        let app = dir.path().join("app.ts");
+        let fallback = dir.path().join("fallback.ts");
+        write(&app, "export interface Choice { app: string }");
+        write(
+            &fallback,
+            "export interface Choice { fallback: string }",
+        );
+
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir
+                    .path()
+                    .join("config")
+                    .join("src")
+                    .join("Included.vue")
+                    .to_string_lossy(),
+                "choice",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(app)
+        );
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir
+                    .path()
+                    .join("config")
+                    .join("src")
+                    .join("excluded")
+                    .join("Excluded.vue")
+                    .to_string_lossy(),
+                "choice",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(fallback)
+        );
+    }
+
+    #[test]
+    fn project_selection_cache_bounds_reference_fanout_across_distinct_sources() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let references = (0..100)
+            .map(|index| serde_json::json!({
+                "path": format!("./projects/{index}.json")
+            }))
+            .collect::<Vec<_>>();
+        write(
+            &dir.path().join("tsconfig.json"),
+            &serde_json::json!({
+                "references": references,
+                "compilerOptions": {
+                    "paths": { "alias/*": ["./types/*.ts"] }
+                }
+            })
+            .to_string(),
+        );
+        for index in 0..100 {
+            write(
+                &dir.path().join("projects").join(format!("{index}.json")),
+                r#"{"compilerOptions":{"composite":true}}"#,
+            );
+            write(
+                &dir.path().join("types").join(format!("type{index}.ts")),
+                &format!("export interface Type{index} {{ value: string }}"),
+            );
+        }
+        let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+        let measuring = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(&filename, "alias/type0", &measuring),
+            Some(dir.path().join("types").join("type0.ts"))
+        );
+        let measured = measuring.external_type_session.stats();
+        assert!(measured.tsconfig_materialization_entries > 100);
+
+        let limited = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_tsconfig_materialization_entries: measured
+                        .tsconfig_materialization_entries,
+                    max_tsconfig_materialization_weight: measured
+                        .tsconfig_materialization_weight,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        let mut first_stats = None;
+        for index in 0..100 {
+            assert_eq!(
+                resolve_vue3_tsconfig_type_import(
+                    &filename,
+                    &format!("alias/type{index}"),
+                    &limited,
+                ),
+                Some(dir.path().join("types").join(format!("type{index}.ts")))
+            );
+            if index == 0 {
+                first_stats = Some(limited.external_type_session.stats());
+            }
+        }
+        let first_stats = first_stats.expect("first selection stats");
+        let final_stats = limited.external_type_session.stats();
+        assert_eq!(
+            final_stats.tsconfig_materialization_entries,
+            first_stats.tsconfig_materialization_entries
+        );
+        assert_eq!(
+            final_stats.tsconfig_materialization_weight,
+            first_stats.tsconfig_materialization_weight
+        );
+        assert_eq!(
+            final_stats.tsconfig_discovery_entries,
+            first_stats.tsconfig_discovery_entries
+        );
+        assert_eq!(
+            final_stats.tsconfig_glob_match_steps,
+            first_stats.tsconfig_glob_match_steps
+        );
+        assert_eq!(
+            final_stats.metadata_parse_cache_hits,
+            first_stats.metadata_parse_cache_hits
+        );
+        assert!(!limited.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn project_selection_cache_isolates_importers_and_typescript_versions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{
+                "references":[
+                    {"path":"./a.json"},
+                    {"path":"./b.json"}
+                ]
+            }"#,
+        );
+        write(
+            &dir.path().join("a.json"),
+            r#"{
+                "include":["src/a/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./a.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("b.json"),
+            r#"{
+                "include":["src/b/**/*.vue"],
+                "compilerOptions":{"paths":{"choice":["./b.ts"]}}
+            }"#,
+        );
+        let a = dir.path().join("a.ts");
+        let b = dir.path().join("b.ts");
+        write(&a, "export interface Choice { a: string }");
+        write(&b, "export interface Choice { b: string }");
+        let resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir
+                    .path()
+                    .join("src")
+                    .join("a")
+                    .join("Comp.vue")
+                    .to_string_lossy(),
+                "choice",
+                &resolver,
+            ),
+            Some(a)
+        );
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(
+                &dir
+                    .path()
+                    .join("src")
+                    .join("b")
+                    .join("Comp.vue")
+                    .to_string_lossy(),
+                "choice",
+                &resolver,
+            ),
+            Some(b)
+        );
+
+        write(
+            &dir.path().join("tsconfig.json"),
+            r#"{
+                "references":[
+                    {"path":"./fallback.json"},
+                    {"path":"./templated.json"}
+                ]
+            }"#,
+        );
+        write(
+            &dir.path().join("fallback.json"),
+            r#"{
+                "include":["src/**/*.vue"],
+                "compilerOptions":{"paths":{"versioned":["./fallback.ts"]}}
+            }"#,
+        );
+        write(
+            &dir.path().join("templated.json"),
+            r#"{
+                "include":["${configDir}/src/**/*.vue"],
+                "compilerOptions":{"paths":{"versioned":["./templated.ts"]}}
+            }"#,
+        );
+        let fallback = dir.path().join("fallback.ts");
+        let templated = dir.path().join("templated.ts");
+        write(&fallback, "export interface Versioned { fallback: string }");
+        write(&templated, "export interface Versioned { modern: string }");
+        let session = Vue3ExternalTypeLoadSession::default();
+        let mut legacy = Vue3TypeResolverContext {
+            external_type_session: session.clone(),
+            ..Vue3TypeResolverContext::default()
+        };
+        legacy.typescript_version = (5, 4, 0).into();
+        let mut modern = legacy.clone();
+        modern.typescript_version = (5, 5, 0).into();
+        let filename = dir
+            .path()
+            .join("src")
+            .join("Versioned.vue")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(&filename, "versioned", &legacy),
+            Some(fallback)
+        );
+        assert_eq!(
+            resolve_vue3_tsconfig_type_import(&filename, "versioned", &modern),
+            Some(templated)
+        );
+    }
+
+    #[test]
+    fn project_selection_cache_keys_normalize_importers_and_isolate_generations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root_config = dir.path().join("tsconfig.json");
+        write(&root_config, r#"{"references":[{"path":"./child.json"}]}"#);
+        write(&dir.path().join("child.json"), "{}");
+        let resolver = Vue3TypeResolverContext::default();
+        let importer = dir.path().join("src").join("..").join("Comp.vue");
+        let normalized_importer = dir.path().join("Comp.vue");
+        let first = Vue3TsconfigProjectSelectionCacheKey::new(
+            &root_config,
+            &importer,
+            &resolver,
+        )
+        .expect("first selection key");
+        let normalized = Vue3TsconfigProjectSelectionCacheKey::new(
+            &root_config,
+            &normalized_importer,
+            &resolver,
+        )
+        .expect("normalized selection key");
+        assert_eq!(first, normalized);
+        let first_owner = match resolver
+            .external_type_session
+            .begin_tsconfig_project_selection_load(first.clone())
+        {
+            Vue3TsconfigProjectSelectionLoad::Start(owner) => owner,
+            _ => panic!("expected first selection owner"),
+        };
+        let first_path = dir.path().join("first.json");
+        first_owner
+            .complete(Some(first_path.clone()))
+            .expect("cache first generation");
+        {
+            let mut state = resolver.external_type_session.lock();
+            state.metadata_generation = state.metadata_generation.saturating_add(1);
+        }
+        let next = Vue3TsconfigProjectSelectionCacheKey::new(
+            &root_config,
+            &normalized_importer,
+            &resolver,
+        )
+        .expect("next generation selection key");
+        assert_ne!(first, next);
+        let next_owner = match resolver
+            .external_type_session
+            .begin_tsconfig_project_selection_load(next)
+        {
+            Vue3TsconfigProjectSelectionLoad::Start(owner) => owner,
+            _ => panic!("expected next generation selection owner"),
+        };
+        let next_path = dir.path().join("next.json");
+        assert_eq!(
+            next_owner
+                .complete(Some(next_path.clone()))
+                .expect("cache next generation")
+                .config_path,
+            Some(next_path)
+        );
+        let state = resolver.external_type_session.lock();
+        assert_eq!(state.tsconfig_project_selection_cache.len(), 2);
+        assert!(state
+            .tsconfig_project_selection_cache
+            .values()
+            .all(|entry| matches!(entry, Vue3TsconfigProjectSelectionCacheEntry::Ready(_))));
+    }
+
+    #[test]
+    fn project_selection_cache_shares_settings_bounds_without_failing_resolution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root_config = dir.path().join("tsconfig.json");
+        write(&root_config, "{}");
+        let resolver = Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_tsconfig_settings_cache_entries: 1,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+            ..Vue3TypeResolverContext::default()
+        };
+        vue3_load_tsconfig_module_resolution_settings(&root_config, &resolver)
+            .expect("retain the root settings entry");
+        let key = Vue3TsconfigProjectSelectionCacheKey::new(
+            &root_config,
+            &dir.path().join("Comp.vue"),
+            &resolver,
+        )
+        .expect("selection key");
+        let owner = match resolver
+            .external_type_session
+            .begin_tsconfig_project_selection_load(key)
+        {
+            Vue3TsconfigProjectSelectionLoad::Start(owner) => owner,
+            _ => panic!("expected selection owner"),
+        };
+        assert_eq!(
+            owner
+                .complete(Some(root_config.clone()))
+                .expect("unretained selection remains usable")
+                .config_path,
+            Some(root_config)
+        );
+        let state = resolver.external_type_session.lock();
+        assert_eq!(state.tsconfig_module_resolution_cache.len(), 1);
+        assert!(state.tsconfig_project_selection_cache.is_empty());
+        drop(state);
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+}
+
 pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
     filename: &str,
     source: &str,
@@ -1360,33 +2768,19 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let config_path = vue3_tsconfig_search_paths(filename, type_resolver).next()?;
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .to_path_buf();
-    let cache_key = Vue3TsconfigModuleResolutionCacheKey::new(
-        &config_path,
-        &config_dir,
+    let root_config = vue3_tsconfig_search_paths(filename, type_resolver).next()?;
+    let root_settings =
+        vue3_load_tsconfig_module_resolution_settings(&root_config, type_resolver)?;
+    let config_path = vue3_select_tsconfig_module_resolution_config(
+        &root_config,
+        &root_settings.references,
+        Path::new(filename),
         type_resolver,
     )?;
-    let settings = match type_resolver
-        .external_type_session
-        .begin_tsconfig_module_resolution_load(cache_key)
-    {
-        Vue3TsconfigModuleResolutionLoad::Ready(settings) => settings,
-        Vue3TsconfigModuleResolutionLoad::Wait(waiter) => waiter.wait()?,
-        Vue3TsconfigModuleResolutionLoad::Start(owner) => {
-            let mut traversal = Vue3TsconfigGraphTraversal::default();
-            owner.complete(vue3_tsconfig_module_resolution_from_config(
-                &config_path,
-                &config_dir,
-                &mut traversal,
-                0,
-                type_resolver,
-            ))?
-        }
-        Vue3TsconfigModuleResolutionLoad::Blocked => return None,
+    let settings = if config_path == root_config {
+        root_settings
+    } else {
+        vue3_load_tsconfig_module_resolution_settings(&config_path, type_resolver)?
     };
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
@@ -2151,6 +3545,13 @@ fn vue3_tsconfig_module_resolution_from_config(
         if !settings.apply_effective_paths_base(&type_resolver.typescript_version, type_resolver) {
             return Some(Vue3TsconfigModuleResolutionSettings::default());
         }
+        if depth == 0 {
+            settings.references =
+                vue3_tsconfig_reference_paths(&value, config_dir, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return Some(Vue3TsconfigModuleResolutionSettings::default());
+            }
+        }
         Some(settings)
     })()
     .unwrap_or_default();
@@ -2162,20 +3563,39 @@ pub(crate) fn vue3_tsconfig_type_resolver_options(
     filename: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue3TsconfigTypeResolverOptions> {
-    let config_path = vue3_tsconfig_search_paths(filename, type_resolver).next();
+    let root_config = vue3_tsconfig_search_paths(filename, type_resolver).next();
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let configured = if let Some(config_path) = config_path {
-        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-        let mut traversal = Vue3TsconfigGraphTraversal::default();
-        vue3_tsconfig_type_resolver_options_from_config(
-            &config_path,
-            config_dir,
-            &mut traversal,
+    let configured = if let Some(root_config) = root_config {
+        let root_config_dir = root_config.parent().unwrap_or_else(|| Path::new(""));
+        let mut root_traversal = Vue3TsconfigGraphTraversal::default();
+        let root_configured = vue3_tsconfig_type_resolver_options_from_config(
+            &root_config,
+            root_config_dir,
+            &mut root_traversal,
             0,
             type_resolver,
-        )?
+        )?;
+        let config_path = vue3_select_tsconfig_module_resolution_config(
+            &root_config,
+            &root_configured.references,
+            Path::new(filename),
+            type_resolver,
+        )?;
+        if config_path == root_config {
+            root_configured
+        } else {
+            let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+            let mut traversal = Vue3TsconfigGraphTraversal::default();
+            vue3_tsconfig_type_resolver_options_from_config(
+                &config_path,
+                config_dir,
+                &mut traversal,
+                0,
+                type_resolver,
+            )?
+        }
     } else {
         Vue3TsconfigInheritedResolverOptions::default()
     };
@@ -2374,6 +3794,13 @@ fn vue3_tsconfig_type_resolver_options_from_config(
                 target,
                 |value| vue3_tsconfig_direct_target_kind(value, type_resolver),
             )?);
+        }
+        if depth == 0 {
+            configured.references =
+                vue3_tsconfig_reference_paths(&value, config_dir, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
         }
         traversal
             .resolver_options
@@ -5877,7 +7304,10 @@ mod vue3_type_reference_directive_tests {
         let project = project_dir.join("Comp.vue");
         let configured_project = configured_project_dir.join("Comp.vue");
         let containing = containing_dir.join("ambient.d.ts");
-        let baseline = Vue3TypeResolverContext::default();
+        let baseline = Vue3TypeResolverContext {
+            typescript_version: (5, 0, 0).into(),
+            ..Default::default()
+        };
         let current = Vue3TypeResolverContext {
             typescript_version: (5, 1, 0).into(),
             ..Default::default()

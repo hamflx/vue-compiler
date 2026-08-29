@@ -830,6 +830,30 @@ impl<'a> ProcessExpressionIdentifierBindingCursor<'a> {
         )
     }
 
+    fn binding(self, start: usize, end: usize) -> bool {
+        process_expression_function_binding_spans(&self.index.locals).contains(&(
+            self.source_offset + start,
+            self.source_offset + end,
+        ))
+    }
+
+    fn constant_blocked(self, start: usize, end: usize) -> bool {
+        process_expression_function_constant_blocked_spans(&self.index.locals).contains(&(
+            self.source_offset + start,
+            self.source_offset + end,
+        ))
+    }
+
+    fn static_member(self, raw: &str, start: usize, end: usize) -> bool {
+        if self.parsed() {
+            return process_expression_function_static_member_spans(&self.index.locals).contains(&(
+                self.source_offset + start,
+                self.source_offset + end,
+            ));
+        }
+        process_expression_is_static_member(raw, start)
+    }
+
     fn non_reference(self, start: usize, end: usize) -> bool {
         process_expression_is_function_non_reference_key(
             &self.index.locals,
@@ -955,21 +979,22 @@ fn process_expression_identifier_spans_with_bindings(
             .unwrap_or(raw_ident);
         let prev = previous_non_ws(raw, start);
         let next = next_non_ws(raw, end);
-        if is_keyword(ident) {
-            continue;
-        }
-        if matches!(ident, "true" | "false" | "null" | "this") {
-            continue;
-        }
         let local = locals.iter().any(|local| local == ident);
         let property_key = next == Some(':') && prev != Some('?');
-        let static_member = process_expression_is_static_member(raw, start);
-        if bindings.non_reference(start, end) {
+        let static_member = bindings.static_member(raw, start, end);
+        if !static_member
+            && (is_keyword(ident) || matches!(ident, "true" | "false" | "null" | "this"))
+        {
+            continue;
+        }
+        if bindings.non_reference(start, end) && !static_member {
             continue;
         }
         let arrow_param = bindings.arrow_param(start, end);
         let arrow_local = bindings.arrow_local(ident, start, end);
-        let function_param = arrow_param || bindings.local(ident, start, end);
+        let function_local = bindings.local(ident, start, end);
+        let function_param = arrow_param || function_local;
+        let binding_identifier = arrow_param || bindings.binding(start, end);
         if property_key && !function_param {
             continue;
         }
@@ -1035,16 +1060,25 @@ fn process_expression_identifier_spans_with_bindings(
         } else {
             None
         };
-        let dynamic_static_reference = (static_member || is_global)
-            && process_expression_dynamic_static_reference(raw, start, end);
+        let local_reference = !static_member
+            && !binding_identifier
+            && (local || function_local || arrow_local);
+        let constant_candidate = binding_identifier
+            || !local_reference && (static_member || is_global);
+        let constant_blocked = if bindings.parsed() {
+            bindings.constant_blocked(start, end)
+        } else if static_member {
+            // Without an AST, keep the previous conservative member behavior.
+            true
+        } else {
+            is_global && process_expression_dynamic_static_reference(raw, start, end)
+        };
         spans.push(ProcessExpressionIdentifier {
             start: replacement_start,
             end: replacement_end,
             content,
             prefix,
-            is_constant: ((static_member || is_global) && !dynamic_static_reference)
-                || function_param
-                || arrow_local,
+            is_constant: constant_candidate && !constant_blocked,
         });
     }
     spans

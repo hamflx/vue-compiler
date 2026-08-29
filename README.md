@@ -15,12 +15,18 @@ This repository contains compiler crates, NAPI and WASM packages, a CLI, and off
 
 ```bash
 cargo fmt --all -- --check
+cargo xtask sync-official-tests --locked
+cargo xtask prepare-runtime-smoke
 cargo test --workspace
 cargo xtask verify-official-lock
 cargo xtask run-output-contract --all
 cargo xtask run-conformance --all
 cargo xtask bench --iterations 1
 ```
+
+The workspace tests include runtime smoke checks against the pinned official Vue
+packages. On a fresh checkout, run the sync and runtime preparation commands
+above before `cargo test --workspace`; `pnpm test` performs all three steps.
 
 Focused gates are useful while developing:
 

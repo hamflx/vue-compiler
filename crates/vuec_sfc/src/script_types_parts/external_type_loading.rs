@@ -297,6 +297,10 @@ struct Vue3ExternalTypeLoadState {
         Vue3TsconfigModuleResolutionCacheKey,
         Vue3TsconfigModuleResolutionCacheEntry,
     >,
+    tsconfig_project_selection_cache: BTreeMap<
+        Vue3TsconfigProjectSelectionCacheKey,
+        Vue3TsconfigProjectSelectionCacheEntry,
+    >,
     package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
     tsconfig_node_states: BTreeSet<Vue3TsconfigGraphStateKey>,
     ancestor_search_dirs: BTreeSet<PathBuf>,
@@ -332,6 +336,7 @@ impl Vue3ExternalTypeLoadState {
             metadata_path_identities: BTreeMap::new(),
             tsconfig_cache: BTreeMap::new(),
             tsconfig_module_resolution_cache: BTreeMap::new(),
+            tsconfig_project_selection_cache: BTreeMap::new(),
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
             ancestor_search_dirs: BTreeSet::new(),
@@ -372,6 +377,10 @@ impl std::fmt::Debug for Vue3ExternalTypeLoadSession {
                 &state.metadata_source_cache.len(),
             )
             .field("tsconfig_cache_entries", &state.tsconfig_cache.len())
+            .field(
+                "tsconfig_project_selection_cache_entries",
+                &state.tsconfig_project_selection_cache.len(),
+            )
             .field("package_json_cache_entries", &state.package_json_cache.len())
             .field("metadata_blocked", &state.metadata_blocked)
             .finish()

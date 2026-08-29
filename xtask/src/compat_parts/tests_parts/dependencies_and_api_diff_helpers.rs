@@ -1,4 +1,14 @@
     #[test]
+    fn npm_install_scopes_legacy_peer_resolution_to_vue3_runners() {
+        assert!(!NPM_INSTALL_ARGS.contains(&"--legacy-peer-deps"));
+        assert!(NPM_INSTALL_ARGS.contains(&"--include=optional"));
+        assert!(NPM_INSTALL_ARGS.contains(&"--package-lock=false"));
+        assert!(!runner_install_uses_legacy_peer_deps(VersionLine::Vue26));
+        assert!(!runner_install_uses_legacy_peer_deps(VersionLine::Vue27));
+        assert!(runner_install_uses_legacy_peer_deps(VersionLine::Vue3));
+    }
+
+    #[test]
     fn node_dependency_available_handles_scoped_packages_and_subpaths() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-node-dep-{}",

@@ -305,13 +305,13 @@ fn run_node(runtime: RuntimeJob) -> Result<RuntimeSmokeResult> {
 fn ensure_runtime_root(root: &Path) -> Result<()> {
     if !root.join("vue").exists() {
         bail!(
-            "missing Vue runtime dependencies at {}; run `cargo xtask sync-official-tests --locked` or any compat command that provisions npm fixtures",
+            "missing Vue runtime dependencies at {}; run `cargo xtask sync-official-tests --locked` followed by `cargo xtask prepare-runtime-smoke` before `cargo test --workspace`",
             root.display()
         );
     }
     if !root.join("jsdom").exists() {
         bail!(
-            "missing jsdom runtime dependency at {}; run `cargo xtask run-conformance --suite vue3-sfc` or another compat command that provisions runner dependencies",
+            "missing jsdom runtime dependency at {}; run `cargo xtask sync-official-tests --locked` followed by `cargo xtask prepare-runtime-smoke` before `cargo test --workspace`",
             root.display()
         );
     }
@@ -513,6 +513,17 @@ run()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_runtime_error_reports_full_preparation_sequence() {
+        let error = ensure_runtime_root(Path::new("__vuec_missing_runtime_fixture__"))
+            .expect_err("missing runtime root should fail")
+            .to_string();
+
+        assert!(error.contains("cargo xtask sync-official-tests --locked"));
+        assert!(error.contains("cargo xtask prepare-runtime-smoke"));
+        assert!(error.contains("cargo test --workspace"));
+    }
 
     #[test]
     fn vue2_generated_render_mounts_to_dom() {

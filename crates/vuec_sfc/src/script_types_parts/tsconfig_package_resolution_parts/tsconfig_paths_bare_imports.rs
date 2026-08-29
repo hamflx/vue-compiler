@@ -317,6 +317,73 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
     None
 }
 
+#[cfg(test)]
+mod tsconfig_modular_javascript_path_resolution_tests {
+    use super::*;
+
+    fn exact_mapping(base: &Path, targets: &[&str]) -> Vue3TsconfigPathMapping {
+        Vue3TsconfigPathMapping {
+            pattern: "alias".to_string(),
+            targets: targets.iter().map(|target| (*target).to_string()).collect(),
+            target_base_dir: base.to_path_buf(),
+            template_config_dir: base.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn modular_javascript_paths_targets_do_not_use_relative_fallbacks() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wrong_declaration = dir.path().join("wrong.d.ts");
+        let expected = dir.path().join("expected.ts");
+        std::fs::write(
+            &wrong_declaration,
+            "export interface Props { wrong: never }",
+        )
+        .expect("write plain declaration decoy");
+        std::fs::write(&expected, "export interface Props { expected: string }")
+            .expect("write later paths target");
+        let mapping = exact_mapping(dir.path(), &["./wrong.mjs", "./expected.ts"]);
+        let resolver = Vue3TypeResolverContext::default();
+
+        assert_eq!(
+            resolve_vue3_tsconfig_path_mappings(&[mapping], "alias", &resolver),
+            Some(expected)
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn modular_javascript_paths_targets_apply_module_suffixes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let preferred = dir.path().join("entry.native.mts");
+        let unsuffixed_decoy = dir.path().join("entry.mts");
+        std::fs::write(
+            &preferred,
+            "export interface Props { preferred: string }",
+        )
+        .expect("write module-suffixed target");
+        std::fs::write(
+            &unsuffixed_decoy,
+            "export interface Props { wrong: never }",
+        )
+        .expect("write unsuffixed decoy");
+        let mapping = exact_mapping(dir.path(), &["./entry.mjs"]);
+        let resolver = Vue3TypeResolverContext {
+            module_suffixes: std::sync::Arc::from([
+                ".native".to_string(),
+                String::new(),
+            ]),
+            ..Vue3TypeResolverContext::default()
+        };
+
+        assert_eq!(
+            resolve_vue3_tsconfig_path_mappings(&[mapping], "alias", &resolver),
+            Some(preferred)
+        );
+        assert!(!resolver.external_type_session.metadata_is_blocked());
+    }
+}
+
 pub(crate) fn resolve_vue3_tsconfig_base_url_with_mode(
     base_url: &Path,
     source: &str,
@@ -425,6 +492,20 @@ pub(crate) fn vue3_materialized_tsconfig_target_path(
         true,
         type_resolver,
     )
+}
+
+pub(crate) fn vue3_materialized_tsconfig_literal_target_path(
+    target_base_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if !type_resolver
+        .external_type_session
+        .claim_metadata_target_steps(target.len())
+    {
+        return None;
+    }
+    vue3_tsconfig_path_from_expanded_target(target_base_dir, target, true, type_resolver)
 }
 
 fn vue3_tsconfig_target_path_with_materialization(

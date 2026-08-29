@@ -4,7 +4,8 @@
   "license": "MIT OR Apache-2.0",
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "test": "cargo test --workspace",
+    "test:prepare": "cargo xtask sync-official-tests --locked && cargo xtask prepare-runtime-smoke",
+    "test": "pnpm run test:prepare && cargo test --workspace",
     "test:napi": "cargo xtask verify-napi",
     "test:napi-alias": "cargo xtask verify-napi-alias",
     "test:napi-api": "cargo xtask verify-napi-api",

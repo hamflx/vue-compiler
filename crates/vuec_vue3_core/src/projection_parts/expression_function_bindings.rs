@@ -13,11 +13,13 @@ struct ProcessExpressionNonReferenceRange {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessExpressionFunctionBindingIndex {
     bindings: BTreeSet<(usize, usize)>,
+    constant_blocked_spans: BTreeSet<(usize, usize)>,
     destructure_assignment_spans: BTreeSet<(usize, usize)>,
     // Ordinary spellings use their source slice; only decoded spellings allocate.
     decoded_identifier_names: BTreeMap<(usize, usize), String>,
     identifier_spans: BTreeSet<(usize, usize)>,
     object_shorthand_spans: BTreeSet<(usize, usize)>,
+    static_member_spans: BTreeSet<(usize, usize)>,
     non_reference_keys: BTreeSet<(usize, usize)>,
     non_reference_ranges: Vec<ProcessExpressionNonReferenceRange>,
     scopes: BTreeMap<String, Vec<ProcessExpressionFunctionScope>>,
@@ -32,6 +34,9 @@ struct ProcessExpressionFunctionBindingCollector<'source> {
     source_end: usize,
     lexical_scopes: Vec<(usize, usize)>,
     var_scopes: Vec<(usize, usize)>,
+    // Oxc materializes parentheses and ChainExpression wrappers that Babel does
+    // not expose to walkIdentifiers. `None` keeps those wrappers transparent.
+    babel_parent_frames: Vec<Option<bool>>,
     bindings: ProcessExpressionFunctionBindingIndex,
 }
 
@@ -49,6 +54,7 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
             source_end,
             lexical_scopes: vec![(0, source_end - source_start)],
             var_scopes: vec![(0, source_end - source_start)],
+            babel_parent_frames: Vec::new(),
             bindings: ProcessExpressionFunctionBindingIndex::default(),
         }
     }
@@ -87,6 +93,26 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
         };
         self.bindings.identifier_spans.insert((start, end));
         self.add_decoded_identifier_name((start, end), identifier, expected_name);
+    }
+
+    fn add_constant_blocked_span(&mut self, span: oxc_span::Span) {
+        if let Some(span) = self.relative_identifier_span(span) {
+            self.bindings.constant_blocked_spans.insert(span);
+        }
+    }
+
+    fn add_static_member_span(&mut self, span: oxc_span::Span) {
+        if let Some(span) = self.relative_identifier_span(span) {
+            self.bindings.static_member_spans.insert(span);
+        }
+    }
+
+    fn current_babel_parent_blocks_constant(&self) -> bool {
+        self.babel_parent_frames
+            .iter()
+            .rev()
+            .find_map(|frame| *frame)
+            .unwrap_or(false)
     }
 
     fn add_non_reference_identifier(&mut self, span: oxc_span::Span, expected_name: &str) {
@@ -522,8 +548,63 @@ impl<'source> ProcessExpressionFunctionBindingCollector<'source> {
     }
 }
 
+fn process_expression_base_contains_optional_chain(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::CallExpression(call) => {
+            call.optional || process_expression_base_contains_optional_chain(&call.callee)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            member.optional || process_expression_base_contains_optional_chain(&member.object)
+        }
+        Expression::StaticMemberExpression(member) => {
+            member.optional || process_expression_base_contains_optional_chain(&member.object)
+        }
+        Expression::PrivateFieldExpression(member) => {
+            member.optional || process_expression_base_contains_optional_chain(&member.object)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            process_expression_base_contains_optional_chain(&expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            process_expression_base_contains_optional_chain(&expression.expression)
+        }
+        // A nested ChainExpression is introduced when parentheses terminate an
+        // optional chain, e.g. `(foo?.bar).baz`; Babel treats the outer member
+        // as an ordinary MemberExpression.
+        _ => false,
+    }
+}
+
+fn process_expression_babel_parent_frame(kind: oxc_ast::AstKind<'_>) -> Option<bool> {
+    match kind {
+        // Babel's parser keeps parentheses in `extra` and represents optional
+        // chains directly as Optional*Expression nodes.
+        oxc_ast::AstKind::ParenthesizedExpression(_)
+        | oxc_ast::AstKind::ChainExpression(_) => None,
+        oxc_ast::AstKind::CallExpression(call) => Some(
+            !(call.optional || process_expression_base_contains_optional_chain(&call.callee)),
+        ),
+        oxc_ast::AstKind::NewExpression(_) => Some(true),
+        oxc_ast::AstKind::ComputedMemberExpression(member) => Some(
+            !(member.optional
+                || process_expression_base_contains_optional_chain(&member.object)),
+        ),
+        oxc_ast::AstKind::StaticMemberExpression(member) => Some(
+            !(member.optional
+                || process_expression_base_contains_optional_chain(&member.object)),
+        ),
+        oxc_ast::AstKind::PrivateFieldExpression(member) => Some(
+            !(member.optional
+                || process_expression_base_contains_optional_chain(&member.object)),
+        ),
+        _ => Some(false),
+    }
+}
+
 impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollector<'_> {
     fn enter_node(&mut self, kind: oxc_ast::AstKind<'ast>) {
+        self.babel_parent_frames
+            .push(process_expression_babel_parent_frame(kind));
         match kind {
             oxc_ast::AstKind::Function(function) => self.enter_function(function),
             oxc_ast::AstKind::ArrowFunctionExpression(function) => {
@@ -663,6 +744,7 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
     }
 
     fn leave_node(&mut self, kind: oxc_ast::AstKind<'ast>) {
+        self.babel_parent_frames.pop();
         if let oxc_ast::AstKind::FunctionBody(body) = kind {
             if self.relative_span(body.span).is_some() {
                 if self.var_scopes.len() > 1 {
@@ -734,8 +816,25 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
         &mut self,
         identifier: &oxc_ast::ast::IdentifierReference<'ast>,
     ) {
+        if self.current_babel_parent_blocks_constant() {
+            self.add_constant_blocked_span(identifier.span);
+        }
         self.add_identifier_span(identifier.span, identifier.name.as_str());
         oxc_ast_visit::walk::walk_identifier_reference(self, identifier);
+    }
+
+    fn visit_static_member_expression(
+        &mut self,
+        expression: &oxc_ast::ast::StaticMemberExpression<'ast>,
+    ) {
+        self.add_static_member_span(expression.property.span);
+        if !(expression.optional
+            || process_expression_base_contains_optional_chain(&expression.object))
+        {
+            self.add_constant_blocked_span(expression.property.span);
+        }
+        self.add_identifier_span(expression.property.span, expression.property.name.as_str());
+        oxc_ast_visit::walk::walk_static_member_expression(self, expression);
     }
 
     fn visit_identifier_name(&mut self, identifier: &oxc_ast::ast::IdentifierName<'ast>) {
@@ -793,13 +892,56 @@ impl<'ast> oxc_ast_visit::Visit<'ast> for ProcessExpressionFunctionBindingCollec
 
 pub(crate) const PROCESS_EXPRESSION_MAX_PIPELINE_TOPIC_RECOVERIES: usize = 64;
 pub(crate) const PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES: usize = 4 * 1024;
+const PROCESS_EXPRESSION_MAX_SAFE_AST_WORK_UNITS: usize = 512;
 pub(crate) const PROCESS_EXPRESSION_AST_LIMIT_MESSAGE: &str =
     "Error parsing JavaScript expression: expression exceeds the safe AST analysis limit.";
 // Oxc's visitor is recursive for left-deep expressions. Inputs that require
 // exact AST roles fail closed above this bound; other inputs retain the lexer.
 
 pub(crate) fn process_expression_ast_visit_allowed(raw: &str) -> bool {
-    raw.len() <= PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES
+    if raw.len() > PROCESS_EXPRESSION_MAX_SAFE_AST_BYTES {
+        return false;
+    }
+    let mut work_units = 0usize;
+    let mut in_word = false;
+    for byte in raw.bytes() {
+        let word = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'$' | b'\\')
+            || !byte.is_ascii();
+        if word && !in_word {
+            work_units = work_units.saturating_add(1);
+        }
+        in_word = word;
+        if matches!(
+            byte,
+            b'(' | b')'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'.'
+                | b'?'
+                | b'+'
+                | b'-'
+                | b'*'
+                | b'/'
+                | b'%'
+                | b'<'
+                | b'>'
+                | b'='
+                | b'&'
+                | b'|'
+                | b'^'
+                | b'!'
+                | b'~'
+        ) {
+            work_units = work_units.saturating_add(1);
+        }
+        if work_units > PROCESS_EXPRESSION_MAX_SAFE_AST_WORK_UNITS {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn process_expression_requires_jsx_ast(
@@ -904,7 +1046,7 @@ pub(crate) fn process_expression_ast_required_unavailable(
 }
 
 enum ProcessExpressionFunctionBindingParse {
-    Parsed(ProcessExpressionFunctionBindingIndex),
+    Parsed(Box<ProcessExpressionFunctionBindingIndex>),
     Failed { error_offset: Option<usize> },
 }
 
@@ -924,9 +1066,14 @@ pub(crate) fn process_expression_identifier_bindings(
         || raw.as_bytes().contains(&b'/')
         || !raw.is_ascii()
         || process_expression_may_have_destructure_assignment(raw);
-    let collect_identifiers = needs_lexical_disambiguation
-        && process_expression_ast_visit_allowed(raw);
-    if collect_identifiers {
+    let needs_babel_parent = raw
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'(' | b'.' | b'[' | b'?'))
+        || source_contains_identifier(raw, "new");
+    if (needs_lexical_disambiguation || needs_babel_parent)
+        && process_expression_ast_visit_allowed(raw)
+    {
         process_expression_function_bindings_with_mode(raw, source_type, true)
     } else {
         process_expression_function_bindings(raw, source_type)
@@ -966,7 +1113,7 @@ fn process_expression_function_bindings_with_mode(
     if let ProcessExpressionFunctionBindingParse::Parsed(bindings) =
         process_expression_parse_function_bindings(raw, raw, source_type)
     {
-        return bindings;
+        return *bindings;
     }
     if raw.contains("|>") {
         let normalized = raw.replace("|>", ", ");
@@ -1009,7 +1156,7 @@ fn process_expression_parse_function_bindings(
                 original_source.len(),
             );
             oxc_ast_visit::Visit::visit_expression(&mut collector, &expression);
-            return ProcessExpressionFunctionBindingParse::Parsed(collector.finish());
+            return ProcessExpressionFunctionBindingParse::Parsed(Box::new(collector.finish()));
         }
     }
 
@@ -1032,7 +1179,7 @@ fn process_expression_parse_function_bindings(
         source_end,
     );
     oxc_ast_visit::Visit::visit_program(&mut collector, &parsed.program);
-    ProcessExpressionFunctionBindingParse::Parsed(collector.finish())
+    ProcessExpressionFunctionBindingParse::Parsed(Box::new(collector.finish()))
 }
 
 fn process_expression_recover_pipeline_function_bindings(
@@ -1049,7 +1196,7 @@ fn process_expression_recover_pipeline_function_bindings(
             original_source,
             source_type,
         ) {
-            ProcessExpressionFunctionBindingParse::Parsed(bindings) => return Some(bindings),
+            ProcessExpressionFunctionBindingParse::Parsed(bindings) => return Some(*bindings),
             ProcessExpressionFunctionBindingParse::Failed { error_offset } => error_offset?,
         };
         if recovered == max_topic_recoveries {
@@ -1212,6 +1359,12 @@ pub(crate) fn process_expression_function_identifier_spans(
     &bindings.identifier_spans
 }
 
+pub(crate) fn process_expression_function_constant_blocked_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.constant_blocked_spans
+}
+
 pub(crate) fn process_expression_function_binding_spans(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> &BTreeSet<(usize, usize)> {
@@ -1222,6 +1375,12 @@ pub(crate) fn process_expression_function_object_shorthand_spans(
     bindings: &ProcessExpressionFunctionBindingIndex,
 ) -> &BTreeSet<(usize, usize)> {
     &bindings.object_shorthand_spans
+}
+
+pub(crate) fn process_expression_function_static_member_spans(
+    bindings: &ProcessExpressionFunctionBindingIndex,
+) -> &BTreeSet<(usize, usize)> {
+    &bindings.static_member_spans
 }
 
 pub(crate) fn process_expression_function_destructure_assignment_spans(

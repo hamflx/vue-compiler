@@ -2,6 +2,61 @@
     use std::collections::BTreeSet;
     use vuec_bridge_registry::bridge_commands;
 
+    #[test]
+    fn process_expression_left_deep_parent_sensitive_input_stays_bounded() {
+        const CHILD_ENV: &str = "VUEC_PROCESS_EXPRESSION_LEFT_DEEP_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let chain = vec!["a"; 2_000].join("+");
+            let content = format!("foo({chain})");
+            assert!(content.len() < 4 * 1024);
+            let projection = dispatch(
+                "vue3.core.processExpression",
+                json!({
+                    "node": {
+                        "type": 4,
+                        "content": content,
+                        "isStatic": false,
+                        "loc": {
+                            "start": { "offset": 0, "line": 1, "column": 1 },
+                            "end": {
+                                "offset": content.len(),
+                                "line": 1,
+                                "column": content.len() + 1
+                            },
+                            "source": content
+                        }
+                    },
+                    "context": {
+                        "prefixIdentifiers": true,
+                        "identifiers": {},
+                        "bindingMetadata": {}
+                    }
+                }),
+            )
+            .expect("process bounded left-deep expression");
+            assert_ne!(projection["kind"], json!("error"));
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("locate bridge test executable"),
+        )
+        .args([
+            "--exact",
+            "tests::process_expression_left_deep_parent_sensitive_input_stays_bounded",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn bounded expression child process");
+        assert!(
+            output.status.success(),
+            "left-deep expression child failed with {}:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn first_projected_prop(source_text: &str) -> Value {
         let source = TemplateSource {
             filename: "foo.vue".into(),

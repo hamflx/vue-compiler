@@ -5,6 +5,8 @@ Use this checklist before publishing a release candidate.
 ## Preflight
 
 - [ ] `cargo fmt --all -- --check`
+- [ ] `cargo xtask sync-official-tests --locked`
+- [ ] `cargo xtask prepare-runtime-smoke`
 - [ ] `cargo test --workspace`
 - [ ] `cargo xtask verify-official-lock`
 - [ ] `cargo xtask verify-release-docs`
