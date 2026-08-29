@@ -7,14 +7,18 @@ fn vue3_package_manifest_with_exact_len(len: usize) -> String {
     )
 }
 
-fn write_vue3_test_type_package(package_dir: &Path, manifest: &str) {
-    std::fs::create_dir_all(package_dir).expect("create type package");
-    std::fs::write(package_dir.join("package.json"), manifest).expect("write package manifest");
+fn try_write_vue3_test_type_package(package_dir: &Path, manifest: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(package_dir)?;
+    std::fs::write(package_dir.join("package.json"), manifest)?;
     std::fs::write(
         package_dir.join("index.d.ts"),
         "export interface Props { value: string }",
-    )
-    .expect("write package types");
+    )?;
+    Ok(())
+}
+
+fn write_vue3_test_type_package(package_dir: &Path, manifest: &str) {
+    try_write_vue3_test_type_package(package_dir, manifest).expect("write test type package");
 }
 
 struct Vue3PackageTargetFixture {
@@ -3059,8 +3063,18 @@ fn vue3_package_metadata_bounds_aliases_and_preserves_non_utf8_identities() {
     let second = dir
         .path()
         .join(std::ffi::OsString::from_vec(b"non-utf8-\xfe".to_vec()));
-    write_vue3_test_type_package(&first, r#"{"types":"index.d.ts"}"#);
-    write_vue3_test_type_package(&second, r#"{"types":"index.d.ts"}"#);
+    if vue3_test_non_utf8_path_operation_is_unsupported(
+        "writing first non-UTF-8 package",
+        try_write_vue3_test_type_package(&first, r#"{"types":"index.d.ts"}"#),
+    ) {
+        return;
+    }
+    if vue3_test_non_utf8_path_operation_is_unsupported(
+        "writing second non-UTF-8 package",
+        try_write_vue3_test_type_package(&second, r#"{"types":"index.d.ts"}"#),
+    ) {
+        return;
+    }
     let identity_resolver = Vue3TypeResolverContext::default();
     assert!(matches!(
         resolve_vue3_package_json_type_entry(&first, None, &identity_resolver),
